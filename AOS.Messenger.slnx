@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AOS.Messenger.Application/AOS.Messenger.Application.csproj" />
+    <Project Path="src/AOS.Messenger.Domain/AOS.Messenger.Domain.csproj" />
+    <Project Path="src/AOS.Messenger.Infrastructure/AOS.Messenger.Infrastructure.csproj" />
+    <Project Path="src/AOS.Messenger.Web/AOS.Messenger.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AOS.Messenger.Tests/AOS.Messenger.Tests.csproj" />
+  </Folder>
+</Solution>

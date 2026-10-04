@@ -1,0 +1,30 @@
+## Build artifacts
+bin/
+obj/
+
+## VS / Rider
+.vs/
+.idea/
+*.user
+*.suo
+*.DotSettings.user
+
+## User secrets / local config overrides
+**/appsettings.Local.json
+**/appsettings.*.local.json
+
+## Entity Framework migrations bundle
+efbundle*
+
+## NuGet
+*.nupkg
+.nuget/
+
+## OS
+.DS_Store
+Thumbs.db
+
+## Test results
+TestResults/
+*.trx
+*.coverage

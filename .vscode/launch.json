@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "AOS.Messenger.Web",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build",
+      "program": "${workspaceFolder}/src/AOS.Messenger.Web/bin/Debug/net10.0/AOS.Messenger.Web.dll",
+      "args": [],
+      "cwd": "${workspaceFolder}/src/AOS.Messenger.Web",
+      "stopAtEntry": false,
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "\\bNow listening on:\\s+(https?://\\S+)"
+      },
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "sourceFileMap": {
+        "/Views": "${workspaceFolder}/src/AOS.Messenger.Web/Views"
+      }
+    },
+    {
+      "name": "AOS.Messenger.Web (Hot Reload)",
+      "type": "coreclr",
+      "request": "launch",
+      "program": "dotnet",
+      "args": [
+        "watch",
+        "run",
+        "--project",
+        "${workspaceFolder}/src/AOS.Messenger.Web"
+      ],
+      "cwd": "${workspaceFolder}/src/AOS.Messenger.Web",
+      "env": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  ]
+}

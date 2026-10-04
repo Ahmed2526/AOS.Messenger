@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Grants access to ASP.NET Core types (Identity, IServiceCollection, etc.)
+       without making this project an executable web project. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="*" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AOS.Messenger.Application\AOS.Messenger.Application.csproj" />
+    <ProjectReference Include="..\AOS.Messenger.Domain\AOS.Messenger.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -53,6 +53,10 @@ qa-verification-results.json
 ## Stitch design prototypes & local metadata
 stitch-screens/
 
+## Local AI agent rules & skills
+AGENTS.md
+.agents/
+
 ## Local databases, logs, certificates & diagnostics
 *.mdf
 *.ldf

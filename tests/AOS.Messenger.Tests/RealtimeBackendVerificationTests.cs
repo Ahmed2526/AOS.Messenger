@@ -685,7 +685,9 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
     public void EntireRepository_ContainsZeroRegionDirectives_InAnyCSharpFile()
     {
         var currentDir = Directory.GetCurrentDirectory();
-        while (currentDir != null && !File.Exists(Path.Combine(currentDir, "AGENTS.md")))
+        while (currentDir != null &&
+               !File.Exists(Path.Combine(currentDir, "AOS.Messenger.slnx")) &&
+               !File.Exists(Path.Combine(currentDir, "AOS.Messenger.sln")))
         {
             currentDir = Directory.GetParent(currentDir)?.FullName;
         }

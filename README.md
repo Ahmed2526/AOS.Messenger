@@ -127,7 +127,6 @@ For production, supply the connection string via environment variables or user s
 
 ```
 AOS.Messenger/
-├── AGENTS.md                         # Authoritative architectural rules & phase progress (read before contributing)
 ├── README.md                         # This file
 ├── AOS.Messenger.slnx                # Solution file
 ├── scripts/                          # Tailwind v4 standalone CLI compilation scripts
@@ -168,8 +167,6 @@ AOS.Messenger/
 ---
 
 ## Development Roadmap & Status
-
-Architectural invariants, phase definitions, and implementation requirements are maintained authoritatively in **[AGENTS.md](./AGENTS.md)**.
 
 - **Current Status:** Phase 8 ✅ Complete (Message operations: edit, delete for me, delete for everyone, reply, reactions)
 - **Next Up:** Phase 9 🔜 Next (Media messages and Cloudflare R2 integration)

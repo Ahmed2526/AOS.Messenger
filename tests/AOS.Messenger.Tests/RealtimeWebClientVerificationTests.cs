@@ -16,14 +16,14 @@ public sealed class RealtimeWebClientVerificationTests
         while (current != null &&
                !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.sln")) &&
                !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.slnx")) &&
-               !File.Exists(Path.Combine(current.FullName, "AGENTS.md")))
+               !Directory.Exists(Path.Combine(current.FullName, "src", "AOS.Messenger.Web")))
         {
             current = current.Parent;
         }
 
         if (current == null)
         {
-            throw new InvalidOperationException("Could not find repository root containing AGENTS.md or solution file.");
+            throw new InvalidOperationException("Could not find repository root containing AOS.Messenger.slnx or src/AOS.Messenger.Web.");
         }
 
         return current.FullName;

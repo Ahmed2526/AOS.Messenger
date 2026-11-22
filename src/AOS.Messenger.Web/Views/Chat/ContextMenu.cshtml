@@ -1,0 +1,67 @@
+@{
+    ViewData["Title"] = "Conversation Options - A♡S Messenger";
+}
+
+<!-- RIGHT PANE: Conversation Context Menu Preview & Details -->
+<div class="flex-1 h-full min-h-full w-full flex flex-col items-center justify-center bg-[#F8F6F3] dark:bg-[#302F2C] min-w-0 overflow-hidden relative select-none p-8">
+    <div class="relative z-10 flex flex-col items-center text-center max-w-sm px-6">
+        <div class="w-16 h-16 rounded-2xl bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center mb-4 shadow-sm text-[#B3929D]">
+            <span class="material-symbols-outlined text-[32px]">more_vert</span>
+        </div>
+        <h2 class="text-xl font-bold text-[#2B2725] dark:text-[#F0E9E2] tracking-tight mb-2">
+            Conversation Options
+        </h2>
+        <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9] leading-relaxed mb-6">
+            Options to pin, mute, archive, or manage conversation actions.
+        </p>
+
+        <!-- Context Menu Component Showcase -->
+        <div class="w-[220px] bg-[#FFFFFF] dark:bg-[#45423E] rounded-xl border border-[#E4D8D1] dark:border-[#5B5752] shadow-lg py-1.5 text-xs text-[#2B2725] dark:text-[#EEE7DF] text-left">
+            <!-- 1. Open chat -->
+            <a asp-controller="Chat" asp-action="Conversation" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#F0E9DF] dark:hover:bg-[#514D49] text-[#2B2725] dark:text-[#EEE7DF] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#A07860] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                </svg>
+                <span>Open chat</span>
+            </a>
+            <!-- 2. Mark as unread -->
+            <button type="button" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#F0E9DF] dark:hover:bg-[#514D49] text-[#2B2725] dark:text-[#EEE7DF] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#A07860] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                </svg>
+                <span>Mark as unread</span>
+            </button>
+            <!-- 3. Pin conversation -->
+            <button type="button" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#F0E9DF] dark:hover:bg-[#514D49] text-[#2B2725] dark:text-[#EEE7DF] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#D8C080] flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M5 4a2 2 0 012-2h6a2 2 0 012 2v14l-5-2.5L5 18V4z"></path>
+                </svg>
+                <span>Pin conversation</span>
+            </button>
+            <!-- 4. Mute notifications -->
+            <button type="button" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#F0E9DF] dark:hover:bg-[#514D49] text-[#2B2725] dark:text-[#EEE7DF] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#6E6560] dark:text-[#C8C0BA] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M5.586 15H4a1 1 0 01-1-1v-4a1 1 0 011-1h1.586l4.707-4.707C10.923 3.663 12 4.109 12 5v14c0 .891-1.077 1.337-1.707.707L5.586 15z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                    <path d="M17 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                </svg>
+                <span>Mute notifications</span>
+            </button>
+            <!-- 5. Archive -->
+            <a asp-controller="Chat" asp-action="Archived" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#F0E9DF] dark:hover:bg-[#514D49] text-[#2B2725] dark:text-[#EEE7DF] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#6E6560] dark:text-[#C8C0BA] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                </svg>
+                <span>Archive</span>
+            </a>
+            <!-- 6. Divider -->
+            <div class="my-1 border-t border-[#E4D8D1] dark:border-[#5B5752]"></div>
+            <!-- 7. Delete conversation -->
+            <a asp-controller="Chat" asp-action="DeleteModal" class="w-full px-3 py-1.5 flex items-center gap-2.5 hover:bg-[#C7624F]/15 text-[#C7624F] transition-colors rounded-md font-medium">
+                <svg class="w-4 h-4 text-[#C7624F] flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path>
+                </svg>
+                <span>Delete conversation</span>
+            </a>
+        </div>
+    </div>
+</div>

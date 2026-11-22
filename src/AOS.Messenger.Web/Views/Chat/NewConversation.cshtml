@@ -1,0 +1,132 @@
+@{
+    ViewData["Title"] = "New Conversation";
+}
+
+<!-- Active Conversation Area & Modal Overlay -->
+<div class="flex-1 h-full min-h-full w-full flex flex-col bg-[#F8F6F3] dark:bg-[#302F2C] min-w-0 overflow-hidden relative select-none">
+    <div class="flex flex-col w-full h-full relative">
+        <!-- Workspace Background View (Clean blurred backdrop beneath modal) -->
+        <div class="flex-1 flex flex-col items-center justify-center h-full bg-[#F8F6F3] dark:bg-[#302F2C] select-none overflow-hidden filter blur-[3px] opacity-40">
+            <div class="w-16 h-16 rounded-2xl bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center mb-3 shadow-xs">
+                <svg width="40" height="30" viewBox="0 0 70 50" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 40L22 10L32 40M15 31H29" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M35 24C35 22 36.5 19 39 19C41.5 19 43 21 43 23C43 27 35 32 35 32C35 32 27 27 27 23C27 21 28.5 19 31 19C33.5 19 35 22 35 24Z" fill="#B3929D" stroke="#B3929D" stroke-width="1.5"></path>
+                    <path d="M42 38C46 41 54 41 56 36C58 31 46 29 48 20C50 13 58 13 62 17" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+            </div>
+            <h3 class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">A♡S Messenger</h3>
+        </div>
+
+        <!-- Warm Editorial Translucent Backdrop Overlay -->
+        <div class="absolute inset-0 bg-on-surface/20 backdrop-blur-sm z-30 flex items-center justify-center p-gutter">
+            <div id="antiforgery-token-container" class="hidden">
+                @Html.AntiForgeryToken()
+            </div>
+            <!-- Modal Card Container -->
+            <div class="w-full max-w-[580px] bg-surface rounded-2xl shadow-xl flex flex-col overflow-hidden relative transition-all duration-300 transform scale-100 animate-in fade-in zoom-in-95 border border-[#E3DCD7] dark:border-[#5B5752]">
+                <!-- Modal Top Navigation & Header -->
+                <div class="p-space-lg pb-space-sm bg-surface flex flex-col">
+                    <div class="flex items-start justify-between">
+                        <div class="space-y-space-xs">
+                            <h2 class="font-headline-lg text-headline-lg text-on-surface tracking-tight">New conversation</h2>
+                            <p class="font-body-sm text-body-sm text-on-surface-variant">Search for someone by username or email to start a conversation</p>
+                        </div>
+                        <!-- Dismiss Modal Action -->
+                        <a asp-controller="Chat" asp-action="Index" class="w-9 h-9 rounded-xl bg-surface-container-high hover:bg-surface-container-highest text-on-surface-variant hover:text-on-surface flex items-center justify-center transition-colors focus:outline-none" id="modal-close-btn" title="Close dialog">
+                            <span class="material-symbols-outlined text-[20px]">close</span>
+                        </a>
+                    </div>
+                    <!-- Search Input Bar -->
+                    <div class="mt-space-md relative flex items-center">
+                        <span class="absolute left-3.5 material-symbols-outlined text-[20px] text-outline pointer-events-none">search</span>
+                        <input class="w-full pl-11 pr-10 py-3 rounded-xl bg-surface-container-lowest text-on-surface placeholder:text-outline font-body-md text-body-md shadow-xs focus:outline-none focus:ring-2 focus:ring-primary-container transition-all" id="user-search-input" placeholder="Search by username or email" aria-label="Search by username or email" type="text" value="" autocomplete="off" />
+                        <button type="button" class="absolute right-3 w-6 h-6 rounded-full bg-surface-container-highest hover:bg-surface-dim text-on-surface-variant flex items-center justify-center transition-colors cursor-pointer" id="clear-search-btn" title="Clear field">
+                            <span class="material-symbols-outlined text-[15px]">close</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- State 1: Active Search Results View -->
+                <div class="hidden flex-col flex-1 px-space-lg pb-space-lg overflow-y-auto max-h-[380px] space-y-space-sm custom-scroll" id="state-results" data-search-state="results">
+                    <div class="pt-space-xs flex items-center justify-between font-label-sm text-label-sm text-outline">
+                        <span>Matches</span>
+                    </div>
+                </div>
+
+                <!-- State 2: Empty Initial State (Default on open) -->
+                <div class="flex flex-col items-center justify-center p-space-xl text-center space-y-space-md min-h-[320px]" id="state-empty" data-search-state="empty">
+                    <div class="w-16 h-16 rounded-2xl bg-surface-container-highest text-secondary flex items-center justify-center shadow-xs">
+                        <span class="material-symbols-outlined text-[32px]">person_search</span>
+                    </div>
+                    <div class="max-w-[340px] space-y-space-xs">
+                        <h3 class="font-headline-sm text-headline-sm text-on-surface">Find someone</h3>
+                        <p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">Search by username (<span class="font-medium text-secondary">@@handle</span>) or email address to start messaging.</p>
+                    </div>
+                </div>
+
+                <!-- State 3: Searching / Loading State (Hidden by default) -->
+                <div class="hidden flex-col p-space-lg space-y-space-md min-h-[320px]" id="state-loading" data-search-state="loading">
+                    <div class="flex items-center justify-between font-label-sm text-label-sm text-outline">
+                        <div class="flex items-center gap-2">
+                            <span class="w-2.5 h-2.5 rounded-full bg-primary animate-ping"></span>
+                            <span>Searching directory...</span>
+                        </div>
+                    </div>
+                    <!-- Skeleton Card 1 -->
+                    <div class="p-space-md rounded-xl bg-surface-container-lowest animate-pulse flex items-center justify-between">
+                        <div class="flex items-center gap-space-md">
+                            <div class="w-12 h-12 rounded-full bg-surface-container-high"></div>
+                            <div class="space-y-2">
+                                <div class="w-32 h-3.5 bg-surface-container-high rounded"></div>
+                                <div class="w-20 h-2.5 bg-surface-container-highest rounded"></div>
+                            </div>
+                        </div>
+                        <div class="w-24 h-8 bg-surface-container-high rounded-xl"></div>
+                    </div>
+                    <!-- Skeleton Card 2 -->
+                    <div class="p-space-md rounded-xl bg-surface-container-lowest animate-pulse flex items-center justify-between">
+                        <div class="flex items-center gap-space-md">
+                            <div class="w-12 h-12 rounded-full bg-surface-container-high"></div>
+                            <div class="space-y-2">
+                                <div class="w-40 h-3.5 bg-surface-container-high rounded"></div>
+                                <div class="w-28 h-2.5 bg-surface-container-highest rounded"></div>
+                            </div>
+                        </div>
+                        <div class="w-24 h-8 bg-surface-container-high rounded-xl"></div>
+                    </div>
+                    <!-- Skeleton Card 3 -->
+                    <div class="p-space-md rounded-xl bg-surface-container-lowest animate-pulse flex items-center justify-between">
+                        <div class="flex items-center gap-space-md">
+                            <div class="w-12 h-12 rounded-full bg-surface-container-high"></div>
+                            <div class="space-y-2">
+                                <div class="w-28 h-3.5 bg-surface-container-high rounded"></div>
+                                <div class="w-24 h-2.5 bg-surface-container-highest rounded"></div>
+                            </div>
+                        </div>
+                        <div class="w-24 h-8 bg-surface-container-high rounded-xl"></div>
+                    </div>
+                </div>
+
+                <!-- State 4: No Results View (Hidden by default) -->
+                <div class="hidden flex-col items-center justify-center p-space-xl text-center space-y-space-md min-h-[320px]" id="state-no-results" data-search-state="no-results">
+                    <div class="w-16 h-16 rounded-2xl bg-error-container text-on-error-container flex items-center justify-center shadow-xs">
+                        <span class="material-symbols-outlined text-[32px]">person_off</span>
+                    </div>
+                    <div class="max-w-[340px] space-y-space-xs">
+                        <h3 class="font-headline-sm text-headline-sm text-on-surface">No users found for "<span class="font-semibold text-secondary" id="query-term" data-no-results-query></span>"</h3>
+                        <p class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">Double-check the spelling of the username or email address.</p>
+                    </div>
+                    <div class="flex items-center gap-space-sm pt-space-xs">
+                        <button type="button" id="clear-query-btn" class="px-space-md py-2 rounded-xl bg-surface-container-highest hover:bg-surface-dim text-on-surface font-label-md text-label-md transition-colors cursor-pointer">
+                            Clear query
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script type="module" src="~/js/new-conversation-page.js" asp-append-version="true"></script>
+}

@@ -1,0 +1,52 @@
+@model AOS.Messenger.Web.Controllers.ConfirmEmailViewModel
+@{
+    ViewData["Title"] = "Email Confirmation";
+    var confirmed = ViewData["Confirmed"] as bool?;
+}
+
+<div class="w-full flex-1 min-h-[calc(100vh-140px)] flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full text-center space-y-6 bg-surface-lowest dark:bg-[#1E1F23] p-8 rounded-2xl border border-outline-variant/30 shadow-xl">
+        @if (confirmed == true)
+        {
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-emerald-100 text-emerald-600 mb-2">
+                <span class="material-symbols-outlined text-3xl">check_circle</span>
+            </div>
+            <h2 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Email Confirmed!</h2>
+            <p class="text-sm text-secondary dark:text-gray-400">Thank you for verifying your email address.</p>
+            <div class="pt-4">
+                <a asp-action="Login" class="py-2.5 px-6 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 transition-all inline-block shadow-md">
+                    Proceed to Login
+                </a>
+            </div>
+        }
+        else if (confirmed == false)
+        {
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-red-100 text-red-600 mb-2">
+                <span class="material-symbols-outlined text-3xl">error</span>
+            </div>
+            <h2 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Verification Failed</h2>
+            <p class="text-sm text-secondary dark:text-gray-400">The email verification token was invalid or has expired.</p>
+            <div class="pt-4">
+                <a asp-action="Login" class="py-2.5 px-6 bg-surface-variant text-on-surface rounded-xl text-sm font-semibold hover:bg-surface-variant/80 transition-all inline-block">
+                    Return to Login
+                </a>
+            </div>
+        }
+        else
+        {
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 text-primary mb-2">
+                <span class="material-symbols-outlined text-3xl">mark_email_read</span>
+            </div>
+            <h2 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Confirm Email Address</h2>
+            <p class="text-sm text-secondary dark:text-gray-400">Please click the button below to verify your email address.</p>
+            <form asp-action="ConfirmEmail" method="post" class="pt-4">
+                @Html.AntiForgeryToken()
+                <input type="hidden" asp-for="UserId" />
+                <input type="hidden" asp-for="Token" />
+                <button type="submit" class="py-2.5 px-6 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 transition-all inline-block shadow-md cursor-pointer">
+                    Confirm Email Address
+                </button>
+            </form>
+        }
+    </div>
+</div>

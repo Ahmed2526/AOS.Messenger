@@ -1,0 +1,38 @@
+@{
+    ViewData["Title"] = "A♡S Messenger - Desktop App (Dark Theme)";
+}
+
+<!-- RIGHT PANE: Unselected / Empty State (Dark Theme) -->
+<div class="flex-1 h-full min-h-full w-full flex flex-col items-center justify-center bg-[#302F2C] min-w-0 overflow-hidden relative select-none p-8">
+    <!-- Subtle Decorative Background Gradient -->
+    <div class="absolute inset-0 bg-gradient-to-b from-[#302F2C] via-[#353330]/40 to-[#302F2C] pointer-events-none"></div>
+
+    <div class="relative z-10 flex flex-col items-center text-center max-w-md px-6">
+        <!-- Center Graphic: A♡S Monogram Logo -->
+        <div class="w-20 h-20 rounded-3xl bg-[#3A3835] border border-[#514D48] flex items-center justify-center mb-6 shadow-sm">
+            <svg width="48" height="36" viewBox="0 0 70 50" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 40L22 10L32 40M15 31H29" stroke="#F0E9E2" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                <path d="M35 24C35 22 36.5 19 39 19C41.5 19 43 21 43 23C43 27 35 32 35 32C35 32 27 27 27 23C27 21 28.5 19 31 19C33.5 19 35 22 35 24Z" fill="#B3929D" stroke="#B3929D" stroke-width="1.5"></path>
+                <path d="M42 38C46 41 54 41 56 36C58 31 46 29 48 20C50 13 58 13 62 17" stroke="#F0E9E2" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+            </svg>
+        </div>
+
+        <!-- Typography & Instructions -->
+        <h2 class="text-xl font-bold text-[#F0E9E2] tracking-tight mb-2">
+            Select a conversation
+        </h2>
+        <p class="text-xs text-[#C9C0B9] leading-relaxed mb-6 max-w-sm">
+            Choose an existing conversation from the sidebar or start a new one from the directory.
+        </p>
+
+        <!-- Action Button -->
+        <a asp-controller="Chat" asp-action="NewConversation" class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#B3929D] hover:bg-[#A07860] text-white text-xs font-semibold shadow-xs transition-colors">
+            <span class="material-symbols-outlined text-[18px]">add</span>
+            <span>New conversation</span>
+        </a>
+    </div>
+</div>
+
+@section Scripts {
+    <script type="module" src="~/js/dark-theme-page.js" asp-append-version="true"></script>
+}

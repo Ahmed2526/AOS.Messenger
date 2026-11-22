@@ -1,0 +1,191 @@
+using System.Text.RegularExpressions;
+using Xunit;
+
+namespace AOS.Messenger.Tests;
+
+/// <summary>
+/// Verifies Phase 6 client-side SignalR streaming, connection lifecycle,
+/// state reconciliation on reconnect, deduplication by ID, and XSS prevention.
+/// Complies with AGENTS.md architectural rules.
+/// </summary>
+public sealed class RealtimeWebClientVerificationTests
+{
+    private static string FindSolutionRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current != null &&
+               !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.sln")) &&
+               !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.slnx")) &&
+               !File.Exists(Path.Combine(current.FullName, "AGENTS.md")))
+        {
+            current = current.Parent;
+        }
+
+        if (current == null)
+        {
+            throw new InvalidOperationException("Could not find repository root containing AGENTS.md or solution file.");
+        }
+
+        return current.FullName;
+    }
+
+    [Fact]
+    public void SignalRMinJs_Exists_InWwwRootLib_AndIsNonEmpty()
+    {
+        var root = FindSolutionRoot();
+        var signalRPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "lib", "signalr", "signalr.min.js");
+
+        Assert.True(File.Exists(signalRPath), $"signalr.min.js not found at {signalRPath}");
+        var fileInfo = new FileInfo(signalRPath);
+        Assert.True(fileInfo.Length > 20_000, "signalr.min.js must be a valid bundle (> 20KB)");
+    }
+
+    [Fact]
+    public void ChatRealtimeJs_Exists_AndConfiguresHubConnectionWithAutomaticReconnect()
+    {
+        var root = FindSolutionRoot();
+        var scriptPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+
+        Assert.True(File.Exists(scriptPath), $"chat-realtime.js not found at {scriptPath}");
+        var content = File.ReadAllText(scriptPath);
+
+        // Assert HubConnectionBuilder setup
+        Assert.Contains("new signalR.HubConnectionBuilder()", content);
+        Assert.Contains(".withUrl(\"/hubs/chat\")", content);
+        Assert.Contains(".withAutomaticReconnect([0, 2000, 5000, 10000, 30000])", content);
+        Assert.Contains(".build()", content);
+    }
+
+    [Fact]
+    public void ChatRealtimeJs_ImplementsConnectionLifecycleEvents()
+    {
+        var root = FindSolutionRoot();
+        var scriptPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var content = File.ReadAllText(scriptPath);
+
+        // onreconnecting
+        Assert.Contains("connection.onreconnecting", content);
+
+        // onreconnected
+        Assert.Contains("connection.onreconnected", content);
+        Assert.Contains("JoinConversation", content);
+
+        // onclose
+        Assert.Contains("connection.onclose", content);
+
+        // page unload / switch: LeaveConversation
+        Assert.Contains("connection.invoke(\"LeaveConversation\"", content);
+        Assert.Contains("beforeunload", content);
+        Assert.Contains("pagehide", content);
+    }
+
+    [Fact]
+    public void ChatRealtimeJs_ImplementsStateReconciliation_QueryingAuthoritativeRestApi()
+    {
+        var root = FindSolutionRoot();
+        var scriptPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var content = File.ReadAllText(scriptPath);
+
+        // Reconcile function exists
+        Assert.Contains("reconcileState", content);
+
+        // Keyset query against authoritative SQL Server REST endpoint (RT-005)
+        Assert.Contains("/api/conversations/", content);
+        Assert.Contains("/messages", content);
+        Assert.Contains("pageSize=30", content);
+
+        // Deduplication during reconciliation
+        Assert.Contains("isMessageRendered", content);
+    }
+
+    [Fact]
+    public void ChatRealtimeJs_RegistersReceiveMessageHandler_WithDeduplicationAndVisualParity()
+    {
+        var root = FindSolutionRoot();
+        var scriptPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var content = File.ReadAllText(scriptPath);
+
+        // ReceiveMessage handler
+        Assert.Contains("connection.on(\"ReceiveMessage\"", content);
+
+        // Deduplication against DOM
+        Assert.Contains("isMessageRendered", content);
+        Assert.Contains("msg-", content);
+
+        // Smooth scroll to bottom
+        Assert.Contains("scrollToBottom", content);
+
+        // Sidebar preview update
+        Assert.Contains("updateSidebarLastMessage", content);
+    }
+
+    [Fact]
+    public void ChatRealtimeJs_EnforcesXssSanitization_OnLiveIncomingMessages()
+    {
+        var root = FindSolutionRoot();
+        var scriptPath = Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var content = File.ReadAllText(scriptPath);
+
+        // escapeHtml definition
+        Assert.Contains("function escapeHtml(str)", content);
+        Assert.Contains(".replace(/&/g, '&amp;')", content);
+        Assert.Contains(".replace(/</g, '&lt;')", content);
+        Assert.Contains(".replace(/>/g, '&gt;')", content);
+        Assert.Contains(".replace(/\"/g, '&quot;')", content);
+        Assert.Contains(".replace(/'/g, '&#39;')", content);
+
+        // Usage in bubble generation
+        Assert.Contains("escapeHtml(message.content)", content);
+        Assert.Contains("escapeHtml(message.senderName", content);
+
+        // Disallow raw interpolation of unencoded content
+        var rawMatch = Regex.Matches(content, @"\$\{message\.content\}");
+        Assert.Empty(rawMatch);
+    }
+
+    [Fact]
+    public void ConversationCshtml_WiresSignalRScript_AndRealtimeInitializer()
+    {
+        var root = FindSolutionRoot();
+        var conversationPath = Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
+        var content = File.ReadAllText(conversationPath);
+
+        // Scripts referenced
+        Assert.Contains("signalr.min.js", content);
+        Assert.Contains("chat-realtime.js", content);
+
+        // Initializer called with conversation ID and current user ID
+        Assert.Contains("ChatRealtime.init", content);
+        Assert.Contains("conversationId", content);
+        Assert.Contains("currentUserId", content);
+
+        // Reconnection banner present in view
+        Assert.Contains("id=\"connection-banner\"", content);
+
+        // SSR messages carry msg-{id} for seamless client deduplication
+        Assert.Contains("id=\"msg-@message.Id.Value\"", content);
+    }
+
+    [Fact]
+    public void ConversationSidebar_HasDataConversationId_AndLastMessageClass()
+    {
+        var root = FindSolutionRoot();
+        var componentPath = Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Shared", "Components", "ConversationSidebar", "Default.cshtml");
+        var sidebarPath = Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Shared", "Partials", "_ConversationSidebar.cshtml");
+        var content = File.Exists(componentPath) ? File.ReadAllText(componentPath) : File.ReadAllText(sidebarPath);
+
+        Assert.Contains("data-conversation-id=\"@conv.Id.Value\"", content);
+        Assert.Contains("conversation-last-message", content);
+    }
+
+    [Fact]
+    public void LayoutCshtml_ContainsConnectionStatusIndicators()
+    {
+        var root = FindSolutionRoot();
+        var layoutPath = Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Shared", "_Layout.cshtml");
+        var content = File.ReadAllText(layoutPath);
+
+        Assert.Contains("id=\"connectionStatusDot\"", content);
+        Assert.Contains("id=\"connectionStatusText\"", content);
+    }
+}

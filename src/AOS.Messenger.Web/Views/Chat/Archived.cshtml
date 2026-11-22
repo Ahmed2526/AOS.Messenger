@@ -1,0 +1,130 @@
+@model AOS.Messenger.Web.Models.ArchivedChatsViewModel
+@{
+    ViewData["Title"] = "Archived Conversations - A♡S Messenger";
+}
+
+@functions {
+    public static string GetInitials(string? name, string? handle)
+    {
+        var raw = !string.IsNullOrWhiteSpace(name) ? name : (!string.IsNullOrWhiteSpace(handle) ? handle : "U");
+        var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 1 && parts[0].Length > 0 && parts[1].Length > 0)
+        {
+            return (parts[0][0].ToString() + parts[1][0].ToString()).ToUpperInvariant();
+        }
+        if (parts.Length == 1 && parts[0].Length > 0)
+        {
+            return parts[0].Substring(0, Math.Min(2, parts[0].Length)).ToUpperInvariant();
+        }
+        return "U";
+    }
+}
+
+<div class="flex flex-col md:flex-row w-full h-full min-w-0 flex-1 overflow-hidden">
+    <!-- ARCHIVED DRAWER / PANE: Archived Conversation List -->
+    <aside class="w-full md:w-[380px] flex-shrink-0 bg-surface-container-high dark:bg-[#3A3835] border-r border-[#E3DCD7] dark:border-[#514D48] flex flex-col h-full shadow-sm z-10">
+        <!-- Top Navigation & Heading Bar -->
+        <div class="p-4 pb-3 bg-surface-container-high dark:bg-[#3A3835] flex flex-col gap-2.5 border-b border-[#E3DCD7]/60 dark:border-[#514D48]/60">
+            <div class="flex items-center justify-between">
+                <a asp-controller="Chat" asp-action="Index" class="inline-flex items-center gap-1.5 text-on-surface-variant dark:text-[#C9C0B9] hover:text-on-surface dark:hover:text-[#F0E9E2] transition-colors py-1 px-1.5 -ml-1.5 rounded-lg hover:bg-surface-variant/40 dark:hover:bg-[#45423E]/60" title="Return to active conversations">
+                    <span class="material-symbols-outlined text-headline-sm">arrow_back</span>
+                    <span class="font-label-lg text-label-lg text-secondary dark:text-[#D8C080] font-semibold">Back to Chats</span>
+                </a>
+                <div class="flex items-center gap-1">
+                    <span class="px-2 py-0.5 text-[11px] font-semibold rounded-full bg-[#B3929D]/20 text-[#735761] dark:text-[#E1BDC9]">
+                        @Model.ArchivedConversations.Count Archived
+                    </span>
+                </div>
+            </div>
+            <div class="flex items-baseline justify-between mt-0.5">
+                <h1 class="font-headline-lg text-headline-lg text-on-surface dark:text-[#F0E9E2] font-semibold tracking-tight text-xl">Archived</h1>
+            </div>
+        </div>
+
+        <!-- Search Input -->
+        <div class="px-3.5 py-2.5 bg-surface-container-high dark:bg-[#3A3835] border-b border-[#E3DCD7]/40 dark:border-[#514D48]/40">
+            <div class="relative flex items-center">
+                <span class="material-symbols-outlined absolute left-3 text-body-lg text-on-surface-variant dark:text-[#C9C0B9] pointer-events-none">search</span>
+                <input id="archivedSearchInput" class="w-full pl-9 pr-3.5 py-2 font-body-sm text-body-sm rounded-lg bg-surface-container-lowest dark:bg-[#45423E] text-on-surface dark:text-[#F0E9E2] placeholder:text-on-surface-variant dark:placeholder:text-[#C9C0B9] placeholder:font-body-sm focus:outline-none focus:bg-surface-bright dark:focus:bg-[#514D48] shadow-sm transition-all border border-transparent dark:border-[#514D48]" placeholder="Search archived conversations..." type="text">
+            </div>
+        </div>
+
+        <!-- Archived Conversations List -->
+        <div id="archivedList" class="flex-1 overflow-y-auto custom-scroll p-3 space-y-1">
+            @if (Model.ArchivedConversations.Count > 0)
+            {
+                @foreach (var conv in Model.ArchivedConversations)
+                {
+                    var initials = GetInitials(conv.OtherParticipantName, conv.OtherParticipantHandle);
+                    <div class="group p-3 rounded-xl bg-surface-container-lowest dark:bg-[#45423E] hover:bg-surface-container dark:hover:bg-[#514D48] transition-all flex items-center justify-between shadow-xs border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#5B5752]">
+                        <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value" class="flex items-center gap-3 min-w-0 flex-1">
+                            <div class="w-10 h-10 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs flex-shrink-0">
+                                @initials
+                            </div>
+                            <div class="min-w-0 flex-1">
+                                <div class="flex items-center gap-1.5 mb-0.5">
+                                    <span class="text-xs font-bold text-on-surface dark:text-[#F0E9E2] truncate">@conv.OtherParticipantName</span>
+                                    <span class="text-[11px] text-[#A07860] dark:text-[#C9C0B9]">@@@conv.OtherParticipantHandle</span>
+                                </div>
+                                <p class="text-[11px] text-on-surface-variant dark:text-[#C9C0B9] truncate">
+                                    @(string.IsNullOrWhiteSpace(conv.LastMessagePreview) ? "No messages yet" : conv.LastMessagePreview)
+                                </p>
+                            </div>
+                        </a>
+                        <div class="flex items-center gap-1.5 ml-2 flex-shrink-0">
+                            <!-- Unarchive Form Button -->
+                            <form method="post" asp-controller="Chat" asp-action="Archive" class="inline m-0">
+                                @Html.AntiForgeryToken()
+                                <input type="hidden" name="conversationId" value="@conv.Id.Value" />
+                                <input type="hidden" name="isArchived" value="false" />
+                                <button type="submit" class="px-2.5 py-1 text-xs font-semibold rounded-lg bg-surface-container-highest hover:bg-surface-dim dark:bg-[#3A3835] dark:hover:bg-[#4B4845] text-on-surface dark:text-[#F0E9E2] transition-colors flex items-center gap-1 shadow-2xs cursor-pointer" title="Unarchive conversation">
+                                    <span class="material-symbols-outlined text-[15px]">unarchive</span>
+                                    <span>Unarchive</span>
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                }
+            }
+            else
+            {
+                <div class="h-full p-6 flex flex-col items-center justify-center text-center select-none">
+                    <div class="w-14 h-14 rounded-2xl bg-surface-container-lowest dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center text-[#B3929D] shadow-xs mb-3.5">
+                        <span class="material-symbols-outlined text-[28px]">archive</span>
+                    </div>
+                    <h3 class="text-sm font-bold text-on-surface dark:text-[#F0E9E2] mb-1">No archived conversations</h3>
+                    <p class="text-xs text-on-surface-variant dark:text-[#C9C0B9] leading-relaxed max-w-[220px]">
+                        Conversations you archive will appear here.
+                    </p>
+                </div>
+            }
+        </div>
+    </aside>
+
+    <!-- RIGHT MAIN PANE: Empty / Unselected State (hidden on mobile, visible on md+) -->
+    <section class="hidden md:flex flex-1 flex-col items-center justify-center bg-surface dark:bg-[#302F2C] p-8 relative overflow-hidden select-none min-w-0">
+        <!-- Subtle Decorative Atmospheric Gradient Overlay -->
+        <div class="absolute inset-0 bg-gradient-to-b from-surface via-surface-container-low/40 to-surface dark:from-[#302F2C] dark:via-[#353330]/40 dark:to-[#302F2C] pointer-events-none"></div>
+        <div class="relative z-10 flex flex-col items-center text-center max-w-sm px-6">
+            <!-- A♡S Refined Monogram Watermark -->
+            <div class="w-16 h-16 rounded-2xl bg-surface-container-lowest dark:bg-[#45423E] border border-[#E3DCD7]/50 dark:border-[#514D48] shadow-sm flex items-center justify-center mb-6">
+                <svg fill="none" height="30" viewBox="0 0 70 50" width="42" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 40L22 10L32 40M15 31H29" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"></path>
+                    <path d="M35 24C35 22 36.5 19 39 19C41.5 19 43 21 43 23C43 27 35 32 35 32C35 32 27 27 27 23C27 21 28.5 19 31 19C33.5 19 35 22 35 24Z" fill="#B3929D" stroke="#B3929D" stroke-width="1.5"></path>
+                    <path d="M42 38C46 41 54 41 56 36C58 31 46 29 48 20C50 13 58 13 62 17" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-linecap="round" stroke-linejoin="round" stroke-width="4"></path>
+                </svg>
+            </div>
+            <!-- Clean Typography Header & Explanation -->
+            <h2 class="font-headline-lg text-headline-lg text-on-surface dark:text-[#F0E9E2] font-semibold tracking-tight mb-2 text-xl">
+                Archived Conversations
+            </h2>
+            <p class="font-body-md text-body-md text-on-surface-variant dark:text-[#C9C0B9] leading-relaxed mb-6 text-sm">
+                Select an archived conversation to view or unarchive it.
+            </p>
+        </div>
+    </section>
+</div>
+
+@section Scripts {
+    <script type="module" src="~/js/archived-page.js" asp-append-version="true"></script>
+}

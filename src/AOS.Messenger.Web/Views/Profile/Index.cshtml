@@ -1,0 +1,269 @@
+@model AOS.Messenger.Web.Models.ProfileViewModel
+@{
+    ViewData["Title"] = "User Profile & Account - A♡S Messenger";
+    var initials = string.IsNullOrWhiteSpace(Model?.DisplayName)
+        ? (Model?.UserName?.Length > 0 ? Model.UserName.Substring(0, Math.Min(2, Model.UserName.Length)).ToUpperInvariant() : "U")
+        : string.Join("", Model.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(s => s[0])).ToUpperInvariant();
+    if (initials.Length > 2) initials = initials.Substring(0, 2);
+}
+
+<div class="w-full flex-1 min-w-0 h-full overflow-y-auto custom-scroll py-8 px-4 md:px-8 flex justify-center">
+                <div class="w-full max-w-[700px] flex flex-col gap-6">
+                    <!-- Top Nav / Back Action -->
+                    <nav class="flex items-center justify-between pb-2">
+                        <a asp-controller="Chat" asp-action="Index" class="inline-flex items-center gap-2 text-on-surface-variant hover:text-on-surface transition-colors group">
+                            <span class="material-symbols-outlined text-[18px] transition-transform group-hover:-translate-x-0.5">arrow_back</span>
+                            <span class="font-label-lg text-label-lg">Back to Messages</span>
+                        </a>
+                        <span class="font-label-sm text-label-sm uppercase tracking-widest text-on-surface-variant font-semibold">Profile &amp; Settings</span>
+                    </nav>
+
+                    <!-- Status Message / Validation Alert -->
+                    @if (TempData["StatusMessage"] is string statusMsg && !string.IsNullOrEmpty(statusMsg))
+                    {
+                        var isError = statusMsg.StartsWith("Error", StringComparison.OrdinalIgnoreCase);
+                        <div class="p-4 rounded-xl flex items-center gap-3 @(isError ? "bg-error-container text-error" : "bg-[#6C8E6F]/20 text-[#6F9473]") font-medium text-sm">
+                            <span class="material-symbols-outlined text-[20px]">@(isError ? "error" : "check_circle")</span>
+                            <span>@statusMsg</span>
+                        </div>
+                    }
+                    @if (!ViewData.ModelState.IsValid)
+                    {
+                        <div asp-validation-summary="All" class="text-error font-body-sm"></div>
+                    }
+
+                    <!-- Personal Identity Profile Card (Hero Banner) -->
+                    <div id="profile-hero-card" class="relative overflow-hidden rounded-2xl p-6 bg-surface-container-lowest border border-[#E3DCD7] dark:border-[#5B5752] shadow-sm shrink-0 min-h-fit">
+                        <!-- Decorative background accent shapes -->
+                        <div class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+                            <div class="absolute -right-12 -top-12 w-48 h-48 rounded-full bg-gradient-to-br from-primary-fixed/30 to-transparent"></div>
+                        </div>
+
+                        <!-- Foreground content row -->
+                        <div class="relative z-10 flex items-center gap-4 sm:gap-5">
+                            <!-- Avatar Circle Container -->
+                            <div class="relative shrink-0">
+                                <div id="profile-hero-avatar" class="w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 flex items-center justify-center text-xl font-semibold bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 select-none shadow-xs">
+                                    @initials
+                                </div>
+                                <!-- Online status indicator -->
+                                <span class="absolute bottom-0 right-0 w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 rounded-full bg-[#6F9473] ring-2 ring-white dark:ring-[#3A3835]" title="Active now"></span>
+                            </div>
+
+                            <!-- Identity Details -->
+                            <div class="flex-1 min-w-0">
+                                <div class="flex flex-wrap items-center gap-2 mb-1">
+                                    <h1 class="text-xl sm:text-2xl font-bold text-[#2B2725] dark:text-[#F0E9E2] tracking-tight truncate">@(Model?.DisplayName ?? "My Profile")</h1>
+                                    <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F0E9DF] dark:bg-[#45423E] text-[#6E6560] dark:text-[#C9C0B9] text-xs font-medium shrink-0">
+                                        <span class="w-1.5 h-1.5 rounded-full bg-[#6F9473]"></span>
+                                        Active now
+                                    </span>
+                                </div>
+                                <p class="text-xs sm:text-sm text-[#6E6560] dark:text-[#C9C0B9] truncate">@@@(Model?.UserName ?? "username")</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Edit Profile Form -->
+                    <form asp-controller="Profile" asp-action="Index" method="post" class="flex flex-col gap-6">
+                        @Html.AntiForgeryToken()
+
+                        <section class="bg-surface-container-lowest rounded-xl p-6 shadow-sm flex flex-col gap-5 border border-transparent dark:border-[#5B5752]">
+                            <div class="flex items-center justify-between">
+                                <h2 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant font-bold">Profile Details</h2>
+                                <span class="text-xs text-on-surface-variant font-medium">Public Information</span>
+                            </div>
+                            <div class="flex flex-col gap-4">
+                                <div class="flex flex-col gap-1.5">
+                                    <label asp-for="DisplayName" class="font-label-md text-label-md text-on-surface font-semibold">Display Name</label>
+                                    <input asp-for="DisplayName" maxlength="100" class="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-low border border-[#E3DCD7] dark:border-[#5B5752] text-on-surface font-body-md focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] transition-all" placeholder="Enter your display name" required />
+                                    <span asp-validation-for="DisplayName" class="text-error text-xs"></span>
+                                    <p class="text-[11px] text-on-surface-variant">The name displayed to contacts. Maximum 100 characters.</p>
+                                </div>
+                                <div class="flex flex-col gap-1.5">
+                                    <label asp-for="Bio" class="font-label-md text-label-md text-on-surface font-semibold">About / Bio</label>
+                                    <textarea asp-for="Bio" rows="3" maxlength="500" class="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-low border border-[#E3DCD7] dark:border-[#5B5752] text-on-surface font-body-md focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] transition-all" placeholder="Write something about yourself..."></textarea>
+                                    <span asp-validation-for="Bio" class="text-error text-xs"></span>
+                                    <p class="text-[11px] text-on-surface-variant">A brief status or bio. Maximum 500 characters.</p>
+                                </div>
+                                <div class="flex justify-end pt-2">
+                                    <button type="submit" class="inline-flex items-center gap-1.5 px-5 py-2 rounded-lg bg-primary text-on-primary hover:brightness-95 transition-all shadow-sm font-label-md text-label-md cursor-pointer">
+                                        <span class="material-symbols-outlined text-[16px]">save</span>
+                                        <span>Save Profile</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </section>
+                    </form>
+
+                    <!-- Account Identity (Immutable) -->
+                    <section class="bg-surface-container-lowest rounded-xl p-6 shadow-sm flex flex-col gap-5 border border-transparent dark:border-[#5B5752]">
+                        <div class="flex items-center justify-between">
+                            <h2 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant font-bold">Account Identity</h2>
+                            <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold bg-surface-container text-on-surface-variant">
+                                <span class="material-symbols-outlined text-[12px]">lock</span> Read-only
+                            </span>
+                        </div>
+                        <div class="flex flex-col gap-3">
+                            <!-- Username Row -->
+                            <div class="p-3.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                                <div class="flex flex-col gap-0.5">
+                                    <span class="font-label-sm text-label-sm text-on-surface-variant">Username</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface font-medium truncate">@@@(Model?.UserName ?? string.Empty)</span>
+                                </div>
+                                <span class="inline-flex items-center gap-1 text-on-surface-variant bg-surface-container px-2 py-0.5 rounded text-xs font-medium">
+                                    Permanent
+                                </span>
+                            </div>
+                            <!-- Email Row -->
+                            <div class="p-3.5 rounded-lg bg-surface-container-low flex items-center justify-between">
+                                <div class="flex flex-col gap-0.5">
+                                    <span class="font-label-sm text-label-sm text-on-surface-variant">Email Address</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface font-medium truncate">@(Model?.Email ?? "No email provided")</span>
+                                </div>
+                                <span class="inline-flex items-center gap-1 text-[#6F9473] bg-[#6C8E6F]/20 px-2 py-0.5 rounded text-xs font-medium">
+                                    <span class="material-symbols-outlined text-[14px]">verified</span> Verified
+                                </span>
+                            </div>
+                        </div>
+                        <p class="text-[11px] text-on-surface-variant italic">Username and email address are permanent and cannot be changed after registration.</p>
+                    </section>
+
+                    <!-- Privacy Settings -->
+                    <section class="bg-surface-container-lowest rounded-xl p-6 shadow-sm flex flex-col gap-5 border border-transparent dark:border-[#5B5752]">
+                        <div>
+                            <h2 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant font-bold mb-1">Privacy</h2>
+                            <p class="font-body-sm text-body-sm text-on-surface-variant">Manage your activity status and message visibility.</p>
+                        </div>
+                        <div class="flex flex-col gap-3">
+                            <!-- Read Receipts -->
+                            <div class="flex items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors">
+                                <div class="flex flex-col gap-0.5 pr-4">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Read Receipts</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Let others know when you have seen their messages.</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input checked="" class="sr-only peer" type="checkbox">
+                                    <div class="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-bright after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+                                </label>
+                            </div>
+                            <!-- Online Status -->
+                            <div class="flex items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors">
+                                <div class="flex flex-col gap-0.5 pr-4">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Active Status</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Show when you're active.</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input checked="" class="sr-only peer" type="checkbox">
+                                    <div class="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-bright after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+                                </label>
+                            </div>
+                            <!-- Last Seen Visibility -->
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors gap-2">
+                                <div class="flex flex-col gap-0.5">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Last Seen</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Who can see when you were last online.</span>
+                                </div>
+                                <select class="bg-surface-container text-on-surface font-body-sm text-body-sm rounded-lg px-3 py-1.5 outline-none cursor-pointer border border-[#E3DCD7] dark:border-[#5B5752]">
+                                    <option selected="">My Contacts</option>
+                                    <option>Everyone</option>
+                                    <option>Nobody</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Notifications Settings -->
+                    <section class="bg-surface-container-lowest rounded-xl p-6 shadow-sm flex flex-col gap-5 border border-transparent dark:border-[#5B5752]">
+                        <div>
+                            <h2 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant font-bold mb-1">Notifications</h2>
+                            <p class="font-body-sm text-body-sm text-on-surface-variant">Manage sound and desktop alerts.</p>
+                        </div>
+                        <div class="flex flex-col gap-3">
+                            <!-- Desktop Notifications -->
+                            <div class="flex items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors">
+                                <div class="flex flex-col gap-0.5 pr-4">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Desktop Notifications</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Receive notifications on your computer for new incoming messages.</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input checked="" class="sr-only peer" type="checkbox">
+                                    <div class="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-bright after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+                                </label>
+                            </div>
+                            <!-- Sound Effects -->
+                            <div class="flex items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors">
+                                <div class="flex flex-col gap-0.5 pr-4">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Sound Effects</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Play audible tone for incoming messages and alerts.</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input checked="" class="sr-only peer" type="checkbox">
+                                    <div class="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-bright after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+                                </label>
+                            </div>
+                            <!-- Message Preview -->
+                            <div class="flex items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors">
+                                <div class="flex flex-col gap-0.5 pr-4">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Message Preview</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Show message sender and preview in notification popups.</span>
+                                </div>
+                                <label class="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                                    <input checked="" class="sr-only peer" type="checkbox">
+                                    <div class="w-11 h-6 bg-surface-container-highest peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-surface-bright after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary-container"></div>
+                                </label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Appearance & Theme Settings -->
+                    <section class="bg-surface-container-lowest rounded-xl p-6 shadow-sm flex flex-col gap-5 border border-transparent dark:border-[#5B5752]">
+                        <div>
+                            <h2 class="font-label-sm text-label-sm uppercase tracking-wider text-on-surface-variant font-bold mb-1">Appearance</h2>
+                            <p class="font-body-sm text-body-sm text-on-surface-variant">Customize how A♡S Messenger looks on this device.</p>
+                        </div>
+                        <div class="flex flex-col gap-4">
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors gap-2">
+                                <div class="flex flex-col gap-0.5">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Theme</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Select your preferred interface color mode.</span>
+                                </div>
+                                <div class="inline-flex items-center p-1 bg-surface-container rounded-lg gap-1">
+                                    <button type="button" id="profileThemeLightBtn" data-theme-toggle="light" aria-pressed="false" class="px-3 py-1 rounded-md text-xs font-semibold bg-[#FFFFFF] dark:bg-[#45433F] text-[#2B2725] dark:text-[#EEE7DF] shadow-xs cursor-pointer">Light</button>
+                                    <button type="button" id="profileThemeDarkBtn" data-theme-toggle="dark" aria-pressed="false" class="px-3 py-1 rounded-md text-xs font-medium text-[#6E6560] dark:text-[#C8C0BA] hover:text-[#2B2725] dark:hover:text-[#EEE7DF] cursor-pointer">Dark</button>
+                                    <button type="button" id="profileThemeSystemBtn" data-theme-toggle="system" aria-pressed="false" class="px-3 py-1 rounded-md text-xs font-medium text-[#6E6560] dark:text-[#C8C0BA] hover:text-[#2B2725] dark:hover:text-[#EEE7DF] cursor-pointer">System</button>
+                                </div>
+                            </div>
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between p-3.5 rounded-lg hover:bg-surface-container-low transition-colors gap-2">
+                                <div class="flex flex-col gap-0.5">
+                                    <span class="font-body-md text-body-md text-on-surface font-medium">Message Text Size</span>
+                                    <span class="font-body-sm text-body-sm text-on-surface-variant">Adjust font scaling in chat conversations.</span>
+                                </div>
+                                <select class="bg-surface-container text-on-surface font-body-sm text-body-sm rounded-lg px-3 py-1.5 outline-none cursor-pointer border border-[#E3DCD7] dark:border-[#5B5752]">
+                                    <option>Small (13px)</option>
+                                    <option selected="">Default (14px)</option>
+                                    <option>Large (16px)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Sign Out / Session Footer -->
+                    <footer class="flex flex-col sm:flex-row items-center justify-between gap-4 py-4 px-2">
+                        <form asp-controller="Account" asp-action="Logout" method="post" class="inline">
+                            @Html.AntiForgeryToken()
+                            <button type="submit" class="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-error hover:bg-error-container/40 transition-colors font-medium cursor-pointer">
+                                <span class="material-symbols-outlined text-[18px]">logout</span>
+                                <span class="font-label-md text-label-md font-semibold">Log Out</span>
+                            </button>
+                        </form>
+                        <div class="flex items-center gap-2 text-on-surface-variant">
+                            <span class="font-label-sm text-label-sm">A♡S Messenger v1.0</span>
+                        </div>
+                    </footer>
+                </div>
+</div>
+
+@section Scripts {
+    <script type="module" src="~/js/profile-page.js" asp-append-version="true"></script>
+}

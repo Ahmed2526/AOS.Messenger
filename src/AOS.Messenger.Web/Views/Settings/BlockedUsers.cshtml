@@ -1,0 +1,106 @@
+@model IReadOnlyList<AOS.Messenger.Application.DTOs.BlockedUserDto>
+@{
+    ViewData["Title"] = "Blocked Users - A♡S Messenger";
+}
+
+<div class="w-full flex-1 min-w-0 h-full overflow-y-auto custom-scroll py-8 px-4 md:px-8 flex justify-center">
+    <div class="w-full max-w-[700px] flex flex-col gap-6">
+        <!-- Top Navigation Bar -->
+        <nav class="flex items-center justify-between pb-2">
+            <a asp-controller="Settings" asp-action="Index" class="inline-flex items-center gap-2 text-on-surface-variant hover:text-on-surface transition-colors group">
+                <span class="material-symbols-outlined text-[18px] transition-transform group-hover:-translate-x-0.5">arrow_back</span>
+                <span class="font-label-lg text-label-lg">Settings</span>
+            </a>
+            <span class="font-label-sm text-label-sm uppercase tracking-widest text-on-surface-variant font-semibold">Privacy</span>
+        </nav>
+
+        <!-- Page Header Card -->
+        <div class="flex items-center justify-between">
+            <div>
+                <h1 class="font-headline-lg text-headline-lg text-on-surface font-bold">Blocked Users</h1>
+                <p class="font-body-sm text-on-surface-variant mt-0.5">Manage contacts you have blocked from messaging you.</p>
+            </div>
+            <span class="px-3 py-1 rounded-full bg-surface-container font-label-sm text-on-surface font-semibold">
+                @(Model?.Count ?? 0) @((Model?.Count ?? 0) == 1 ? "blocked" : "blocked")
+            </span>
+        </div>
+
+        <!-- Status / Alert Message -->
+        @if (TempData["StatusMessage"] is string statusMsg && !string.IsNullOrEmpty(statusMsg))
+        {
+            var isError = statusMsg.StartsWith("Error", StringComparison.OrdinalIgnoreCase) || statusMsg.StartsWith("Failed", StringComparison.OrdinalIgnoreCase);
+            <div class="p-4 rounded-xl flex items-center gap-3 @(isError ? "bg-error-container text-error" : "bg-[#6C8E6F]/20 text-[#6F9473]") font-medium text-sm">
+                <span class="material-symbols-outlined text-[20px]">@(isError ? "error" : "check_circle")</span>
+                <span>@statusMsg</span>
+            </div>
+        }
+
+        @if (Model is null || Model.Count == 0)
+        {
+            <!-- Empty State View -->
+            <div class="bg-surface-container-lowest rounded-2xl p-12 shadow-sm flex flex-col items-center justify-center text-center gap-4 border border-[#E3DCD7]/40 dark:border-[#5B5752]/40">
+                <div class="w-16 h-16 rounded-2xl bg-surface-container-high text-secondary flex items-center justify-center shadow-xs">
+                    <span class="material-symbols-outlined text-[32px]">shield</span>
+                </div>
+                <div class="space-y-1">
+                    <h3 class="font-headline-sm text-on-surface font-semibold">No Blocked Users</h3>
+                    <p class="font-body-sm text-on-surface-variant max-w-sm">
+                        You haven't blocked anyone yet. Blocked users cannot send you messages or view your presence.
+                    </p>
+                </div>
+                <a asp-controller="Settings" asp-action="Index" class="mt-2 inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-surface-container hover:bg-surface-container-high text-on-surface font-label-md text-label-md transition-colors">
+                    <span class="material-symbols-outlined text-[16px]">arrow_back</span>
+                    <span>Return to Settings</span>
+                </a>
+            </div>
+        }
+        else
+        {
+            <!-- Blocked Users List -->
+            <div class="bg-surface-container-lowest rounded-2xl shadow-sm border border-[#E3DCD7]/40 dark:border-[#5B5752]/40 overflow-hidden divide-y divide-[#E3DCD7]/50 dark:divide-[#5B5752]/50">
+                @foreach (var user in Model)
+                {
+                    var initials = string.IsNullOrWhiteSpace(user.DisplayName)
+                        ? (user.UserName.Length > 0 ? user.UserName.Substring(0, Math.Min(2, user.UserName.Length)).ToUpperInvariant() : "U")
+                        : string.Join("", user.DisplayName.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(s => s[0])).ToUpperInvariant();
+                    if (initials.Length > 2) initials = initials.Substring(0, 2);
+
+                    <div class="p-4 sm:p-5 flex items-center justify-between gap-4 hover:bg-surface-container-low transition-colors">
+                        <div class="flex items-center gap-3.5 min-w-0">
+                            <div class="w-11 h-11 rounded-full bg-secondary-fixed text-on-secondary-fixed font-bold text-sm flex items-center justify-center flex-shrink-0">
+                                @initials
+                            </div>
+                            <div class="min-w-0">
+                                <div class="flex items-center gap-2">
+                                    <span class="font-headline-sm text-sm font-semibold text-on-surface truncate">@user.DisplayName</span>
+                                    <span class="text-xs text-secondary font-medium truncate">@@@user.UserName</span>
+                                </div>
+                                <div class="flex items-center gap-1 text-[11px] text-on-surface-variant mt-0.5">
+                                    <span class="material-symbols-outlined text-[13px]">block</span>
+                                    <span>Blocked @user.BlockedAtUtc.ToString("MMM d, yyyy HH:mm") UTC</span>
+                                </div>
+                            </div>
+                        </div>
+                        <form asp-controller="Settings" asp-action="UnblockUser" method="post" class="flex-shrink-0">
+                            @Html.AntiForgeryToken()
+                            <input type="hidden" name="targetUserId" value="@user.Id.Value" />
+                            <button type="submit" class="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[#E3DCD7] dark:border-[#5B5752] bg-surface-container hover:bg-surface-container-high text-on-surface text-xs font-semibold transition-colors cursor-pointer">
+                                <span class="material-symbols-outlined text-[15px]">lock_open</span>
+                                <span>Unblock</span>
+                            </button>
+                        </form>
+                    </div>
+                }
+            </div>
+        }
+
+        <!-- Information Callout -->
+        <div class="p-4 rounded-xl bg-surface-container-low flex items-start gap-3 border border-[#E3DCD7]/40 dark:border-[#5B5752]/40">
+            <span class="material-symbols-outlined text-secondary text-[20px] mt-0.5">info</span>
+            <div class="flex flex-col gap-0.5 text-xs text-on-surface-variant">
+                <span class="font-semibold text-on-surface">About Blocking on A♡S Messenger</span>
+                <span>Blocked users cannot send you messages or see when you are active. Direct conversations with blocked users are restricted until unblocked.</span>
+            </div>
+        </div>
+    </div>
+</div>

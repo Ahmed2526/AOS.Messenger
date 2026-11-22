@@ -1,0 +1,70 @@
+@model IReadOnlyList<AOS.Messenger.Application.DTOs.UserSessionDto>
+@{
+    ViewData["Title"] = "Active Sessions & Devices";
+    var currentSession = Model.FirstOrDefault(s => s.IsCurrent);
+}
+
+<div class="w-full flex-1 max-w-4xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
+    <div class="mb-6 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+            <h1 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Active Sessions & Devices</h1>
+            <p class="text-sm text-secondary dark:text-gray-400 mt-1">Manage signed-in devices and active browser sessions</p>
+        </div>
+
+        @if (currentSession is not null && Model.Count > 1)
+        {
+            <form asp-action="RevokeOtherSessions" method="post">
+                <input type="hidden" name="currentId" value="@currentSession.Id" />
+                <button type="submit" class="px-4 py-2 bg-error text-white text-xs font-semibold rounded-xl hover:bg-error/90 transition-all shadow-sm">
+                    Log Out All Other Devices
+                </button>
+            </form>
+        }
+    </div>
+
+    <div class="space-y-4">
+        @foreach (var session in Model)
+        {
+            <div class="p-5 rounded-2xl bg-surface-lowest dark:bg-[#1E1F23] border border-outline-variant/30 shadow-sm flex items-center justify-between">
+                <div class="flex items-center gap-4">
+                    <div class="w-12 h-12 rounded-xl flex items-center justify-center @(session.IsCurrent ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-400" : "bg-surface-low text-secondary dark:bg-surface-variant")">
+                        <span class="material-symbols-outlined text-2xl">
+                            @(session.DeviceName.Contains("Mobile") ? "smartphone" : "desktop_windows")
+                        </span>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-2">
+                            <span class="font-semibold text-sm text-on-surface dark:text-white">@session.DeviceName</span>
+                            @if (session.IsCurrent)
+                            {
+                                <span class="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300">
+                                    Current Device
+                                </span>
+                            }
+                        </div>
+                        <div class="text-xs text-secondary dark:text-gray-400 mt-0.5">
+                            IP: @(session.IpAddress ?? "Unknown") • Last active: @session.LastActiveAtUtc.ToString("MMM dd, yyyy HH:mm") UTC
+                        </div>
+                    </div>
+                </div>
+
+                @if (!session.IsCurrent)
+                {
+                    <form asp-action="RevokeSession" method="post">
+                        <input type="hidden" name="id" value="@session.Id" />
+                        <button type="submit" class="text-xs text-error dark:text-red-400 hover:underline font-semibold px-3 py-1.5 rounded-lg border border-error/30 hover:bg-error/10 transition-all">
+                            Revoke
+                        </button>
+                    </form>
+                }
+            </div>
+        }
+
+        @if (Model.Count == 0)
+        {
+            <div class="text-center py-12 bg-surface-lowest rounded-2xl border border-outline-variant/30 text-secondary text-sm">
+                No active sessions recorded.
+            </div>
+        }
+    </div>
+</div>

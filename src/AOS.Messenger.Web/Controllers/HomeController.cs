@@ -4,11 +4,11 @@ using AOS.Messenger.Web.Models;
 
 namespace AOS.Messenger.Web.Controllers;
 
-public class HomeController : Controller
+public sealed class HomeController : Controller
 {
     public IActionResult Index()
     {
-        return View();
+        return RedirectToAction("Index", "Chat");
     }
 
     public IActionResult Privacy()

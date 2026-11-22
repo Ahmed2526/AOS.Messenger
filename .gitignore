@@ -1,6 +1,7 @@
 ## Build artifacts
 bin/
 obj/
+.tools/
 
 ## VS / Rider
 .vs/
@@ -11,7 +12,14 @@ obj/
 
 ## User secrets / local config overrides
 **/appsettings.Local.json
+**/appsettings.local.json
 **/appsettings.*.local.json
+**/appsettings.*.Local.json
+**/appsettings.Production.json
+**/appsettings.Staging.json
+.env
+.env.*
+!.env.example
 
 ## Entity Framework migrations bundle
 efbundle*
@@ -24,7 +32,37 @@ efbundle*
 .DS_Store
 Thumbs.db
 
-## Test results
+## Local dev emails
+.dev-emails/
+
+## Test results & coverage
 TestResults/
 *.trx
 *.coverage
+*.cobertura.xml
+coverage*.xml
+coverage*.json
+coveragereport/
+*.received.*
+
+## QA audit artifacts
+.qa-screenshots/
+qa-audit-results.json
+qa-verification-results.json
+
+## Stitch design prototypes & local metadata
+stitch-screens/
+
+## Local databases, logs, certificates & diagnostics
+*.mdf
+*.ldf
+*.db
+*.sqlite
+*.log
+logs/
+*.pfx
+*.pem
+*.key
+*.binlog
+node_modules/
+

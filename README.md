@@ -14,7 +14,7 @@ The solution is a single deployable unit with clear layer separation. It is **no
 
 ```
 ┌─────────────────────┐
-│   AOS.Messenger.Web │  ← ASP.NET Core MVC, Razor Views, SignalR Hubs (future)
+│   AOS.Messenger.Web │  ← ASP.NET Core MVC, Razor Views, SignalR Hubs
 └─────────┬───────────┘
           │  references
           ▼
@@ -55,16 +55,17 @@ Web also references Infrastructure (composition root only — to wire DI)
 |---|---|
 | Runtime | .NET 10 |
 | Web framework | ASP.NET Core MVC |
-| Views | Razor |
+| Views | Razor (strict HTML encoded) |
+| Frontend CSS | Tailwind CSS v4 (AOT compiled via pinned standalone CLI binary) |
+| Frontend JS | Modular vanilla ES modules (`wwwroot/js/`) served via `MapStaticAssets()` |
 | ORM | Entity Framework Core |
 | Database | SQL Server |
-| Identity | ASP.NET Core Identity |
-| Authentication | Cookie authentication |
-| Realtime | SignalR *(future)* |
-| Media storage | Cloudflare R2 *(future)* |
-| Push notifications | Web Push *(future)* |
-| Email | TBD *(future)* |
-| Testing | xUnit |
+| Identity | ASP.NET Core Identity (`IdentityUser<Guid>`) |
+| Authentication | Cookie authentication (`__Host-` prefixed, persistent sessions) |
+| Realtime | SignalR |
+| Media storage | Cloudflare R2 *(Phase 9)* |
+| Push notifications | Web Push *(Phase 12)* |
+| Testing | xUnit + real SQL Server LocalDB |
 
 ---
 
@@ -73,7 +74,21 @@ Web also references Infrastructure (composition root only — to wire DI)
 ### Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- SQL Server or SQL Server LocalDB (for development)
+- SQL Server or SQL Server LocalDB (`(localdb)\mssqllocaldb` for local development and test suite)
+
+### Frontend CSS Compilation (Tailwind CSS v4 Standalone CLI)
+
+Tailwind CSS v4 is compiled ahead-of-time using a pinned standalone CLI binary (no Node.js, `npm`, or `node_modules` required):
+
+```powershell
+# Windows (PowerShell)
+./scripts/build-css.ps1
+
+# Linux / macOS (Bash)
+./scripts/build-css.sh
+```
+
+The script automatically downloads the pinned CLI binary into `.tools/` (git-ignored) and compiles `src/AOS.Messenger.Web/Styles/app.css` into `src/AOS.Messenger.Web/wwwroot/css/app.css`.
 
 ### Running Locally
 
@@ -81,18 +96,19 @@ Web also references Infrastructure (composition root only — to wire DI)
 # Restore and build
 dotnet build
 
+# Apply database migrations
+dotnet ef database update --project src/AOS.Messenger.Infrastructure --startup-project src/AOS.Messenger.Web
+
 # Run the web application
 dotnet run --project src/AOS.Messenger.Web
-
-# Run tests
-dotnet test
 ```
 
-### Database Setup (future — after Phase 1)
+### Running Tests
+
+All architecture, unit, concurrency, and persistence tests run against real SQL Server LocalDB:
 
 ```bash
-# Apply migrations (run from solution root)
-dotnet ef database update --project src/AOS.Messenger.Infrastructure --startup-project src/AOS.Messenger.Web
+dotnet test
 ```
 
 ### Connection String
@@ -103,7 +119,7 @@ The development connection string in `appsettings.json` uses LocalDB:
 Server=(localdb)\mssqllocaldb;Database=AOS.Messenger;Trusted_Connection=True;MultipleActiveResultSets=true
 ```
 
-For production, supply the connection string via environment variable or user secrets — **never commit credentials**.
+For production, supply the connection string via environment variables or user secrets — **never commit credentials**.
 
 ---
 
@@ -111,48 +127,50 @@ For production, supply the connection string via environment variable or user se
 
 ```
 AOS.Messenger/
-├── AGENTS.md                         # Architectural rules (read before contributing)
+├── AGENTS.md                         # Authoritative architectural rules & phase progress (read before contributing)
 ├── README.md                         # This file
-├── AOS.Messenger.sln
+├── AOS.Messenger.slnx                # Solution file
+├── scripts/                          # Tailwind v4 standalone CLI compilation scripts
+│   ├── build-css.ps1
+│   └── build-css.sh
 │
 ├── src/
 │   ├── AOS.Messenger.Web/
-│   │   ├── Controllers/              # Thin MVC controllers
+│   │   ├── Controllers/              # Thin MVC controllers (delegate to Application)
 │   │   ├── Views/                    # Razor views
-│   │   ├── Extensions/               # Web-layer helper extensions
-│   │   ├── wwwroot/                  # Static assets
-│   │   └── Program.cs                # Composition root
+│   │   ├── Hubs/                     # SignalR hubs (thin realtime push)
+│   │   ├── Middleware/               # Exception handling, CSWSH protection
+│   │   ├── wwwroot/                  # Static assets (MapStaticAssets)
+│   │   └── Program.cs                # Composition root (wires DI, middleware)
 │   │
 │   ├── AOS.Messenger.Application/
-│   │   ├── Common/                   # Shared exceptions, utilities
-│   │   ├── Features/                 # Feature-oriented application services
-│   │   └── DTOs/                     # Data transfer objects
+│   │   ├── Common/                   # Exceptions, interfaces, contracts (IIdentityService, etc.)
+│   │   ├── Services/                 # Application use-case services
+│   │   ├── DTOs/                     # Feature-scoped Data Transfer Objects
+│   │   └── ApplicationServiceRegistration.cs
 │   │
 │   ├── AOS.Messenger.Domain/
 │   │   ├── Common/                   # Entity<T>, ValueObject base classes
-│   │   ├── Entities/                 # Domain entities (added per phase)
-│   │   ├── ValueObjects/             # Value objects
-│   │   └── Rules/                    # Domain invariant classes
+│   │   ├── Entities/                 # Domain entities (Message, Conversation, UserBlock, etc.)
+│   │   ├── ValueObjects/             # Strongly-typed IDs (UserId, ConversationId, MessageId)
+│   │   ├── Exceptions/               # DomainException
+│   │   └── Rules/                    # Domain invariant specifications
 │   │
 │   └── AOS.Messenger.Infrastructure/
-│       ├── Persistence/              # DbContext, entity configs, migrations
-│       └── DependencyInjection/      # InfrastructureServiceRegistration
+│       ├── Identity/                 # ApplicationUser, IdentityService, CurrentUser, cleanup services
+│       ├── Persistence/              # ApplicationDbContext, entity configs, migrations, repositories
+│       └── DependencyInjection/      # InfrastructureServiceRegistration.cs
 │
 └── tests/
-    └── AOS.Messenger.Tests/          # xUnit tests
+    └── AOS.Messenger.Tests/          # Unit, integration, architecture, and LocalDB persistence tests
 ```
 
 ---
 
-## Development Phases
+## Development Roadmap & Status
 
-| Phase | Status | Description |
-|---|---|---|
-| 0 — Foundation | ✅ Complete | Project shell, architecture, build green |
-| 1 — Identity | 🔜 Next | User model, registration, login, cookie auth |
-| 2 — Contacts | ⏳ | Friend requests, contact list |
-| 3 — Messaging | ⏳ | Direct messages via SignalR |
-| 4 — Media | ⏳ | File/image uploads via Cloudflare R2 |
-| 5 — Notifications | ⏳ | Email, web push |
+Architectural invariants, phase definitions, and implementation requirements are maintained authoritatively in **[AGENTS.md](./AGENTS.md)**.
 
-> See [AGENTS.md](./AGENTS.md) for full engineering rules and constraints.
+- **Current Status:** Phase 8 ✅ Complete (Message operations: edit, delete for me, delete for everyone, reply, reactions)
+- **Next Up:** Phase 9 🔜 Next (Media messages and Cloudflare R2 integration)
+

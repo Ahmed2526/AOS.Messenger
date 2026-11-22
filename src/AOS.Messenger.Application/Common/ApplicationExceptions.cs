@@ -20,9 +20,12 @@ public sealed class ForbiddenException : Exception
 }
 
 /// <summary>
-/// Thrown when a business rule or validation constraint is violated.
+/// Thrown when the operation conflicts with existing state
+/// (e.g., duplicate idempotency key with different content, uniqueness violation, optimistic concurrency failure).
 /// </summary>
-public sealed class DomainException : Exception
+public sealed class ConflictException : Exception
 {
-    public DomainException(string message) : base(message) { }
+    public ConflictException(string message) : base(message) { }
+
+    public ConflictException(string message, Exception innerException) : base(message, innerException) { }
 }

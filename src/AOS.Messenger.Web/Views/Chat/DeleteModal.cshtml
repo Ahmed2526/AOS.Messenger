@@ -1,0 +1,125 @@
+@{
+    ViewData["Title"] = "A♡S Messenger - Delete Conversation Modal";
+}
+
+<!-- Ambient Chat Background Layer (Underlying 1-to-1 conversation) -->
+<div class="flex-1 h-full min-h-full w-full flex flex-col bg-[#F8F6F3] dark:bg-[#302F2C] min-w-0 overflow-hidden relative select-none">
+    <div class="layout-container flex h-full grow flex-col">
+        <div class="px-6 md:px-20 lg:px-40 flex flex-1 justify-center py-5">
+            <div class="layout-content-container flex flex-col max-w-[960px] flex-1 h-full justify-between">
+                <!-- Top App Bar -->
+                <header class="flex items-center justify-between whitespace-nowrap border-b border-surface-dim dark:border-[#5B5752] px-6 py-3 bg-surface-bright/80 dark:bg-[#45433F]/80 backdrop-blur-xs rounded-t-xl">
+                    <div class="flex items-center gap-4 text-on-surface dark:text-[#EEE7DF]">
+                        <a asp-controller="Chat" asp-action="Index" class="flex items-center gap-4 text-on-surface dark:text-[#EEE7DF] hover:opacity-80 transition-opacity">
+                            <div class="size-5 text-primary">
+                                <svg fill="none" viewBox="0 0 48 48" xmlns="http://www.w3.org/2000/svg">
+                                    <path clip-rule="evenodd" d="M24 4H42V17.3333V30.6667H24V44H6V30.6667V17.3333H24V4Z" fill="currentColor" fill-rule="evenodd"></path>
+                                </svg>
+                            </div>
+                            <h2 class="text-on-surface dark:text-[#EEE7DF] text-lg font-bold leading-tight tracking-[-0.015em]">A♡S Messenger</h2>
+                        </a>
+                    </div>
+                    <div class="flex flex-1 justify-end gap-6 items-center">
+                        <div class="flex gap-2">
+                            <a asp-controller="Chat" asp-action="VoiceRecording" class="flex items-center justify-center rounded-lg h-10 w-10 bg-surface-container dark:bg-[#514D49] text-on-surface dark:text-[#EEE7DF] hover:bg-surface-variant dark:hover:bg-[#5B5752] transition-colors" title="Voice Call">
+                                <div class="text-on-surface dark:text-[#EEE7DF]" data-icon="Phone" data-size="20px" data-weight="regular">
+                                    <svg fill="currentColor" height="20px" viewBox="0 0 256 256" width="20px" xmlns="http://www.w3.org/2000/svg">
+                                        <path d="M222.37,158.46l-47.11-21.11-.13-.06a16,16,0,0,0-15.17,1.4,8.12,8.12,0,0,0-.75.56L134.87,160c-15.42-7.49-31.34-23.29-38.83-38.51l20.78-24.71c.2-.25.39-.5.57-.77a16,16,0,0,0,1.32-15.06l0-.12L97.54,33.64a16,16,0,0,0-16.62-9.52A56.26,56.26,0,0,0,32,80c0,79.4,64.6,144,144,144a56.26,56.26,0,0,0,55.88-48.92A16,16,0,0,0,222.37,158.46ZM176,208A128.14,128.14,0,0,1,48,80,40.2,40.2,0,0,1,82.87,40a.61.61,0,0,0,0,.12l21,47L83.2,111.86a6.13,6.13,0,0,0-.57.77,16,16,0,0,0-1,15.7c9.06,18.53,27.73,37.06,46.46,46.11a16,16,0,0,0,15.75-1.14,8.44,8.44,0,0,0,.74-.56L168.89,152l47,21.05h0s.08,0,.11,0A40.21,40.21,0,0,1,176,208Z"></path>
+                                    </svg>
+                                </div>
+                            </a>
+                            <button class="flex items-center justify-center rounded-lg h-10 w-10 bg-surface-container dark:bg-[#514D49] text-on-surface dark:text-[#EEE7DF] hover:bg-surface-variant dark:hover:bg-[#5B5752] transition-colors" title="Video Call" type="button">
+                                <div class="text-on-surface dark:text-[#EEE7DF]" data-icon="VideoCamera" data-size="20px" data-weight="regular">
+                                    <svg fill="currentColor" height="20px" viewBox="0 0 256 256" width="20px" xmlns="http://www.w3.org/2000/svg">
+                                        <path d="M251.77,73a8,8,0,0,0-8.21.39L208,97.05V72a16,16,0,0,0-16-16H32A16,16,0,0,0,16,72V184a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V159l35.56,23.71A8,8,0,0,0,248,184a8,8,0,0,0,8-8V80A8,8,0,0,0,251.77,73ZM192,184H32V72H192V184Zm48-22.95-32-21.33V116.28L240,95Z"></path>
+                                    </svg>
+                                </div>
+                            </button>
+                            <a asp-controller="Chat" asp-action="ContextMenu" class="flex items-center justify-center rounded-lg h-10 w-10 bg-surface-container dark:bg-[#514D49] text-on-surface dark:text-[#EEE7DF] hover:bg-surface-variant dark:hover:bg-[#5B5752] transition-colors" title="Options">
+                                <div class="text-on-surface dark:text-[#EEE7DF]" data-icon="DotsThreeVertical" data-size="20px" data-weight="regular">
+                                    <svg fill="currentColor" height="20px" viewBox="0 0 256 256" width="20px" xmlns="http://www.w3.org/2000/svg">
+                                        <path d="M140,128a12,12,0,1,1-12-12A12,12,0,0,1,140,128ZM128,72a12,12,0,1,0-12-12A12,12,0,0,0,128,72Zm0,112a12,12,0,1,0,12,12A12,12,0,0,0,128,184Z"></path>
+                                    </svg>
+                                </div>
+                            </a>
+                        </div>
+                        <a asp-controller="Profile" asp-action="Index" class="w-10 h-10 rounded-full bg-[#B3929D]/20 text-[#B3929D] border border-[#B3929D]/40 font-bold text-sm flex items-center justify-center" title="Profile">
+                            <span class="material-symbols-outlined text-[20px]">person</span>
+                        </a>
+                    </div>
+                </header>
+
+                <!-- Chat Stream Canvas (Blurred Backdrop) -->
+                <div class="flex-1 flex flex-col justify-center items-center px-4 py-6 text-center select-none">
+                    <div class="w-14 h-14 rounded-2xl bg-surface-container-high dark:bg-[#514D49] flex items-center justify-center mb-3 text-[#A07860] dark:text-[#C8C0BA]">
+                        <span class="material-symbols-outlined text-[28px]">forum</span>
+                    </div>
+                    <p class="text-sm font-semibold text-on-surface dark:text-[#EEE7DF]">Direct Conversation</p>
+                    <p class="text-xs text-on-surface-variant dark:text-[#C8C0BA] mt-0.5">Private direct messaging</p>
+                </div>
+
+                <!-- Bottom Chat Composer -->
+                <div class="flex items-center px-4 py-3 gap-3 border-t border-surface-dim dark:border-[#5B5752] bg-surface-bright/70 dark:bg-[#45433F]/70 rounded-b-xl">
+                    <div class="w-10 h-10 rounded-full bg-surface-container dark:bg-[#514D49] text-on-surface-variant dark:text-[#C8C0BA] flex items-center justify-center shrink-0">
+                        <span class="material-symbols-outlined text-[20px]">account_circle</span>
+                    </div>
+                    <label class="flex flex-col min-w-40 h-12 flex-1">
+                        <div class="flex w-full flex-1 items-stretch rounded-xl h-full border border-surface-dim dark:border-[#5B5752] bg-surface-container-lowest dark:bg-[#514D49] focus-within:border-primary transition-all">
+                            <input class="form-input flex w-full min-w-0 flex-1 resize-none overflow-hidden rounded-l-xl text-on-surface dark:text-[#EEE7DF] focus:outline-none focus:ring-0 border-none bg-transparent h-full placeholder:text-outline dark:placeholder-[#C8C0BA] px-4 text-base font-normal" placeholder="Write a message..." readonly="" value="" />
+                            <div class="flex border-none bg-transparent items-center justify-center pr-3">
+                                <div class="flex items-center gap-1">
+                                    <a asp-controller="Chat" asp-action="Attachments" class="flex items-center justify-center p-2 text-outline dark:text-[#C8C0BA] hover:text-on-surface dark:hover:text-[#EEE7DF] transition-colors" title="Attach file">
+                                        <div class="text-outline dark:text-[#C8C0BA]" data-icon="Paperclip" data-size="20px" data-weight="regular">
+                                            <svg fill="currentColor" height="20px" viewBox="0 0 256 256" width="20px" xmlns="http://www.w3.org/2000/svg">
+                                                <path d="M209.66,122.34a8,8,0,0,1,0,11.32l-82.05,82a56,56,0,0,1-79.2-79.21L147.67,35.73a40,40,0,1,1,56.61,56.55L105,193A24,24,0,1,1,71,159L154.3,74.38A8,8,0,1,1,165.7,85.6L82.39,170.31a8,8,0,1,0,11.27,11.36L192.93,81A24,24,0,1,0,159,47L59.76,147.68a40,40,0,1,0,56.53,56.62l82.06-82A8,8,0,0,1,209.66,122.34Z"></path>
+                                            </svg>
+                                        </div>
+                                    </a>
+                                    <button class="flex items-center justify-center p-2 text-outline dark:text-[#C8C0BA] hover:text-on-surface dark:hover:text-[#EEE7DF] transition-colors" type="button" title="Insert Emoji">
+                                        <div class="text-outline dark:text-[#C8C0BA]" data-icon="Smiley" data-size="20px" data-weight="regular">
+                                            <svg fill="currentColor" height="20px" viewBox="0 0 256 256" width="20px" xmlns="http://www.w3.org/2000/svg">
+                                                <path d="M128,24A104,104,0,1,0,232,128,104.11,104.11,0,0,0,128,24Zm0,192a88,88,0,1,1,88-88A88.1,88.1,0,0,1,128,216ZM80,108a12,12,0,1,1,12,12A12,12,0,0,1,80,108Zm96,0a12,12,0,1,1-12-12A12,12,0,0,1,176,108Zm-1.07,48c-10.29,17.79-27.4,28-46.93,28s-36.63-10.2-46.92-28a8,8,0,1,1,13.84-8c7.47,12.91,19.21,20,33.08,20s25.61-7.1,33.07-20a8,8,0,0,1,13.86,8Z"></path>
+                                            </svg>
+                                        </div>
+                                    </button>
+                                    <button class="ml-2 cursor-pointer items-center justify-center overflow-hidden rounded-lg h-9 px-4 bg-primary-container text-on-primary-container font-medium text-sm transition-all" type="button">
+                                        Send
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Focused Confirmation Modal Overlay -->
+<div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-sm transition-opacity duration-200" id="modal-backdrop">
+    <!-- Clickable backdrop to dismiss/navigate back -->
+    <a asp-controller="Chat" asp-action="Conversation" class="fixed inset-0 -z-10" aria-label="Dismiss modal"></a>
+
+    <!-- Modal Card -->
+    <div class="bg-surface-container-lowest dark:bg-[#45433F] border border-[#e4d8d1] dark:border-[#5B5752] rounded-2xl shadow-2xl max-w-sm w-full p-6 text-center transform transition-transform duration-200 scale-100 flex flex-col items-center relative z-10">
+        <!-- Subtle warm badge with alert/trash icon -->
+        <div class="size-12 rounded-full bg-[#fef1ea] dark:bg-[#514D49] text-[#c7624f] flex items-center justify-center mb-4 ring-8 ring-[#c7624f]/10">
+            <span class="material-symbols-outlined text-[24px]">mop</span>
+        </div>
+        <!-- Title (exact text) -->
+        <h3 class="text-stone-900 dark:text-[#EEE7DF] text-xl font-bold tracking-[-0.015em] mb-2 font-headline-lg">Clear chat?</h3>
+        <!-- Message (exact text) -->
+        <p class="text-stone-600 dark:text-[#C8C0BA] text-sm leading-relaxed mb-6 font-body-md">This will clear all messages from your view in this conversation. Other participants will not be affected.</p>
+        <!-- Action Button Row -->
+        <div class="flex items-center justify-center gap-3 w-full">
+            <!-- Secondary Action: Cancel -->
+            <a asp-controller="Chat" asp-action="Conversation" class="flex-1 cursor-pointer rounded-xl px-5 py-2.5 font-medium text-stone-700 dark:text-[#EEE7DF] bg-stone-100 dark:bg-[#514D49] hover:bg-stone-200 dark:hover:bg-[#5B5752] border border-stone-200 dark:border-[#5B5752] transition-colors text-sm text-center inline-flex items-center justify-center">
+                Cancel
+            </a>
+            <!-- Destructive Primary Action: Delete/Clear -->
+            <a asp-controller="Chat" asp-action="Conversation" class="flex-1 cursor-pointer rounded-xl px-6 py-2.5 font-medium text-white bg-[#c7624f] hover:bg-[#b55543] hover:opacity-95 shadow-sm transition-all text-sm text-center inline-flex items-center justify-center">
+                Clear
+            </a>
+        </div>
+    </div>
+</div>

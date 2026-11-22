@@ -1,0 +1,126 @@
+@{
+    Layout = null;
+    ViewData["Title"] = "A♡S Messenger - Mobile 1-to-1 Chat";
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="shell-type" content="mobile_stack" />
+    <title>@(ViewData["Title"] ?? "A♡S Messenger - Mobile 1-to-1 Chat")</title>
+
+    <!-- Theme Initialization (Pre-Paint) -->
+    <script src="~/js/theme-init.js" asp-append-version="true"></script>
+
+    <!-- Compiled Tailwind CSS v4 -->
+    <link rel="stylesheet" href="~/css/app.css" asp-append-version="true" />
+
+    <!-- Warm Modern Messenger Design Theme Styles -->
+    <link rel="stylesheet" href="~/css/stitch-theme.css" asp-append-version="true" />
+    <link rel="stylesheet" href="~/css/site.css" asp-append-version="true" />
+</head>
+<body class="bg-surface text-on-surface font-body-md text-body-md flex flex-col min-h-screen antialiased select-none">
+
+    <!-- Mobile Top Navigation Header -->
+    <header class="fixed top-0 w-full z-50 bg-surface/80 dark:bg-[#3A3A37]/80 backdrop-blur-xl shadow-[0_1px_8px_rgba(0,0,0,0.04)] pt-safe">
+        <div class="h-16 px-space-md flex items-center justify-between gap-space-xs">
+            <div class="flex items-center gap-space-xs flex-1 min-w-0">
+                <a asp-controller="Chat" asp-action="Index" aria-label="Go back" class="min-w-[44px] min-h-[44px] -ml-space-xs flex items-center justify-center text-on-surface hover:text-primary transition-colors">
+                    <span class="material-symbols-outlined text-[22px]">arrow_back_ios_new</span>
+                </a>
+                <div class="flex items-center gap-space-sm flex-1 min-w-0 pr-space-xs">
+                    <div class="relative flex-shrink-0">
+                        <div class="w-9 h-9 rounded-full bg-secondary-container flex items-center justify-center text-on-secondary-container font-headline-sm text-headline-sm font-semibold">
+                            <span class="material-symbols-outlined text-[20px]">person</span>
+                        </div>
+                        <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-[#6F9473] ring-2 ring-surface"></span>
+                    </div>
+                    <div class="flex flex-col min-w-0">
+                        <div class="flex items-center gap-space-xs">
+                            <h1 class="font-headline-sm text-headline-sm font-semibold text-on-surface truncate">Conversation</h1>
+                        </div>
+                        <span class="font-label-sm text-label-sm text-[#6F9473] flex items-center gap-1 font-medium truncate">Direct conversation</span>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center gap-space-xs">
+                <a asp-controller="Chat" asp-action="Attachments" aria-label="Details and media" class="min-w-[44px] min-h-[44px] flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors" title="Attachments & Media">
+                    <span class="material-symbols-outlined text-[22px]">info</span>
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Mobile Chat Message Stream -->
+    <main class="flex-1 flex flex-col relative w-full pt-16 pb-24 bg-surface max-w-[430px] mx-auto overflow-hidden">
+        <div class="flex-1 flex flex-col items-center justify-center p-8 text-center select-none my-auto">
+            <div class="w-16 h-16 rounded-2xl bg-surface-container-high flex items-center justify-center mb-4 shadow-sm text-primary">
+                <span class="material-symbols-outlined text-[32px]">chat_bubble_outline</span>
+            </div>
+            <h2 class="font-headline-sm text-headline-sm font-semibold text-on-surface mb-1">
+                No messages yet
+            </h2>
+            <p class="font-body-sm text-body-sm text-on-surface-variant max-w-xs leading-relaxed">
+                Send a message below to start the conversation.
+            </p>
+        </div>
+
+        <!-- Interactive Quick Action Drawer (Compact Modal overlay toggle) -->
+        <div class="hidden fixed inset-x-0 bottom-20 z-40 px-space-md max-w-[430px] mx-auto animate-fade-in" id="mediaSheet">
+            <div class="bg-surface-container-lowest rounded-2xl p-4 shadow-xl flex items-center justify-around gap-2 border border-outline-variant/30">
+                <a asp-controller="Chat" asp-action="Attachments" class="flex flex-col items-center gap-1 min-w-[60px] p-2 rounded-xl hover:bg-surface-container transition-colors">
+                    <div class="w-11 h-11 rounded-full bg-secondary-container flex items-center justify-center text-on-secondary-container">
+                        <span class="material-symbols-outlined text-[22px]">photo_library</span>
+                    </div>
+                    <span class="font-label-sm text-label-sm text-on-surface font-medium">Gallery</span>
+                </a>
+                <a asp-controller="Chat" asp-action="Attachments" class="flex flex-col items-center gap-1 min-w-[60px] p-2 rounded-xl hover:bg-surface-container transition-colors">
+                    <div class="w-11 h-11 rounded-full bg-tertiary-fixed flex items-center justify-center text-on-tertiary-fixed-variant">
+                        <span class="material-symbols-outlined text-[22px]">description</span>
+                    </div>
+                    <span class="font-label-sm text-label-sm text-on-surface font-medium">Document</span>
+                </a>
+                <button type="button" class="flex flex-col items-center gap-1 min-w-[60px] p-2 rounded-xl hover:bg-surface-container transition-colors">
+                    <div class="w-11 h-11 rounded-full bg-primary-fixed-dim flex items-center justify-center text-on-primary-fixed-variant">
+                        <span class="material-symbols-outlined text-[22px]">photo_camera</span>
+                    </div>
+                    <span class="font-label-sm text-label-sm text-on-surface font-medium">Camera</span>
+                </button>
+                <button type="button" class="flex flex-col items-center gap-1 min-w-[60px] p-2 rounded-xl hover:bg-surface-container transition-colors">
+                    <div class="w-11 h-11 rounded-full bg-surface-container-high flex items-center justify-center text-secondary">
+                        <span class="material-symbols-outlined text-[22px]">location_on</span>
+                    </div>
+                    <span class="font-label-sm text-label-sm text-on-surface font-medium">Location</span>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Mobile Fixed Bottom Action Bar -->
+    <footer class="fixed bottom-0 w-full z-50 bg-surface/85 dark:bg-[#3A3A37]/85 backdrop-blur-xl shadow-[0_-2px_12px_rgba(0,0,0,0.03)] pb-safe pb-6">
+        <div class="max-w-[430px] mx-auto px-space-md py-space-sm flex items-end gap-space-xs">
+            <button type="button" aria-label="Attach media" class="min-w-[44px] min-h-[44px] flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-full transition-colors">
+                <span class="material-symbols-outlined text-[22px]">add</span>
+            </button>
+            <div class="flex-1 min-h-[44px] py-1.5 px-space-md bg-surface-container-lowest rounded-xl flex items-center gap-space-xs shadow-[0_1px_4px_rgba(0,0,0,0.03)] border border-outline-variant/30">
+                <textarea class="w-full bg-transparent border-0 resize-none font-body-md text-body-md text-on-surface placeholder:text-outline focus:outline-none max-h-24" placeholder="Write a message..." rows="1"></textarea>
+                <button type="button" aria-label="Insert emotion glyph" class="min-w-[36px] min-h-[36px] flex items-center justify-center text-on-surface-variant hover:text-primary transition-colors flex-shrink-0">
+                    <span class="material-symbols-outlined text-[20px]">sentiment_satisfied</span>
+                </button>
+            </div>
+            <a asp-controller="Chat" asp-action="VoiceRecording" aria-label="Audio memo" class="min-w-[44px] min-h-[44px] flex items-center justify-center text-on-surface-variant hover:text-on-surface rounded-full transition-colors flex-shrink-0" title="Record Voice Note">
+                <span class="material-symbols-outlined text-[22px]">mic</span>
+            </a>
+            <button type="button" aria-label="Send message" class="min-w-[44px] min-h-[44px] rounded-full bg-primary text-on-primary flex items-center justify-center hover:brightness-95 active:scale-95 transition-all shadow-[0_2px_8px_rgba(115,87,97,0.24)] flex-shrink-0">
+                <span class="material-symbols-outlined text-[20px]">north</span>
+            </button>
+        </div>
+    </footer>
+
+    <!-- Interactive Client Scripts -->
+    <script type="module" src="~/js/theme.js" asp-append-version="true"></script>
+    <script src="~/js/site.js" asp-append-version="true"></script>
+    <script type="module" src="~/js/mobile-page.js" asp-append-version="true"></script>
+</body>
+</html>

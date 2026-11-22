@@ -1,0 +1,191 @@
+@using System.Security.Claims
+@using AOS.Messenger.Application.DTOs
+@using AOS.Messenger.Domain.ValueObjects
+@using AOS.Messenger.Web.ViewComponents
+@model AOS.Messenger.Web.ViewComponents.ConversationSidebarViewModel
+@{
+    var isAuthenticated = User.Identity?.IsAuthenticated == true;
+    var displayName = User.FindFirst("DisplayName")?.Value;
+    if (string.IsNullOrWhiteSpace(displayName))
+    {
+        displayName = User.Identity?.Name ?? (isAuthenticated ? "User" : "Guest");
+    }
+
+    var initials = "U";
+    if (!string.IsNullOrWhiteSpace(displayName))
+    {
+        var parts = displayName.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 1 && parts[0].Length > 0 && parts[1].Length > 0)
+        {
+            initials = (parts[0][0].ToString() + parts[1][0].ToString()).ToUpperInvariant();
+        }
+        else if (parts.Length == 1 && parts[0].Length > 0)
+        {
+            initials = parts[0].Substring(0, Math.Min(2, parts[0].Length)).ToUpperInvariant();
+        }
+    }
+}
+
+@functions {
+    public static string GetInitials(string? name, string? handle)
+    {
+        var raw = !string.IsNullOrWhiteSpace(name) ? name : (!string.IsNullOrWhiteSpace(handle) ? handle : "U");
+        var parts = raw.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length > 1 && parts[0].Length > 0 && parts[1].Length > 0)
+        {
+            return (parts[0][0].ToString() + parts[1][0].ToString()).ToUpperInvariant();
+        }
+        if (parts.Length == 1 && parts[0].Length > 0)
+        {
+            return parts[0].Substring(0, Math.Min(2, parts[0].Length)).ToUpperInvariant();
+        }
+        return "U";
+    }
+}
+
+<!-- LEFT SIDEBAR: Conversation List -->
+<aside class="w-full h-full bg-[#F0E9DF] dark:bg-[#3A3835] border-r border-[#E3DCD7] dark:border-[#514D48] flex flex-col z-10 select-none">
+
+    <!-- Logo & Profile Banner -->
+    <div class="p-4 pb-3 border-b border-[#E3DCD7] dark:border-[#514D48] bg-[#F0E9DF] dark:bg-[#3A3835] flex items-center justify-between">
+        <a asp-controller="Chat" asp-action="Index" class="flex items-center gap-2.5 hover:opacity-90 transition-opacity">
+            <!-- A♡S Brand Monogram Graphic -->
+            <div class="w-10 h-10 rounded-lg bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center shadow-xs">
+                <svg width="28" height="24" viewBox="0 0 70 50" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 40L22 10L32 40M15 31H29" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                    <path d="M35 24C35 22 36.5 19 39 19C41.5 19 43 21 43 23C43 27 35 32 35 32C35 32 27 27 27 23C27 21 28.5 19 31 19C33.5 19 35 22 35 24Z" fill="#B3929D" stroke="#B3929D" stroke-width="1.5"></path>
+                    <path d="M42 38C46 41 54 41 56 36C58 31 46 29 48 20C50 13 58 13 62 17" stroke="#A07860" class="dark:stroke-[#F0E9E2]" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"></path>
+                </svg>
+            </div>
+            <div>
+                <div class="flex items-center gap-1.5">
+                    <h1 class="text-base font-bold text-[#2B2725] dark:text-[#F0E9E2] leading-tight tracking-tight">A♡S Messenger</h1>
+                </div>
+                <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9] font-medium">1-to-1 Private Network</p>
+            </div>
+        </a>
+
+        <!-- Sidebar Actions -->
+        <div class="flex items-center gap-1">
+            <a asp-controller="Chat" asp-action="NewConversation" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="New Chat">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+            </a>
+            <a asp-controller="Settings" asp-action="Index" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="Settings">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+            </a>
+        </div>
+    </div>
+
+    <!-- Search Input Container -->
+    <div class="px-3.5 py-3 border-b border-[#E3DCD7] dark:border-[#514D48] bg-[#F0E9DF]/80 dark:bg-[#3A3835]">
+        <div class="relative flex items-center">
+            <svg class="absolute left-3 w-4 h-4 text-[#6E6560] dark:text-[#C9C0B9]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path>
+            </svg>
+            <input id="conversationSearchInput" type="text" placeholder="Search conversations..." aria-label="Search conversations" class="w-full pl-9 pr-3.5 py-2 text-xs font-medium rounded-lg bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] transition-all shadow-2xs">
+        </div>
+    </div>
+
+    <!-- Filter Tabs / Categories -->
+    <div class="px-3.5 py-2 flex items-center gap-1.5 border-b border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold">
+        <a asp-controller="Chat" asp-action="Index" class="px-2.5 py-1 rounded-md bg-[#B3929D] text-white">All Chats</a>
+        <a asp-controller="Chat" asp-action="Archived" class="ml-auto p-1 rounded text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60 transition-colors flex items-center gap-1 text-xs" title="Archived Chats">
+            <span class="material-symbols-outlined text-[16px] block">archive</span>
+            <span>Archived</span>
+        </a>
+    </div>
+
+    <!-- Conversations Scrollable Area -->
+    <div class="flex-1 overflow-y-auto custom-scroll" id="conversationList">
+        @if (Model.Conversations is not null && Model.Conversations.Count > 0)
+        {
+            <div class="p-2 space-y-1">
+                @foreach (var conv in Model.Conversations)
+                {
+                    var isActive = Model.ActiveConversationId is not null && Model.ActiveConversationId.Equals(conv.Id);
+                    var convInitials = GetInitials(conv.OtherParticipantName, conv.OtherParticipantHandle);
+
+                    <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value"
+                       data-conversation-id="@conv.Id.Value"
+                       data-peer-user-id="@conv.OtherParticipantId.Value"
+                       data-last-message-id="@(conv.LastMessageId?.Value.ToString() ?? "")"
+                       data-search="@conv.OtherParticipantName @conv.OtherParticipantHandle @conv.LastMessagePreview"
+                       class="conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all @(isActive ? "bg-[#FFFFFF] dark:bg-[#45423E] shadow-xs border border-[#E3DCD7] dark:border-[#514D48]" : "hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/50 border border-transparent")">
+                        <div class="relative flex-shrink-0">
+                            <div class="w-11 h-11 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
+                                @convInitials
+                            </div>
+                            <span class="presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(conv.IsOnline ? "bg-[#6F9473]" : "bg-stone-400 dark:bg-stone-500") border-2 border-[#F0E9DF] dark:border-[#3A3835]"></span>
+                        </div>
+                        <div class="flex-1 min-w-0">
+                            <div class="flex items-center justify-between gap-1 mb-0.5">
+                                <span class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">@conv.OtherParticipantName</span>
+                                <div class="flex items-center gap-1 flex-shrink-0">
+                                    @if (conv.IsPinned)
+                                    {
+                                        <span class="material-symbols-outlined text-[14px] text-[#A07860] dark:text-[#D8C080]" title="Pinned">push_pin</span>
+                                    }
+                                    @if (conv.IsMuted)
+                                    {
+                                        <span class="material-symbols-outlined text-[14px] text-[#6E6560] dark:text-[#C9C0B9]" title="Muted">volume_off</span>
+                                    }
+                                    @if (conv.UnreadCount > 0)
+                                    {
+                                        <span class="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white">
+                                            @conv.UnreadCount
+                                        </span>
+                                    }
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-between gap-1">
+                                <span class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9] truncate conversation-last-message">
+                                    @(string.IsNullOrWhiteSpace(conv.LastMessagePreview) ? "No messages yet" : conv.LastMessagePreview)
+                                </span>
+                                <span class="text-[10px] text-[#A07860] dark:text-[#C9C0B9] flex-shrink-0">
+                                    @@@conv.OtherParticipantHandle
+                                </span>
+                            </div>
+                        </div>
+                    </a>
+                }
+            </div>
+        }
+        else
+        {
+            <!-- Empty State -->
+            <div class="h-full p-6 flex flex-col items-center justify-center text-center">
+                <div class="w-14 h-14 rounded-2xl bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center text-[#B3929D] shadow-xs mb-3.5">
+                    <span class="material-symbols-outlined text-[28px]">chat_bubble_outline</span>
+                </div>
+                <h3 class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] mb-1">No conversations yet</h3>
+                <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9] leading-relaxed max-w-[220px] mb-4">
+                    Find a contact in the directory to start chatting
+                </p>
+                <a asp-controller="Chat" asp-action="NewConversation" class="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#B3929D] hover:bg-[#A07860] text-white text-xs font-semibold shadow-xs transition-colors">
+                    <span class="material-symbols-outlined text-[16px]">add</span>
+                    <span>Start a chat</span>
+                </a>
+            </div>
+        }
+    </div>
+
+    <!-- Bottom Profile Summary Card in Left Sidebar -->
+    <div class="p-3 bg-[#F0E9DF] dark:bg-[#3A3835] border-t border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between">
+        <a asp-controller="Profile" asp-action="Index" class="flex items-center gap-2.5 min-w-0 hover:opacity-90 transition-opacity">
+            <div class="relative flex-shrink-0">
+                <div class="w-9 h-9 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
+                    @initials
+                </div>
+                <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(isAuthenticated ? "bg-[#6F9473]" : "bg-stone-400") border-2 border-[#F0E9DF] dark:border-[#3A3835]"></span>
+            </div>
+            <div class="min-w-0">
+                <div class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">@displayName</div>
+                <div class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">@(isAuthenticated ? "Available" : "Offline")</div>
+            </div>
+        </a>
+        <a asp-controller="Profile" asp-action="Index" class="p-1.5 rounded-md text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7] dark:hover:bg-[#45423E] transition-colors" title="My Profile &amp; Status">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+        </a>
+    </div>
+
+</aside>

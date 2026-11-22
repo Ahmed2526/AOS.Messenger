@@ -1,0 +1,58 @@
+@model AOS.Messenger.Web.Controllers.RecoverAccountViewModel
+@{
+    ViewData["Title"] = "Recover Account";
+}
+
+<div class="w-full flex-1 min-h-[calc(100vh-140px)] flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full space-y-6 bg-surface-lowest dark:bg-[#1E1F23] p-8 rounded-2xl border border-outline-variant/30 shadow-xl">
+        <div class="text-center">
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 text-primary mb-3">
+                <span class="material-symbols-outlined text-3xl">restore</span>
+            </div>
+            <h2 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Recover Deleted Account</h2>
+            <p class="text-sm text-secondary dark:text-gray-400 mt-1">Enter your credentials to receive an account recovery link</p>
+        </div>
+
+        @if (TempData["SuccessMessage"] is not null)
+        {
+            <div class="p-4 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-xl text-sm text-emerald-800 dark:text-emerald-200">
+                @TempData["SuccessMessage"]
+            </div>
+        }
+
+        @if (TempData["ErrorMessage"] is not null)
+        {
+            <div class="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-lg text-sm text-red-800 dark:text-red-200">
+                @TempData["ErrorMessage"]
+            </div>
+        }
+
+        <form asp-action="RecoverAccount" method="post" class="space-y-4">
+            @Html.AntiForgeryToken()
+            @if (!ViewData.ModelState.IsValid)
+            {
+                <div asp-validation-summary="ModelOnly" class="text-xs text-error dark:text-red-400 bg-error-container/20 p-2.5 rounded-lg"></div>
+            }
+
+            <div>
+                <label asp-for="UsernameOrEmail" class="block text-xs font-semibold text-on-surface dark:text-gray-300 uppercase tracking-wider mb-1.5"></label>
+                <input asp-for="UsernameOrEmail" class="w-full px-4 py-2.5 bg-surface-low dark:bg-[#2A2B30] border border-outline-variant/40 rounded-xl text-sm text-on-surface dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary" placeholder="Username or email" aria-label="Username or Email" autofocus required />
+                <span asp-validation-for="UsernameOrEmail" class="text-xs text-error dark:text-red-400 mt-1 block"></span>
+            </div>
+
+            <div>
+                <label asp-for="Password" class="block text-xs font-semibold text-on-surface dark:text-gray-300 uppercase tracking-wider mb-1.5"></label>
+                <input asp-for="Password" type="password" class="w-full px-4 py-2.5 bg-surface-low dark:bg-[#2A2B30] border border-outline-variant/40 rounded-xl text-sm text-on-surface dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary" placeholder="••••••••" aria-label="Password" required />
+                <span asp-validation-for="Password" class="text-xs text-error dark:text-red-400 mt-1 block"></span>
+            </div>
+
+            <button type="submit" class="w-full py-2.5 px-4 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 transition-all shadow-md">
+                Send Recovery Link
+            </button>
+        </form>
+
+        <div class="text-center pt-2">
+            <a asp-action="Login" class="text-xs text-primary font-semibold hover:underline">Back to Login</a>
+        </div>
+    </div>
+</div>

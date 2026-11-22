@@ -1,0 +1,80 @@
+@model AOS.Messenger.Web.Controllers.LoginViewModel
+@{
+    ViewData["Title"] = "Log In";
+}
+
+<div class="w-full flex-1 min-h-[calc(100vh-140px)] flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8">
+    <div class="max-w-md w-full space-y-8 bg-surface-lowest dark:bg-[#1E1F23] p-8 rounded-2xl border border-outline-variant/30 shadow-xl">
+        <div class="text-center">
+            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-primary/10 text-primary mb-3">
+                <span class="material-symbols-outlined text-3xl">chat_bubble</span>
+            </div>
+            <h2 class="text-2xl font-bold font-headline text-on-surface dark:text-white">Welcome back</h2>
+            <p class="text-sm text-secondary dark:text-gray-400 mt-1">Sign in to your AOS Messenger account</p>
+        </div>
+
+        @if (TempData["SuccessMessage"] is not null)
+        {
+            <div class="p-3 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-800 rounded-lg text-sm text-emerald-800 dark:text-emerald-200">
+                @TempData["SuccessMessage"]
+            </div>
+        }
+
+        @if (TempData["ErrorMessage"] is not null)
+        {
+            <div class="p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-lg text-sm text-red-800 dark:text-red-200">
+                @TempData["ErrorMessage"]
+            </div>
+        }
+
+        <form asp-action="Login" asp-route-returnUrl="@ViewData["ReturnUrl"]" method="post" class="mt-6 space-y-5">
+            @if (!ViewData.ModelState.IsValid)
+            {
+                <div asp-validation-summary="ModelOnly" class="text-xs text-error dark:text-red-400 bg-error-container/20 p-2.5 rounded-lg"></div>
+            }
+
+            <div>
+                <label asp-for="UserNameOrEmail" class="block text-xs font-semibold text-on-surface dark:text-gray-300 uppercase tracking-wider mb-1.5"></label>
+                <div class="relative">
+                    <span class="material-symbols-outlined absolute left-3 top-2.5 text-gray-400 text-xl">person</span>
+                    <input asp-for="UserNameOrEmail" class="w-full pl-10 pr-4 py-2.5 bg-surface-low dark:bg-[#2A2B30] border border-outline-variant/40 rounded-xl text-sm text-on-surface dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all" placeholder="username or email@example.com" autofocus />
+                </div>
+                <span asp-validation-for="UserNameOrEmail" class="text-xs text-error dark:text-red-400 mt-1 block"></span>
+            </div>
+
+            <div>
+                <div class="flex items-center justify-between mb-1.5">
+                    <label asp-for="Password" class="block text-xs font-semibold text-on-surface dark:text-gray-300 uppercase tracking-wider"></label>
+                    <a asp-action="ForgotPassword" class="text-xs text-primary hover:underline font-medium">Forgot password?</a>
+                </div>
+                <div class="relative">
+                    <span class="material-symbols-outlined absolute left-3 top-2.5 text-gray-400 text-xl">lock</span>
+                    <input asp-for="Password" class="w-full pl-10 pr-4 py-2.5 bg-surface-low dark:bg-[#2A2B30] border border-outline-variant/40 rounded-xl text-sm text-on-surface dark:text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent transition-all" placeholder="••••••••" />
+                </div>
+                <span asp-validation-for="Password" class="text-xs text-error dark:text-red-400 mt-1 block"></span>
+            </div>
+
+            <div class="flex items-center justify-between">
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input asp-for="RememberMe" type="checkbox" class="w-4 h-4 rounded border-gray-300 text-primary focus:ring-primary" />
+                    <span class="text-xs text-secondary dark:text-gray-400">Remember me for 30 days</span>
+                </label>
+            </div>
+
+            <button type="submit" class="w-full py-2.5 px-4 bg-primary text-white rounded-xl text-sm font-semibold hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2 transition-all shadow-md">
+                Sign In
+            </button>
+        </form>
+
+        <div class="text-center pt-2 border-t border-outline-variant/20 space-y-2">
+            <p class="text-xs text-secondary dark:text-gray-400">
+                Don't have an account?
+                <a asp-action="Register" class="text-primary font-semibold hover:underline">Create an account</a>
+            </p>
+            <p class="text-xs text-secondary dark:text-gray-400">
+                Deleted your account?
+                <a asp-controller="Account" asp-action="RecoverAccount" class="text-primary font-semibold hover:underline">Recover it here</a>
+            </p>
+        </div>
+    </div>
+</div>

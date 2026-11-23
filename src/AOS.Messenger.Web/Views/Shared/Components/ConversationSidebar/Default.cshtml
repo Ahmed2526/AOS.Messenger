@@ -4,6 +4,11 @@
 @using AOS.Messenger.Web.ViewComponents
 @model AOS.Messenger.Web.ViewComponents.ConversationSidebarViewModel
 @{
+    var currentController = ViewContext.RouteData.Values["controller"]?.ToString() ?? "";
+    var currentAction = ViewContext.RouteData.Values["action"]?.ToString() ?? "";
+    var isArchivedView = string.Equals(currentController, "Chat", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(currentAction, "Archived", StringComparison.OrdinalIgnoreCase);
+
     var isAuthenticated = User.Identity?.IsAuthenticated == true;
     var displayName = User.FindFirst("DisplayName")?.Value;
     if (string.IsNullOrWhiteSpace(displayName))
@@ -88,8 +93,15 @@
 
     <!-- Filter Tabs / Categories -->
     <div class="px-3.5 py-2 flex items-center gap-1.5 border-b border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold">
-        <a asp-controller="Chat" asp-action="Index" class="px-2.5 py-1 rounded-md bg-[#B3929D] text-white">All Chats</a>
-        <a asp-controller="Chat" asp-action="Archived" class="ml-auto p-1 rounded text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60 transition-colors flex items-center gap-1 text-xs" title="Archived Chats">
+        <a asp-controller="Chat"
+           asp-action="Index"
+           aria-current="@(!isArchivedView ? "page" : null)"
+           class="px-2.5 py-1 rounded-md transition-colors @(!isArchivedView ? "bg-[#B3929D] text-white" : "text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60")">All Chats</a>
+        <a asp-controller="Chat"
+           asp-action="Archived"
+           aria-current="@(isArchivedView ? "page" : null)"
+           class="ml-auto rounded-md transition-colors flex items-center gap-1 text-xs @(isArchivedView ? "px-2.5 py-1 bg-[#B3929D] text-white" : "px-2 py-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60")"
+           title="Archived Chats">
             <span class="material-symbols-outlined text-[16px] block">archive</span>
             <span>Archived</span>
         </a>
@@ -109,6 +121,8 @@
                     var convInitials = GetInitials(conv.OtherParticipantName, conv.OtherParticipantHandle);
 
                     <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value"
+                       data-conversation-link="true"
+                       aria-current="@(isActive ? "page" : null)"
                        data-conversation-id="@conv.Id.Value"
                        data-peer-user-id="@conv.OtherParticipantId.Value"
                        data-peer-name="@conv.OtherParticipantName"

@@ -10,6 +10,8 @@
  * - Handles hidden/blocked peer presence gracefully.
  */
 
+import { getPresence } from './api-client.js';
+
 /**
  * Formats an ISO-8601 UTC timestamp to a user-friendly relative time string.
  * Strictly returns a plain string, never HTML.
@@ -72,7 +74,9 @@ function updateHeaderPresence(headerElement, peerUserId, isOnline, lastSeenAtUtc
     if (!headerElement || !peerUserId) return;
 
     const currentPeerId = headerElement.getAttribute('data-peer-user-id');
-    if (currentPeerId && String(currentPeerId).toLowerCase() !== String(peerUserId).toLowerCase()) {
+    const normalizedCurrentPeerId = currentPeerId ? String(currentPeerId).trim().toLowerCase() : '';
+    const normalizedPeerId = String(peerUserId).trim().toLowerCase();
+    if (!normalizedCurrentPeerId || normalizedCurrentPeerId !== normalizedPeerId) {
         return;
     }
 
@@ -141,21 +145,7 @@ function updateSidebarPresence(listElement, peerUserId, isOnline) {
  */
 export async function fetchPresence(conversationListElement, activeHeaderElement) {
     try {
-        const token = typeof document !== 'undefined'
-            ? document.querySelector('input[name="__RequestVerificationToken"]')?.value || ''
-            : '';
-        const headers = { 'Accept': 'application/json' };
-        if (token) {
-            headers['RequestVerificationToken'] = token;
-        }
-
-        const resp = await fetch('/api/presence', {
-            headers: headers
-        });
-
-        if (!resp.ok) return;
-
-        const data = await resp.json();
+        const data = await getPresence();
         if (!data) return;
 
         if (Array.isArray(data)) {
@@ -199,7 +189,33 @@ export async function fetchPresence(conversationListElement, activeHeaderElement
  * @param {HTMLElement} activeHeaderElement
  * @returns {object} Presence controller
  */
-export function setupPresence(connection, conversationListElement, activeHeaderElement) {
+export function resetHeaderPresence(headerElement) {
+    if (!headerElement) return;
+    headerElement.setAttribute('data-peer-user-id', '');
+
+    const dot = headerElement.querySelector('#header-presence-dot') ||
+                headerElement.querySelector('[data-presence-dot]');
+    if (dot) {
+        dot.className = 'absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-stone-400 dark:bg-stone-500 border-2 border-[#FFFFFF] dark:border-[#3A3835]';
+    }
+
+    const text = headerElement.querySelector('#header-presence-text') ||
+                 headerElement.querySelector('[data-presence-text]');
+    if (text) {
+        text.textContent = 'Offline';
+    }
+}
+
+/**
+ * Initializes presence tracking on the SignalR connection and elements.
+ *
+ * @param {object} connection - SignalR HubConnection
+ * @param {HTMLElement} conversationListElement
+ * @param {HTMLElement} activeHeaderElement
+ * @param {{ skipInitialFetch?: boolean }} [options]
+ * @returns {object} Presence controller
+ */
+export function setupPresence(connection, conversationListElement, activeHeaderElement, options = {}) {
     function handlePresenceChanged(presence) {
         if (!presence) return;
         const uId = presence.userId || presence.UserId;
@@ -216,13 +232,17 @@ export function setupPresence(connection, conversationListElement, activeHeaderE
         connection.on('ReceivePresenceChanged', handlePresenceChanged);
     }
 
-    // Initial presence fetch from REST API
-    fetchPresence(conversationListElement, activeHeaderElement);
+    // Initial presence fetch from REST API (skipped when caller defers initial fetch to SignalR startup)
+    if (!options?.skipInitialFetch) {
+        fetchPresence(conversationListElement, activeHeaderElement);
+    }
 
     return {
+        handlePresenceChanged,
         updateHeaderPresence: (uId, isOnline, lastSeen) => updateHeaderPresence(activeHeaderElement, uId, isOnline, lastSeen),
         updateSidebarPresence: (uId, isOnline) => updateSidebarPresence(conversationListElement, uId, isOnline),
         fetchPresence: () => fetchPresence(conversationListElement, activeHeaderElement),
+        resetHeaderPresence: () => resetHeaderPresence(activeHeaderElement),
         formatLastSeen,
         destroy: () => {
             if (connection && typeof connection.off === 'function') {
@@ -235,7 +255,8 @@ export function setupPresence(connection, conversationListElement, activeHeaderE
 const presenceApi = {
     setupPresence,
     formatLastSeen,
-    fetchPresence
+    fetchPresence,
+    resetHeaderPresence
 };
 
 if (typeof window !== 'undefined') {

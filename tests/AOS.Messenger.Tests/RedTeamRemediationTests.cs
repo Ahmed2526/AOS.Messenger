@@ -605,25 +605,33 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
     [Fact]
     public void RT005_ChatRealtimeJs_StateReconciliation_DoesNotQueryInvertedCursor()
     {
-        var scriptPath = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
-        Assert.True(File.Exists(scriptPath));
+        var slnRoot = FindSolutionRoot();
+        var legacyRealtimePath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
+        var apiClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "api-client.js");
+        Assert.False(File.Exists(legacyRealtimePath), "Legacy chat-realtime.js must remain retired.");
+        Assert.True(File.Exists(signalrClientPath));
+        Assert.True(File.Exists(apiClientPath));
 
-        var content = File.ReadAllText(scriptPath);
+        var signalrClientContent = File.ReadAllText(signalrClientPath);
+        var apiClientContent = File.ReadAllText(apiClientPath);
 
-        // Step 1 inverted cursor query must be removed
-        Assert.DoesNotContain("cursor=${encodeURIComponent(latestReceivedCursor)}", content);
+        // Inverted cursor query must be absent in unified SignalR & API client modules
+        Assert.DoesNotContain("cursor=${encodeURIComponent(latestReceivedCursor)}", signalrClientContent);
+        Assert.DoesNotContain("cursor=${encodeURIComponent(latestReceivedCursor)}", apiClientContent);
 
-        // Must query latest messages page
-        Assert.Contains("pageSize=30", content);
+        // Must query latest messages page with pageSize 30
+        Assert.Contains("pageSize: 30", signalrClientContent);
+        Assert.Contains("pageSize = 30", apiClientContent);
     }
 
     [Fact]
     public void RT007_ConversationPageJs_HasRapidEnterDoubleSubmitGuard()
     {
-        var scriptPath = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "conversation-page.js");
-        Assert.True(File.Exists(scriptPath));
+        var composerPath = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "composer.js");
+        Assert.True(File.Exists(composerPath));
 
-        var content = File.ReadAllText(scriptPath);
+        var content = File.ReadAllText(composerPath);
 
         // Must declare re-entrancy flag
         Assert.Contains("isSending", content);
@@ -632,22 +640,33 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         Assert.Contains("inputEl.disabled = true", content);
         Assert.Contains("sendBtn.disabled = true", content);
 
-        // Must restore state in finally block
+        // Must restore state cleanly when complete
         Assert.Contains("isSending = false", content);
     }
 
     [Fact]
     public void RT012_ChatRealtimeJs_HandlesRevokedSession_WithCleanRedirect()
     {
-        var scriptPath = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
-        Assert.True(File.Exists(scriptPath));
+        var slnRoot = FindSolutionRoot();
+        var legacyRealtimePath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
+        var chatShellPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-shell.js");
+        var sidebarPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "sidebar.js");
+        Assert.False(File.Exists(legacyRealtimePath), "Legacy chat-realtime.js must remain retired.");
+        Assert.True(File.Exists(signalrClientPath));
+        Assert.True(File.Exists(chatShellPath));
+        Assert.True(File.Exists(sidebarPath));
 
-        var content = File.ReadAllText(scriptPath);
+        var signalrClientContent = File.ReadAllText(signalrClientPath);
+        var chatShellContent = File.ReadAllText(chatShellPath);
+        var sidebarContent = File.ReadAllText(sidebarPath);
 
-        // Must detect 401/403 and redirect without infinite reconnect loop
-        Assert.Contains("handleSessionExpired", content);
-        Assert.Contains("/Account/Login?sessionExpired=true", content);
-        Assert.Contains("connection.stop()", content);
+        Assert.Contains("isSessionRevokedSignalRError", signalrClientContent);
+        Assert.Contains("connection.stop()", signalrClientContent);
+        Assert.Contains("handleSessionExpired", chatShellContent);
+        Assert.Contains("sessionExpired=true", chatShellContent);
+        Assert.Contains("handleSessionExpired", sidebarContent);
+        Assert.Contains("sessionExpired=true", sidebarContent);
     }
 
     // =========================================================================

@@ -31,7 +31,7 @@ public sealed class PresenceController : ControllerBase
         var callerId = _currentUser.Id;
         if (callerId is null)
         {
-            return Forbid();
+            return Unauthorized();
         }
 
         var presences = await _presenceService.GetPresenceForConversationsAsync(callerId, ct);
@@ -44,7 +44,7 @@ public sealed class PresenceController : ControllerBase
         var callerId = _currentUser.Id;
         if (callerId is null)
         {
-            return Forbid();
+            return Unauthorized();
         }
 
         var presence = await _presenceService.GetPeerPresenceAsync(callerId, new UserId(userId), ct);

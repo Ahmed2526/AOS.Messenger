@@ -22,7 +22,7 @@ public sealed class SessionService : ISessionService
         _db = db;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _terminator = terminator ?? NullSessionConnectionTerminator.Instance;
-        _sessionCache = sessionCache ?? SessionCache.Instance;
+        _sessionCache = sessionCache ?? new SessionCache(_timeProvider);
     }
 
     public async Task<IReadOnlyList<UserSessionDto>> GetActiveSessionsAsync(
@@ -71,10 +71,7 @@ public sealed class SessionService : ISessionService
         await _db.SaveChangesAsync(ct);
 
         _sessionCache.Set(session.Id, new CachedSessionInfo(IsRevoked: false, AbsoluteExpiresAtUtc: session.AbsoluteExpiresAtUtc));
-        if (_sessionCache is SessionCache concreteCache)
-        {
-            concreteCache.SetLastActiveAtUtc(session.Id, now);
-        }
+        _sessionCache.SetLastActiveAtUtc(session.Id, now);
 
         return session.Id;
     }
@@ -156,9 +153,9 @@ public sealed class SessionService : ISessionService
         }
 
         _sessionCache.Set(sessionId, new CachedSessionInfo(session.IsRevoked, session.AbsoluteExpiresAtUtc));
-        if (!session.IsRevoked && _sessionCache is SessionCache concreteCache)
+        if (!session.IsRevoked)
         {
-            concreteCache.SetLastActiveAtUtc(sessionId, session.LastActiveAtUtc);
+            _sessionCache.SetLastActiveAtUtc(sessionId, session.LastActiveAtUtc);
         }
 
         return !session.IsRevoked && now < session.AbsoluteExpiresAtUtc;
@@ -171,10 +168,7 @@ public sealed class SessionService : ISessionService
             .Where(s => s.Id == sessionId && !s.IsRevoked)
             .ExecuteUpdateAsync(s => s.SetProperty(x => x.LastActiveAtUtc, now), ct);
 
-        if (_sessionCache is SessionCache concreteCache)
-        {
-            concreteCache.SetLastActiveAtUtc(sessionId, now);
-        }
+        _sessionCache.SetLastActiveAtUtc(sessionId, now);
     }
 
     public async Task RevokeAllSessionsAsync(UserId userId, CancellationToken ct = default)

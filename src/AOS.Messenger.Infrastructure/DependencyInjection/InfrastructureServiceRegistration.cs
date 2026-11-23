@@ -112,7 +112,7 @@ public static class InfrastructureServiceRegistration
                     }
 
                     // 4. Update activity periodically (throttled to once every 5 minutes, directly awaited without fire-and-forget background tasks)
-                    var sessionCache = context.HttpContext.RequestServices.GetService<ISessionCache>() as SessionCache ?? SessionCache.Instance;
+                    var sessionCache = context.HttpContext.RequestServices.GetRequiredService<ISessionCache>();
                     var timeProvider = context.HttpContext.RequestServices.GetService<TimeProvider>() ?? TimeProvider.System;
                     var now = timeProvider.GetUtcNow();
                     var lastActive = sessionCache.GetLastActiveAtUtc(sessionId);
@@ -121,14 +121,40 @@ public static class InfrastructureServiceRegistration
                         await sessionService.UpdateSessionActivityAsync(sessionId, context.HttpContext.RequestAborted);
                         sessionCache.SetLastActiveAtUtc(sessionId, now);
                     }
+                },
+                OnRedirectToLogin = context =>
+                {
+                    if (IsApiOrHubRequest(context.Request))
+                    {
+                        context.Response.Headers.CacheControl = "no-store, no-cache";
+                        context.Response.Headers.Pragma = "no-cache";
+                        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                        return Task.CompletedTask;
+                    }
+
+                    context.Response.Redirect(context.RedirectUri);
+                    return Task.CompletedTask;
+                },
+                OnRedirectToAccessDenied = context =>
+                {
+                    if (IsApiOrHubRequest(context.Request))
+                    {
+                        context.Response.Headers.CacheControl = "no-store, no-cache";
+                        context.Response.Headers.Pragma = "no-cache";
+                        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+                        return Task.CompletedTask;
+                    }
+
+                    context.Response.Redirect(context.RedirectUri);
+                    return Task.CompletedTask;
                 }
             };
         });
 
         services.TryAddSingleton(TimeProvider.System);
         services.TryAddSingleton<ISessionConnectionTerminator, NullSessionConnectionTerminator>();
-        services.AddSingleton<ISessionCache>(SessionCache.Instance);
-        services.AddSingleton(SessionCache.Instance);
+        services.AddSingleton<SessionCache>();
+        services.AddSingleton<ISessionCache>(sp => sp.GetRequiredService<SessionCache>());
         services.AddScoped<ISessionService, SessionService>();
         services.AddScoped<IIdentityService, IdentityService>();
         services.AddScoped<IEmailSender, DevelopmentEmailSender>();
@@ -144,5 +170,13 @@ public static class InfrastructureServiceRegistration
         services.AddHostedService(sp => sp.GetRequiredService<UnverifiedAccountCleanupService>());
 
         return services;
+    }
+
+    private static bool IsApiOrHubRequest(HttpRequest request)
+    {
+        return request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+            || request.Path.StartsWithSegments("/hubs", StringComparison.OrdinalIgnoreCase)
+            || request.Headers.Accept.Any(h => h?.Contains("application/json", StringComparison.OrdinalIgnoreCase) == true)
+            || string.Equals(request.Headers["X-Requested-With"], "XMLHttpRequest", StringComparison.OrdinalIgnoreCase);
     }
 }

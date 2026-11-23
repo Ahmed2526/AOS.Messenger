@@ -20,15 +20,21 @@
  * @param {HTMLInputElement|HTMLTextAreaElement} inputElement
  * @returns {object} Controller with stopTyping and destroy methods
  */
-export function setupTypingEmitter(connection, conversationId, inputElement) {
-    if (!inputElement || !conversationId) {
+export function setupTypingEmitter(connection, convIdOrGetter, inputElement) {
+    const resolveConvId = typeof convIdOrGetter === 'function'
+        ? convIdOrGetter
+        : () => convIdOrGetter;
+
+    if (!inputElement || !convIdOrGetter) {
         return {
             stopTyping: () => {},
+            resetForSwitch: () => {},
             destroy: () => {}
         };
     }
 
     let isTyping = false;
+    let activeTypingConversationId = null;
     let lastEmitTime = 0;
     let inactivityTimer = null;
 
@@ -38,10 +44,10 @@ export function setupTypingEmitter(connection, conversationId, inputElement) {
             connection.state === 'Connected';
     }
 
-    function emitTyping(typing) {
-        if (!canInvoke()) return;
+    function emitTyping(typing, targetConvId) {
+        if (!canInvoke() || !targetConvId) return;
         try {
-            connection.invoke('SendTypingIndicator', conversationId, typing)
+            connection.invoke('SendTypingIndicator', targetConvId, typing)
                 .catch(err => console.debug('[Typing] SendTypingIndicator failed:', err));
         } catch (err) {
             console.debug('[Typing] SendTypingIndicator error:', err);
@@ -49,11 +55,22 @@ export function setupTypingEmitter(connection, conversationId, inputElement) {
     }
 
     function startTyping() {
+        const targetConvId = resolveConvId();
+        if (!targetConvId) return;
+
+        if (isTyping && activeTypingConversationId &&
+            String(activeTypingConversationId).toLowerCase() !== String(targetConvId).toLowerCase()) {
+            emitTyping(false, activeTypingConversationId);
+            isTyping = false;
+            lastEmitTime = 0;
+        }
+
         const now = Date.now();
         if (!isTyping || now - lastEmitTime >= 2500) {
             isTyping = true;
+            activeTypingConversationId = targetConvId;
             lastEmitTime = now;
-            emitTyping(true);
+            emitTyping(true, targetConvId);
         }
 
         if (inactivityTimer) {
@@ -71,9 +88,13 @@ export function setupTypingEmitter(connection, conversationId, inputElement) {
         }
 
         if (isTyping) {
+            const targetConvId = activeTypingConversationId || resolveConvId();
             isTyping = false;
+            activeTypingConversationId = null;
             lastEmitTime = 0;
-            emitTyping(false);
+            if (targetConvId) {
+                emitTyping(false, targetConvId);
+            }
         }
     }
 
@@ -95,6 +116,7 @@ export function setupTypingEmitter(connection, conversationId, inputElement) {
 
     return {
         stopTyping,
+        resetForSwitch: stopTyping,
         destroy: () => {
             stopTyping();
             inputElement.removeEventListener('input', onInput);
@@ -109,22 +131,37 @@ export function setupTypingEmitter(connection, conversationId, inputElement) {
  * Auto-hides after 5 seconds if no updates arrive.
  *
  * @param {object} connection - SignalR HubConnection
- * @param {string} conversationId
+ * @param {string|Function} convIdOrGetter
  * @param {HTMLElement} typingContainerElement
- * @returns {object} Controller with destroy method
+ * @returns {object} Controller with resetForSwitch and destroy methods
  */
-export function setupTypingReceiver(connection, conversationId, typingContainerElement) {
-    if (!typingContainerElement || !conversationId) {
-        return { destroy: () => {} };
+export function setupTypingReceiver(connection, convIdOrGetter, typingContainerElement) {
+    const resolveConvId = typeof convIdOrGetter === 'function'
+        ? convIdOrGetter
+        : () => convIdOrGetter;
+
+    if (!typingContainerElement || !convIdOrGetter) {
+        return { resetForSwitch: () => {}, destroy: () => {} };
     }
 
-    const normalizedConvId = String(conversationId).toLowerCase();
     let autoHideTimer = null;
+
+    function resetForSwitch() {
+        if (autoHideTimer) {
+            clearTimeout(autoHideTimer);
+            autoHideTimer = null;
+        }
+        typingContainerElement.textContent = '';
+        typingContainerElement.classList.add('hidden');
+    }
 
     function handleTypingIndicator(typing) {
         if (!typing) return;
+        const currentConvId = resolveConvId();
+        if (!currentConvId) return;
+
         const convId = typing.conversationId || typing.ConversationId;
-        if (String(convId).toLowerCase() !== normalizedConvId) return;
+        if (!convId || String(convId).toLowerCase() !== String(currentConvId).toLowerCase()) return;
 
         const isTyping = (typing.isTyping !== undefined) ? typing.isTyping : typing.IsTyping;
 
@@ -153,16 +190,13 @@ export function setupTypingReceiver(connection, conversationId, typingContainerE
     }
 
     return {
+        handleTypingIndicator,
+        resetForSwitch,
         destroy: () => {
-            if (autoHideTimer) {
-                clearTimeout(autoHideTimer);
-                autoHideTimer = null;
-            }
+            resetForSwitch();
             if (connection && typeof connection.off === 'function') {
                 connection.off('ReceiveTypingIndicator', handleTypingIndicator);
             }
-            typingContainerElement.textContent = '';
-            typingContainerElement.classList.add('hidden');
         }
     };
 }

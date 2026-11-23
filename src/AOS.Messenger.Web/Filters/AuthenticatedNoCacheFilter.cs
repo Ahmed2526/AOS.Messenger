@@ -6,7 +6,7 @@ namespace AOS.Messenger.Web.Filters;
 /// Emits Cache-Control: no-store, no-cache and Pragma: no-cache on dynamic authenticated Razor views and JSON endpoints.
 /// Does not apply to static assets served via MapStaticAssets().
 /// </summary>
-public sealed class AuthenticatedNoCacheFilter : IActionFilter, IResultFilter
+public sealed class AuthenticatedNoCacheFilter : IActionFilter, IAlwaysRunResultFilter
 {
     public void OnActionExecuting(ActionExecutingContext context)
     {

@@ -439,4 +439,405 @@ public sealed class FrontendSanitizationAndSecurityTests
         Assert.DoesNotContain("-bottom-", avatarRegion);
         Assert.DoesNotContain("translate-y-", avatarRegion);
     }
+
+    [Fact]
+    public void MaterialSymbolsCss_IsLayeredUnderComponents_SoTailwindHiddenAndSizeUtilitiesWin()
+    {
+        var slnRoot = FindSolutionRoot();
+        var cssFiles = new[]
+        {
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Styles", "app.css"),
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "css", "stitch-theme.css"),
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "css", "app.css")
+        };
+
+        foreach (var path in cssFiles)
+        {
+            Assert.True(File.Exists(path), $"Expected CSS file to exist: {path}");
+            var css = File.ReadAllText(path);
+
+            var componentBlocks = ExtractCssLayerBlocks(css, "components");
+            Assert.NotEmpty(componentBlocks);
+
+            var allMatches = Regex.Matches(css, @"\.material-symbols-outlined\b");
+            Assert.True(allMatches.Count > 0, $"Expected .material-symbols-outlined rule in {path}");
+
+            foreach (Match match in allMatches)
+            {
+                var insideComponentsLayer = componentBlocks.Any(
+                    block => match.Index >= block.Start && match.Index < block.End);
+                Assert.True(
+                    insideComponentsLayer,
+                    $"Unlayered .material-symbols-outlined found at index {match.Index} in {path}; must reside inside @layer components so Tailwind @layer utilities (.hidden, text-[...]) win.");
+            }
+        }
+
+        var compiledCss = File.ReadAllText(cssFiles[2]);
+        var utilityBlocks = ExtractCssLayerBlocks(compiledCss, "utilities");
+        Assert.NotEmpty(utilityBlocks);
+        Assert.True(
+            utilityBlocks.Any(block => Regex.IsMatch(block.Content, @"\.hidden\s*\{\s*display:\s*none\b")),
+            "Expected compiled Tailwind utilities layer in wwwroot/css/app.css to define .hidden { display: none }.");
+    }
+
+    [Fact]
+    public void CustomCssFiles_ContainZeroUnlayeredStyleRules_SoTailwindUtilitiesAlwaysWin()
+    {
+        var slnRoot = FindSolutionRoot();
+        var customCssFiles = new[]
+        {
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Styles", "app.css"),
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "css", "stitch-theme.css"),
+            Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "css", "site.css")
+        };
+
+        foreach (var path in customCssFiles)
+        {
+            Assert.True(File.Exists(path), $"Expected CSS file to exist: {path}");
+            var css = File.ReadAllText(path);
+            var unlayeredRemainder = StripCommentsAndSafeTopLevelAtRules(css).Trim();
+            Assert.True(
+                string.IsNullOrWhiteSpace(unlayeredRemainder),
+                $"Unlayered CSS rules found in {path}; wrap rules in @layer/@utility/@theme so Tailwind utilities always win. Offending CSS: {unlayeredRemainder}");
+        }
+
+        var compiledPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "css", "app.css");
+        Assert.True(File.Exists(compiledPath));
+        var compiledCss = File.ReadAllText(compiledPath);
+
+        var baseCss = string.Concat(ExtractCssLayerBlocks(compiledCss, "base").Select(b => b.Content));
+        Assert.Matches(@"\.dark\s*\{[^}]*--color-surface:", baseCss);
+        Assert.Matches(@"\.dark\s*\{[^}]*--text-color-primary:", baseCss);
+        Assert.Matches(@"\.dark\s*\{[^}]*--text-color-error:", baseCss);
+
+        var utilitiesCss = string.Concat(ExtractCssLayerBlocks(compiledCss, "utilities").Select(b => b.Content));
+        Assert.False(string.IsNullOrWhiteSpace(utilitiesCss));
+        Assert.Contains(".text-primary{color:var(--text-color-primary)}", utilitiesCss);
+        Assert.Contains(".text-error{color:var(--text-color-error)}", utilitiesCss);
+
+        var requiredUtilities = new[]
+        {
+            ".bg-surface-bright",
+            ".bg-surface-lowest",
+            ".bg-surface-low",
+            ".bg-surface-container-lowest",
+            @".peer-checked\:bg-primary-container",
+            @".after\:bg-surface-bright",
+            @".hover\:bg-primary\/90",
+            ".text-primary",
+            ".text-error",
+            @".hover\:text-primary",
+            @".dark\:text-red-400",
+            ".pb-safe",
+            ".pt-safe",
+            ".icon-filled",
+            ".p-gutter"
+        };
+
+        foreach (var utilitySelector in requiredUtilities)
+        {
+            Assert.Contains(utilitySelector, utilitiesCss);
+        }
+
+        Assert.Matches(@"\.font-headline\s*\{", utilitiesCss);
+
+        var textPrimaryIdx = utilitiesCss.IndexOf(".text-primary{", StringComparison.Ordinal);
+        var hoverTextPrimaryIdx = utilitiesCss.IndexOf(@".hover\:text-primary", StringComparison.Ordinal);
+        Assert.True(textPrimaryIdx >= 0 && hoverTextPrimaryIdx > textPrimaryIdx);
+
+        var textErrorIdx = utilitiesCss.IndexOf(".text-error{", StringComparison.Ordinal);
+        var darkTextRedIdx = utilitiesCss.IndexOf(@".dark\:text-red-400", StringComparison.Ordinal);
+        Assert.True(textErrorIdx >= 0 && darkTextRedIdx > textErrorIdx);
+
+        var bgSurfaceVariantIdx = utilitiesCss.IndexOf(".bg-surface-variant{", StringComparison.Ordinal);
+        var bgSurfaceContainerHighestIdx = utilitiesCss.IndexOf(".bg-surface-container-highest{", StringComparison.Ordinal);
+        var peerCheckedIdx = utilitiesCss.IndexOf(@".peer-checked\:bg-primary-container", StringComparison.Ordinal);
+        Assert.True(bgSurfaceVariantIdx >= 0 && peerCheckedIdx > bgSurfaceVariantIdx);
+        Assert.True(bgSurfaceContainerHighestIdx >= 0 && peerCheckedIdx > bgSurfaceContainerHighestIdx);
+    }
+
+    private static List<(int Start, int End, string Content)> ExtractCssLayerBlocks(string css, string layerName)
+    {
+        var blocks = new List<(int Start, int End, string Content)>();
+        var matches = Regex.Matches(css, $@"@layer\s+{Regex.Escape(layerName)}\s*\{{");
+
+        foreach (Match match in matches)
+        {
+            var openBraceIdx = match.Index + match.Length - 1;
+            var closeBraceIdx = FindMatchingBraceEnd(css, openBraceIdx);
+            if (closeBraceIdx >= 0)
+            {
+                blocks.Add((openBraceIdx, closeBraceIdx + 1, css.Substring(openBraceIdx, closeBraceIdx + 1 - openBraceIdx)));
+            }
+        }
+
+        return blocks;
+    }
+
+    private static string StripCommentsAndSafeTopLevelAtRules(string css)
+    {
+        var safeAtRulePattern = new Regex(
+            @"^@(import|custom-variant|font-face|theme|layer|utility|keyframes|property)(?=[\s;{(])",
+            RegexOptions.CultureInvariant);
+        var remainder = new List<char>(css.Length);
+
+        for (var i = 0; i < css.Length; i++)
+        {
+            var ch = css[i];
+            if (ch == '/' && i + 1 < css.Length && css[i + 1] == '*')
+            {
+                var endComment = css.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (endComment < 0)
+                {
+                    break;
+                }
+
+                i = endComment + 1;
+                continue;
+            }
+
+            if (ch == '@' && safeAtRulePattern.IsMatch(css.AsSpan(i)))
+            {
+                var parenDepth = 0;
+                char? quote = null;
+                var escaped = false;
+                var skipped = false;
+
+                for (var j = i; j < css.Length; j++)
+                {
+                    var inner = css[j];
+                    if (TrySkipNonCodeChar(css, ref j, ref quote, ref escaped, ref inner))
+                    {
+                        continue;
+                    }
+
+                    if (inner == '(')
+                    {
+                        parenDepth++;
+                    }
+                    else if (inner == ')' && parenDepth > 0)
+                    {
+                        parenDepth--;
+                    }
+                    else if (parenDepth == 0 && inner == ';')
+                    {
+                        i = j;
+                        skipped = true;
+                        break;
+                    }
+                    else if (parenDepth == 0 && inner == '{')
+                    {
+                        var closeBraceIdx = FindMatchingBraceEnd(css, j);
+                        i = closeBraceIdx >= 0 ? closeBraceIdx : css.Length - 1;
+                        skipped = true;
+                        break;
+                    }
+                }
+
+                if (skipped)
+                {
+                    continue;
+                }
+            }
+
+            remainder.Add(ch);
+        }
+
+        return new string(remainder.ToArray());
+    }
+
+    private static int FindMatchingBraceEnd(string css, int openBraceIdx)
+    {
+        var depth = 0;
+        char? quote = null;
+        var escaped = false;
+
+        for (var i = openBraceIdx; i < css.Length; i++)
+        {
+            var ch = css[i];
+            if (TrySkipNonCodeChar(css, ref i, ref quote, ref escaped, ref ch))
+            {
+                continue;
+            }
+
+            if (ch == '{')
+            {
+                depth++;
+            }
+            else if (ch == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool TrySkipNonCodeChar(string css, ref int index, ref char? quote, ref bool escaped, ref char ch)
+    {
+        if (escaped)
+        {
+            escaped = false;
+            return true;
+        }
+
+        if (ch == '\\')
+        {
+            escaped = true;
+            return true;
+        }
+
+        if (quote.HasValue)
+        {
+            if (ch == quote.Value)
+            {
+                quote = null;
+            }
+
+            return true;
+        }
+
+        if (ch == '/' && index + 1 < css.Length && css[index + 1] == '*')
+        {
+            var endComment = css.IndexOf("*/", index + 2, StringComparison.Ordinal);
+            index = endComment >= 0 ? endComment + 1 : css.Length - 1;
+            return true;
+        }
+
+        if (ch is '\'' or '"')
+        {
+            quote = ch;
+            return true;
+        }
+
+        return false;
+    }
+
+    [Fact]
+    public void OutgoingMessageBubble_RendersActionsBarBeforeBubble_ForFlushRightAlignment()
+    {
+        var slnRoot = FindSolutionRoot();
+        var conversationPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
+        var rendererPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "message-renderer.js");
+        Assert.True(File.Exists(conversationPath));
+        Assert.True(File.Exists(rendererPath));
+
+        var conversationHtml = File.ReadAllText(conversationPath);
+        var outgoingStart = conversationHtml.IndexOf("data-is-outgoing=\"true\"", StringComparison.Ordinal);
+        var outgoingEnd = conversationHtml.IndexOf("data-is-outgoing=\"false\"", StringComparison.Ordinal);
+        Assert.True(outgoingStart >= 0 && outgoingEnd > outgoingStart);
+
+        var rowStart = conversationHtml.LastIndexOf("<div", outgoingStart, StringComparison.Ordinal);
+        Assert.True(rowStart >= 0);
+        var outgoingBlock = conversationHtml.Substring(rowStart, outgoingEnd - rowStart);
+
+        Assert.Contains("flex-wrap-reverse", outgoingBlock);
+        var actionsIdx = outgoingBlock.IndexOf("message-actions-bar", StringComparison.Ordinal);
+        var bubbleIdx = outgoingBlock.IndexOf("message-bubble max-w-[75%]", StringComparison.Ordinal);
+        Assert.True(actionsIdx >= 0 && bubbleIdx > actionsIdx);
+
+        var rendererJs = File.ReadAllText(rendererPath);
+        Assert.Contains("flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row", rendererJs);
+        Assert.Contains("row.insertBefore(actionsBar, bubble);", rendererJs);
+    }
+
+    [Fact]
+    public void ConversationSidebar_HighlightsArchivedTab_OnlyOnArchivedRoute()
+    {
+        var slnRoot = FindSolutionRoot();
+        var sidebarPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Shared", "Components", "ConversationSidebar", "Default.cshtml");
+        Assert.True(File.Exists(sidebarPath));
+
+        var content = File.ReadAllText(sidebarPath);
+        Assert.Contains("isArchivedView", content);
+        Assert.Contains("ViewContext.RouteData.Values[\"action\"]", content);
+        Assert.Contains("aria-current=\"@(!isArchivedView ? \"page\" : null)\"", content);
+        Assert.Contains("aria-current=\"@(isArchivedView ? \"page\" : null)\"", content);
+        Assert.Contains("!isArchivedView ? \"bg-[#B3929D] text-white\"", content);
+        Assert.Contains("isArchivedView ? \"px-2.5 py-1 bg-[#B3929D] text-white\"", content);
+    }
+
+    [Fact]
+    public void Layout_RendersConnectionStatusIndicator_OnlyWhenAuthenticated()
+    {
+        var slnRoot = FindSolutionRoot();
+        var layoutPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Shared", "_Layout.cshtml");
+        Assert.True(File.Exists(layoutPath));
+
+        var content = File.ReadAllText(layoutPath);
+        var toggleIdx = content.IndexOf("id=\"themeToggleBtn\"", StringComparison.Ordinal);
+        var indicatorIdx = content.IndexOf("id=\"connectionStatusIndicator\"", StringComparison.Ordinal);
+        Assert.True(toggleIdx >= 0 && indicatorIdx > toggleIdx);
+
+        var between = content.Substring(toggleIdx, indicatorIdx - toggleIdx);
+        Assert.Contains("@if (User.Identity?.IsAuthenticated == true)", between);
+    }
+
+    [Fact]
+    public void SettingsSearchInput_HasVisibleDarkModeSurfaceAndBorder()
+    {
+        var slnRoot = FindSolutionRoot();
+        var settingsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Settings", "Index.cshtml");
+        Assert.True(File.Exists(settingsPath));
+
+        var content = File.ReadAllText(settingsPath);
+        var match = Regex.Match(content, @"<input[^>]*id=""settingsSearch""[^>]*>");
+        Assert.True(match.Success, "Expected #settingsSearch input in Settings/Index.cshtml");
+        Assert.Contains("dark:bg-[#45433F]", match.Value);
+        Assert.Contains("dark:focus:bg-[#514D49]", match.Value);
+        Assert.Contains("dark:border-[#5B5752]", match.Value);
+    }
+
+    [Fact]
+    public void Layout_HidesAuthenticatedNavLinks_WhenUnauthenticated()
+    {
+        var slnRoot = FindSolutionRoot();
+        var layoutPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Shared", "_Layout.cshtml");
+        Assert.True(File.Exists(layoutPath));
+
+        var content = File.ReadAllText(layoutPath);
+
+        var navMatch = Regex.Match(content, @"<nav[^>]*>[\s\S]*?</nav>");
+        Assert.True(navMatch.Success, "Expected <nav> element in _Layout.cshtml");
+        var navHtml = navMatch.Value;
+
+        var navIfIdx = navHtml.IndexOf("@if (User.Identity?.IsAuthenticated == true)", StringComparison.Ordinal);
+        var navElseIdx = navHtml.IndexOf("else", navIfIdx, StringComparison.Ordinal);
+        Assert.True(navIfIdx >= 0 && navElseIdx > navIfIdx);
+
+        var navAuthSection = navHtml.Substring(navIfIdx, navElseIdx - navIfIdx);
+        var navElseSection = navHtml.Substring(navElseIdx);
+        foreach (var label in new[] { "Chat", "Settings", "Profile", "Sessions" })
+        {
+            Assert.Contains($">{label}</a>", navAuthSection);
+            Assert.DoesNotContain($">{label}</a>", navElseSection);
+        }
+
+        Assert.Contains("asp-action=\"Login\"", navElseSection);
+        Assert.DoesNotContain(">/<", navElseSection);
+
+        var mobileStart = content.IndexOf("data-mobile-nav-menu", StringComparison.Ordinal);
+        var mobileEnd = content.IndexOf("</div>", mobileStart, StringComparison.Ordinal);
+        Assert.True(mobileStart >= 0 && mobileEnd > mobileStart);
+        var mobileHtml = content.Substring(mobileStart, mobileEnd - mobileStart);
+
+        var mobileIfIdx = mobileHtml.IndexOf("@if (User.Identity?.IsAuthenticated == true)", StringComparison.Ordinal);
+        var mobileElseIdx = mobileHtml.IndexOf("else", mobileIfIdx, StringComparison.Ordinal);
+        Assert.True(mobileIfIdx >= 0 && mobileElseIdx > mobileIfIdx);
+
+        var mobileAuthSection = mobileHtml.Substring(mobileIfIdx, mobileElseIdx - mobileIfIdx);
+        var mobileElseSection = mobileHtml.Substring(mobileElseIdx);
+        foreach (var label in new[] { "Chat", "Settings", "Profile", "Sessions" })
+        {
+            Assert.Contains($">{label}</a>", mobileAuthSection);
+            Assert.DoesNotContain($">{label}</a>", mobileElseSection);
+        }
+
+        Assert.Contains("asp-action=\"Login\"", mobileElseSection);
+        Assert.DoesNotContain("border-t", mobileElseSection);
+    }
 }

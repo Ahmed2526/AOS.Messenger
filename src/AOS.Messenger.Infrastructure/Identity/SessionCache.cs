@@ -12,8 +12,6 @@ public sealed class SessionCache : ISessionCache, IDisposable
     private readonly TimeProvider _timeProvider;
     private readonly object _lock = new();
 
-    public static readonly SessionCache Instance = new();
-
     public SessionCache(TimeProvider? timeProvider = null)
     {
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -63,7 +61,7 @@ public sealed class SessionCache : ISessionCache, IDisposable
             // If session expires before the default 30-minute absolute window, respect the earlier expiration.
             if (info.AbsoluteExpiresAtUtc > now && info.AbsoluteExpiresAtUtc < now.AddMinutes(30))
             {
-                entryOptions.AbsoluteExpiration = info.AbsoluteExpiresAtUtc;
+                entryOptions.AbsoluteExpirationRelativeToNow = info.AbsoluteExpiresAtUtc - now;
             }
 
             _cache.Set(sessionId, new CacheEntry(info, lastActive), entryOptions);
@@ -114,23 +112,10 @@ public sealed class SessionCache : ISessionCache, IDisposable
                 var now = _timeProvider.GetUtcNow();
                 if (existing.Info.AbsoluteExpiresAtUtc > now && existing.Info.AbsoluteExpiresAtUtc < now.AddMinutes(30))
                 {
-                    entryOptions.AbsoluteExpiration = existing.Info.AbsoluteExpiresAtUtc;
+                    entryOptions.AbsoluteExpirationRelativeToNow = existing.Info.AbsoluteExpiresAtUtc - now;
                 }
 
                 _cache.Set(sessionId, existing with { LastActiveAtUtc = lastActiveAtUtc }, entryOptions);
-            }
-            else
-            {
-                var entryOptions = new MemoryCacheEntryOptions
-                {
-                    Size = 1,
-                    SlidingExpiration = TimeSpan.FromMinutes(10),
-                    AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(30)
-                };
-
-                _cache.Set(sessionId, new CacheEntry(
-                    new CachedSessionInfo(IsRevoked: false, AbsoluteExpiresAtUtc: lastActiveAtUtc.AddDays(30)),
-                    lastActiveAtUtc), entryOptions);
             }
         }
     }

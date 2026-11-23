@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Claims;
+using System.Text.Json;
 using AOS.Messenger.Application;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Infrastructure;
@@ -10,6 +11,7 @@ using AOS.Messenger.Web.Middleware;
 using AOS.Messenger.Web.RateLimiting;
 using AOS.Messenger.Web.Services;
 using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 
@@ -64,6 +66,7 @@ builder.Services.AddControllersWithViews(options =>
     {
         options.Filters.Add(new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute());
         options.Filters.Add(new AuthenticatedNoCacheFilter());
+        options.Filters.Add(new AntiforgeryProblemDetailsFilter());
     })
     .AddJsonOptions(options =>
     {
@@ -74,6 +77,46 @@ builder.Services.AddControllersWithViews(options =>
 
 builder.Services.AddRateLimiter(options =>
 {
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        var httpContext = context.HttpContext;
+        httpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+        bool isApiOrJson = httpContext.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
+            || httpContext.Request.Headers.Accept.Any(h => h?.Contains("application/json", StringComparison.OrdinalIgnoreCase) == true)
+            || string.Equals(httpContext.Request.Headers["X-Requested-With"], "XMLHttpRequest", StringComparison.OrdinalIgnoreCase);
+
+        if (!httpContext.Response.HasStarted &&
+            (httpContext.User.Identity?.IsAuthenticated == true || isApiOrJson))
+        {
+            httpContext.Response.Headers.CacheControl = "no-store, no-cache";
+            httpContext.Response.Headers.Pragma = "no-cache";
+        }
+
+        if (isApiOrJson && !httpContext.Response.HasStarted)
+        {
+            httpContext.Response.ContentType = "application/problem+json";
+
+            var problemDetails = new ProblemDetails
+            {
+                Status = StatusCodes.Status429TooManyRequests,
+                Title = "Too Many Requests",
+                Detail = "Rate limit exceeded. Please wait before trying again.",
+                Instance = httpContext.Request.Path.Value
+            };
+            problemDetails.Extensions["traceId"] = httpContext.TraceIdentifier;
+
+            try
+            {
+                await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || httpContext.RequestAborted.IsCancellationRequested)
+            {
+            }
+        }
+    };
+
     // Partitioned per-client-IP rate limiter for login
     options.AddPolicy("login-limiter", httpContext =>
         System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(

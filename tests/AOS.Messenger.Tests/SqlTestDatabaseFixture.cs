@@ -87,7 +87,8 @@ public sealed class SqlTestDatabaseFixture : IAsyncLifetime
         services.AddHttpContextAccessor();
         services.AddScoped<ICurrentUser, CurrentUser>();
         services.AddSingleton<ISessionConnectionTerminator, TestSessionConnectionTerminator>();
-        services.AddSingleton<ISessionCache>(SessionCache.Instance);
+        services.AddSingleton<SessionCache>();
+        services.AddSingleton<ISessionCache>(sp => sp.GetRequiredService<SessionCache>());
         services.AddSingleton<IConnectionTracker, InMemoryConnectionTracker>();
         services.AddSingleton<IOnlinePresenceTracker>(sp => (InMemoryConnectionTracker)sp.GetRequiredService<IConnectionTracker>());
 

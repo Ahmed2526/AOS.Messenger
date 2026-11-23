@@ -45,15 +45,15 @@
         <div class="flex items-center gap-2 sm:gap-3 text-xs font-medium text-[#6E6560] dark:text-[#C8C0BA] shrink-0">
             <!-- Navigation Links -->
             <nav class="hidden md:flex items-center gap-2 text-xs shrink-0">
-                <a asp-controller="Chat" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Chat</a>
-                <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
-                <a asp-controller="Settings" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Settings</a>
-                <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
-                <a asp-controller="Profile" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Profile</a>
-                <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
-                <a asp-controller="Account" asp-action="Sessions" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Sessions</a>
                 @if (User.Identity?.IsAuthenticated == true)
                 {
+                    <a asp-controller="Chat" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Chat</a>
+                    <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
+                    <a asp-controller="Settings" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Settings</a>
+                    <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
+                    <a asp-controller="Profile" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Profile</a>
+                    <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
+                    <a asp-controller="Account" asp-action="Sessions" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors">Sessions</a>
                     <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
                     <form asp-controller="Account" asp-action="Logout" method="post" class="inline">
                         <button type="submit" class="hover:text-error transition-colors cursor-pointer">Logout</button>
@@ -61,7 +61,6 @@
                 }
                 else
                 {
-                    <span class="text-[#E3DCD7] dark:text-[#5B5752]">/</span>
                     <a asp-controller="Account" asp-action="Login" class="text-primary hover:underline font-semibold">Login</a>
                 }
             </nav>
@@ -73,11 +72,14 @@
                 <span id="themeToggleIcon" class="material-symbols-outlined text-[15px]">dark_mode</span>
             </button>
 
-            <!-- Connection Status Indicator -->
-            <div class="flex items-center gap-1.5 bg-[#FFFFFF]/80 dark:bg-[#514D49] px-2 sm:px-2.5 py-1 rounded border border-[#E3DCD7] dark:border-[#5B5752] shrink-0" id="connectionStatusIndicator">
-                <span class="w-2 h-2 rounded-full bg-[#6F9473]" id="connectionStatusDot"></span>
-                <span class="text-[#2B2725] dark:text-[#EEE7DF] font-medium text-xs" id="connectionStatusText">Connected</span>
-            </div>
+            @if (User.Identity?.IsAuthenticated == true)
+            {
+                <!-- Connection Status Indicator -->
+                <div class="flex items-center gap-1.5 bg-[#FFFFFF]/80 dark:bg-[#514D49] px-2 sm:px-2.5 py-1 rounded border border-[#E3DCD7] dark:border-[#5B5752] shrink-0" id="connectionStatusIndicator">
+                    <span class="w-2 h-2 rounded-full bg-[#6F9473]" id="connectionStatusDot"></span>
+                    <span class="text-[#2B2725] dark:text-[#EEE7DF] font-medium text-xs" id="connectionStatusText">Connected</span>
+                </div>
+            }
 
             <!-- Mobile Nav Menu Toggle Button -->
             <button type="button"
@@ -94,29 +96,29 @@
 
     <!-- Collapsible Mobile Navigation Drawer -->
     <div data-mobile-nav-menu class="hidden md:hidden absolute top-10 left-0 right-0 z-50 bg-[#F0E9DF] dark:bg-[#45433F] border-b border-[#E3DCD7] dark:border-[#5B5752] shadow-lg px-4 py-3 flex flex-col gap-2 text-sm font-medium">
-        <a asp-controller="Chat" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Chat</a>
-        <a asp-controller="Settings" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Settings</a>
-        <a asp-controller="Profile" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Profile</a>
-        <a asp-controller="Account" asp-action="Sessions" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Sessions</a>
         @if (User.Identity?.IsAuthenticated == true)
         {
+            <a asp-controller="Chat" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Chat</a>
+            <a asp-controller="Settings" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Settings</a>
+            <a asp-controller="Profile" asp-action="Index" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Profile</a>
+            <a asp-controller="Account" asp-action="Sessions" class="hover:text-[#2B2725] dark:hover:text-[#EEE7DF] transition-colors py-1">Sessions</a>
             <form asp-controller="Account" asp-action="Logout" method="post" class="pt-1 border-t border-[#E3DCD7] dark:border-[#5B5752]">
                 <button type="submit" class="hover:text-error transition-colors cursor-pointer text-left w-full py-1">Logout</button>
             </form>
         }
         else
         {
-            <a asp-controller="Account" asp-action="Login" class="text-primary hover:underline font-semibold py-1 pt-2 border-t border-[#E3DCD7] dark:border-[#5B5752]">Login</a>
+            <a asp-controller="Account" asp-action="Login" class="text-primary hover:underline font-semibold py-1">Login</a>
         }
     </div>
 
     @if (User.Identity?.IsAuthenticated == true)
     {
         <div class="flex flex-1 min-h-0 overflow-hidden">
-            <div class="@(isChatIndex ? "w-full md:w-80 md:shrink-0 flex" : "hidden md:flex md:w-80 md:shrink-0") h-full">
+            <div id="app-sidebar-pane" class="@(isChatIndex ? "w-full md:w-80 md:shrink-0 flex" : "hidden md:flex md:w-80 md:shrink-0") h-full">
                 @await Component.InvokeAsync("ConversationSidebar")
             </div>
-            <main class="@(isChatIndex ? "hidden md:flex" : "flex") flex-1 w-full min-w-0 min-h-0 h-full @(isConversation ? "overflow-hidden" : "overflow-y-auto") flex-col">
+            <main id="app-main-pane" class="@(isChatIndex ? "hidden md:flex" : "flex") flex-1 w-full min-w-0 min-h-0 h-full @(isConversation ? "overflow-hidden" : "overflow-y-auto") flex-col">
                 @RenderBody()
             </main>
         </div>
@@ -134,7 +136,6 @@
     @if (User.Identity?.IsAuthenticated == true && !isChatIndex && !isConversation)
     {
         <script src="~/lib/signalr/signalr.min.js" asp-append-version="true"></script>
-        <script src="~/js/chat-realtime.js" asp-append-version="true"></script>
     }
     <script type="module" src="~/js/sidebar.js" asp-append-version="true"></script>
     <script type="module" src="~/js/mobile-nav.js" asp-append-version="true"></script>

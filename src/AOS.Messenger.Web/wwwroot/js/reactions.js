@@ -10,15 +10,12 @@
  * - CSRF token verification via RequestVerificationToken header.
  */
 
-export const ALLOWED_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
+import {
+    toggleReaction as apiToggleReaction,
+    removeReaction as apiRemoveReaction
+} from './api-client.js';
 
-/**
- * Gets the anti-forgery token from the active page.
- */
-function getCsrfToken() {
-    const input = document.querySelector('input[name="__RequestVerificationToken"]');
-    return input ? input.value : '';
-}
+export const ALLOWED_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
 
 let actionErrorTimer = null;
 
@@ -36,17 +33,17 @@ function showActionError(message) {
     }, 4000);
 }
 
-async function parseErrorDetail(resp, fallback) {
-    try {
-        const text = await resp.text();
-        if (text) {
-            const parsed = JSON.parse(text);
-            if (parsed && (parsed.detail || parsed.title || parsed.message)) {
-                return parsed.detail || parsed.title || parsed.message;
-            }
-        }
-    } catch {}
-    return fallback;
+function hideActionError() {
+    if (actionErrorTimer) {
+        clearTimeout(actionErrorTimer);
+        actionErrorTimer = null;
+    }
+    if (typeof document === 'undefined') return;
+    const el = document.getElementById('chat-action-error');
+    if (el) {
+        el.textContent = '';
+        el.classList.add('hidden');
+    }
 }
 
 /**
@@ -59,33 +56,13 @@ async function parseErrorDetail(resp, fallback) {
 export async function toggleReaction(conversationId, messageId, emoji) {
     if (!conversationId || !messageId || !emoji) return null;
 
-    const token = getCsrfToken();
-    const headers = {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    };
-    if (token) {
-        headers['RequestVerificationToken'] = token;
-    }
-
     try {
-        const resp = await fetch(`/api/conversations/${conversationId}/messages/${messageId}/reactions`, {
-            method: 'POST',
-            headers: headers,
-            body: JSON.stringify({ emoji })
-        });
-
-        if (!resp.ok) {
-            console.warn('[Reactions] Failed to toggle reaction:', resp.status);
-            const errMsg = await parseErrorDetail(resp, 'Failed to update reaction.');
-            showActionError(errMsg);
-            return null;
-        }
-
-        return await resp.json();
+        return await apiToggleReaction(conversationId, messageId, emoji);
     } catch (err) {
-        console.error('[Reactions] Error toggling reaction:', err);
-        showActionError('Network error while updating reaction.');
+        console.warn('[Reactions] Failed to toggle reaction:', err?.status || err);
+        if (err?.code !== 'UNAUTHORIZED') {
+            showActionError(err?.message || 'Failed to update reaction.');
+        }
         return null;
     }
 }
@@ -99,23 +76,11 @@ export async function toggleReaction(conversationId, messageId, emoji) {
 export async function removeReaction(conversationId, messageId) {
     if (!conversationId || !messageId) return false;
 
-    const token = getCsrfToken();
-    const headers = {
-        'Accept': 'application/json'
-    };
-    if (token) {
-        headers['RequestVerificationToken'] = token;
-    }
-
     try {
-        const resp = await fetch(`/api/conversations/${conversationId}/messages/${messageId}/reactions`, {
-            method: 'DELETE',
-            headers: headers
-        });
-
-        return resp.ok;
+        await apiRemoveReaction(conversationId, messageId);
+        return true;
     } catch (err) {
-        console.error('[Reactions] Error removing reaction:', err);
+        console.warn('[Reactions] Error removing reaction:', err?.status || err);
         return false;
     }
 }
@@ -254,13 +219,21 @@ function applyReactionGroupsToRow(messageId, reactionGroups, conversationId, cur
  * @param {string} conversationId
  * @param {string|null} [currentUserId]
  */
-export function setupEmojiPicker(conversationId, currentUserId = null) {
-    const popover = document.getElementById('reaction-picker-popover');
-    if (!popover || !conversationId) return;
+export function setupEmojiPicker(convIdOrGetter, userIdOrGetter = null, options = {}) {
+    if (typeof document === 'undefined') {
+        return { resetForSwitch: () => {}, closePopover: () => {}, destroy: () => {} };
+    }
 
-    const resolvedUserId = currentUserId ||
-        document.getElementById('messages-container')?.getAttribute('data-current-user-id') ||
-        null;
+    const popover = document.getElementById('reaction-picker-popover');
+    if (!popover || !convIdOrGetter) {
+        return { resetForSwitch: () => {}, closePopover: () => {}, destroy: () => {} };
+    }
+
+    const resolveConvId = typeof convIdOrGetter === 'function' ? convIdOrGetter : () => convIdOrGetter;
+    const resolveUserId = typeof userIdOrGetter === 'function'
+        ? userIdOrGetter
+        : () => (userIdOrGetter || document.getElementById('messages-container')?.getAttribute('data-current-user-id') || null);
+    const getSwitchEpoch = typeof options?.getSwitchEpoch === 'function' ? options.getSwitchEpoch : () => 0;
 
     let currentTargetMessageId = null;
     const inFlightMessages = new Set();
@@ -269,6 +242,12 @@ export function setupEmojiPicker(conversationId, currentUserId = null) {
         popover.classList.add('hidden');
         popover.removeAttribute('data-target-message-id');
         currentTargetMessageId = null;
+    }
+
+    function resetForSwitch() {
+        closePopover();
+        inFlightMessages.clear();
+        hideActionError();
     }
 
     function positionPopover(anchorEl) {
@@ -297,64 +276,52 @@ export function setupEmojiPicker(conversationId, currentUserId = null) {
     }
 
     async function handleToggle(msgId, emoji) {
+        const convId = resolveConvId();
+        const resolvedUserId = resolveUserId();
+        const epoch = getSwitchEpoch();
         const key = String(msgId);
-        if (!emoji || !key || inFlightMessages.has(key)) return;
+        if (!convId || !emoji || !key || inFlightMessages.has(key)) return;
         inFlightMessages.add(key);
         try {
-            const result = await toggleReaction(conversationId, msgId, emoji);
+            const result = await toggleReaction(convId, msgId, emoji);
+            if (epoch !== getSwitchEpoch()) return;
             if (result && Array.isArray(result.reactions)) {
-                applyReactionGroupsToRow(msgId, result.reactions, conversationId, resolvedUserId);
+                applyReactionGroupsToRow(msgId, result.reactions, convId, resolvedUserId);
             }
         } finally {
             inFlightMessages.delete(key);
         }
     }
 
-    // Close picker when clicking outside
-    document.addEventListener('click', (e) => {
+    const onOutsideClick = (e) => {
         if (!popover.classList.contains('hidden') &&
             !popover.contains(e.target) &&
-            !e.target.closest('[data-action="react"]')) {
+            !(e.target && typeof e.target.closest === 'function' && e.target.closest('[data-action="react"]'))) {
             closePopover();
         }
-    });
+    };
 
-    document.addEventListener('keydown', (e) => {
+    const onKeyDown = (e) => {
         if (e.key === 'Escape' && !popover.classList.contains('hidden')) {
             closePopover();
         }
-    });
+    };
 
-    const streamEl = document.getElementById('message-stream');
-    if (streamEl) {
-        streamEl.addEventListener('scroll', () => {
-            if (!popover.classList.contains('hidden')) {
-                closePopover();
-            }
-        }, { passive: true });
-    }
-
-    window.addEventListener('resize', () => {
+    const onStreamScroll = () => {
         if (!popover.classList.contains('hidden')) {
             closePopover();
         }
-    });
+    };
 
-    // Handle emoji selection inside picker
-    popover.querySelectorAll('[data-emoji-btn]').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-            e.preventDefault();
-            const emoji = btn.getAttribute('data-emoji-btn');
-            if (emoji && currentTargetMessageId) {
-                const msgId = currentTargetMessageId;
-                closePopover();
-                await handleToggle(msgId, emoji);
-            }
-        });
-    });
+    const onWindowResize = () => {
+        if (!popover.classList.contains('hidden')) {
+            closePopover();
+        }
+    };
 
-    // Delegate reaction button and reaction pill clicks on message rows (covers SSR & live-rendered pills)
-    document.addEventListener('click', async (e) => {
+    const onDelegateClick = async (e) => {
+        if (!e.target || typeof e.target.closest !== 'function') return;
+
         const pill = e.target.closest('.reaction-pill');
         if (pill) {
             e.preventDefault();
@@ -390,7 +357,55 @@ export function setupEmojiPicker(conversationId, currentUserId = null) {
         currentTargetMessageId = messageId;
         popover.setAttribute('data-target-message-id', messageId);
         positionPopover(reactBtn);
+    };
+
+    document.addEventListener('click', onOutsideClick);
+    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('click', onDelegateClick);
+
+    const streamEl = document.getElementById('message-stream');
+    if (streamEl) {
+        streamEl.addEventListener('scroll', onStreamScroll, { passive: true });
+    }
+
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('resize', onWindowResize);
+    }
+
+    const emojiBtnHandlers = [];
+    popover.querySelectorAll('[data-emoji-btn]').forEach(btn => {
+        const handler = async (e) => {
+            e.preventDefault();
+            const emoji = btn.getAttribute('data-emoji-btn');
+            if (emoji && currentTargetMessageId) {
+                const msgId = currentTargetMessageId;
+                closePopover();
+                await handleToggle(msgId, emoji);
+            }
+        };
+        btn.addEventListener('click', handler);
+        emojiBtnHandlers.push({ btn, handler });
     });
+
+    return {
+        resetForSwitch,
+        closePopover,
+        destroy: () => {
+            resetForSwitch();
+            document.removeEventListener('click', onOutsideClick);
+            document.removeEventListener('keydown', onKeyDown);
+            document.removeEventListener('click', onDelegateClick);
+            if (streamEl) {
+                streamEl.removeEventListener('scroll', onStreamScroll);
+            }
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+                window.removeEventListener('resize', onWindowResize);
+            }
+            for (const { btn, handler } of emojiBtnHandlers) {
+                btn.removeEventListener('click', handler);
+            }
+        }
+    };
 }
 
 if (typeof window !== 'undefined') {

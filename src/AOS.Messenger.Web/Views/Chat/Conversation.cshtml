@@ -2,19 +2,34 @@
 @{
     ViewData["Title"] = $"{Model.Conversation.OtherParticipantName} - A♡S Messenger";
     var initials = GetInitials(Model.Conversation.OtherParticipantName, Model.Conversation.OtherParticipantHandle);
-    var initData = new
+    var currentUserId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
+    var bootstrapData = new
     {
-        conversationId = Model.Conversation.Id.Value.ToString(),
-        currentUserId = User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "",
-        peerUserId = Model.Conversation.OtherParticipantId.Value.ToString(),
-        peerIsOnline = Model.Conversation.IsOnline,
-        peerLastSeenAtUtc = Model.Conversation.LastSeenAtUtc?.ToString("o"),
-        peerLastDeliveredMessageId = Model.Conversation.PeerLastDeliveredMessageId?.Value.ToString(),
-        peerLastReadMessageId = Model.Conversation.PeerLastReadMessageId?.Value.ToString(),
+        initialConversationId = Model.Conversation.Id.Value.ToString(),
+        currentUserId = currentUserId,
+        loginUrl = "/Account/Login",
+        meta = new
+        {
+            id = Model.Conversation.Id.Value.ToString(),
+            otherParticipantId = Model.Conversation.OtherParticipantId.Value.ToString(),
+            otherParticipantName = Model.Conversation.OtherParticipantName,
+            otherParticipantHandle = Model.Conversation.OtherParticipantHandle,
+            otherParticipantBio = Model.Conversation.OtherParticipantBio,
+            isBlocked = Model.Conversation.IsBlocked,
+            isPeerDeleted = Model.Conversation.IsPeerDeleted,
+            canSend = Model.Conversation.CanSend,
+            isPinned = Model.Conversation.IsPinned,
+            isArchived = Model.Conversation.IsArchived,
+            isMuted = Model.Conversation.IsMuted,
+            createdAtUtc = Model.Conversation.CreatedAtUtc.ToString("o"),
+            isOnline = Model.Conversation.IsOnline,
+            lastSeenAtUtc = Model.Conversation.LastSeenAtUtc?.ToString("o"),
+            peerLastDeliveredMessageId = Model.Conversation.PeerLastDeliveredMessageId?.Value.ToString(),
+            peerLastReadMessageId = Model.Conversation.PeerLastReadMessageId?.Value.ToString()
+        },
         nextCursor = Model.NextCursor,
         hasMore = Model.NextCursor != null
     };
-    var initJson = System.Text.Json.JsonSerializer.Serialize(initData);
 }
 
 @functions {
@@ -34,10 +49,19 @@
     }
 }
 
-<!-- Active Conversation Area -->
-<div id="conversation-page-root"
-     data-init="@initJson"
+<!-- Unified Chat Shell Root -->
+<div id="chat-shell-root"
+     data-current-user-id="@currentUserId"
      class="flex-1 h-full min-h-0 w-full flex flex-col bg-[#F8F6F3] dark:bg-[#302F2C] min-w-0 overflow-hidden relative">
+    <div id="chat-live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+    @await Html.PartialAsync("_ChatEmptyState", true)
+
+    <!-- Active Conversation Area -->
+    <div id="chat-active-pane" class="flex-1 h-full min-h-0 w-full flex flex-col min-w-0 overflow-hidden relative">
+        <div id="conversation-page-root"
+             data-chat-pane-root="true"
+             class="flex-1 h-full min-h-0 w-full flex flex-col bg-[#F8F6F3] dark:bg-[#302F2C] min-w-0 overflow-hidden relative">
     <!-- Reconnecting / Offline Banner -->
     <div id="connection-banner" class="hidden absolute top-14 left-0 right-0 z-30 bg-[#A07860] text-white px-4 py-2 flex items-center justify-between text-xs shadow-md transition-all">
         <div class="flex items-center gap-2">
@@ -56,11 +80,11 @@
          class="h-14 px-3 sm:px-5 bg-[#FFFFFF] dark:bg-[#3A3835] border-b border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between shrink-0 z-10 shadow-2xs">
         <div class="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 mr-2">
             <!-- Mobile Back to Chats Button -->
-            <a asp-controller="Chat" asp-action="Index" class="md:hidden shrink-0 p-1.5 rounded-lg text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex items-center justify-center" title="Back to Chats" aria-label="Back to Chats">
+            <a asp-controller="Chat" asp-action="Index" data-back-to-chats="true" class="md:hidden shrink-0 p-1.5 rounded-lg text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex items-center justify-center" title="Back to Chats" aria-label="Back to Chats">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
             </a>
             <div class="relative shrink-0">
-                <div class="w-9 h-9 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 font-bold text-xs flex items-center justify-center">
+                <div data-peer-initials="true" class="w-9 h-9 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 font-bold text-xs flex items-center justify-center">
                     @initials
                 </div>
                 <span id="header-presence-dot"
@@ -70,20 +94,11 @@
             <!-- Peer Identity Block -->
             <div id="peer-identity-block" class="flex-1 min-w-0 overflow-hidden">
                 <div class="flex items-center gap-1.5 min-w-0 truncate">
-                    <h2 class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] leading-tight truncate">@Model.Conversation.OtherParticipantName</h2>
-                    <span class="text-xs text-[#6E6560] dark:text-[#C9C0B9] font-medium truncate">@@@Model.Conversation.OtherParticipantHandle</span>
-                    @if (Model.Conversation.IsPinned)
-                    {
-                        <span class="material-symbols-outlined text-[15px] text-[#A07860] dark:text-[#D8C080] shrink-0" title="Pinned conversation">push_pin</span>
-                    }
-                    @if (Model.Conversation.IsMuted)
-                    {
-                        <span class="material-symbols-outlined text-[15px] text-[#6E6560] dark:text-[#C9C0B9] shrink-0" title="Muted conversation">volume_off</span>
-                    }
-                    @if (Model.Conversation.IsBlocked)
-                    {
-                        <span class="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400 shrink-0">Blocked</span>
-                    }
+                    <h2 data-peer-name="true" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] leading-tight truncate">@Model.Conversation.OtherParticipantName</h2>
+                    <span data-peer-handle="true" class="text-xs text-[#6E6560] dark:text-[#C9C0B9] font-medium truncate">@@@Model.Conversation.OtherParticipantHandle</span>
+                    <span data-peer-pinned-badge="true" class="@(Model.Conversation.IsPinned ? "" : "hidden ")material-symbols-outlined text-[15px] text-[#A07860] dark:text-[#D8C080] shrink-0" title="Pinned conversation">push_pin</span>
+                    <span data-peer-muted-badge="true" class="@(Model.Conversation.IsMuted ? "" : "hidden ")material-symbols-outlined text-[15px] text-[#6E6560] dark:text-[#C9C0B9] shrink-0" title="Muted conversation">volume_off</span>
+                    <span data-peer-blocked-badge="true" class="@(Model.Conversation.IsBlocked ? "" : "hidden ")px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400 shrink-0">Blocked</span>
                 </div>
                 <div id="header-presence-container" class="flex items-center gap-1.5 text-[11px] text-[#6E6560] dark:text-[#C9C0B9] truncate">
                     <span id="typing-indicator" class="hidden text-[#B3929D] font-semibold animate-pulse shrink-0">typing...</span>
@@ -94,11 +109,8 @@
                                 ? "Last seen " + Model.Conversation.LastSeenAtUtc.Value.ToString("g")
                                 : "Offline"))
                     </span>
-                    @if (!string.IsNullOrWhiteSpace(Model.Conversation.OtherParticipantBio))
-                    {
-                        <span class="text-stone-300 dark:text-stone-600 shrink-0">•</span>
-                        <span class="truncate">@Model.Conversation.OtherParticipantBio</span>
-                    }
+                    <span data-peer-bio-sep="true" class="@(!string.IsNullOrWhiteSpace(Model.Conversation.OtherParticipantBio) ? "" : "hidden ")text-stone-300 dark:text-stone-600 shrink-0">•</span>
+                    <span data-peer-bio="true" class="@(!string.IsNullOrWhiteSpace(Model.Conversation.OtherParticipantBio) ? "" : "hidden ")truncate">@(Model.Conversation.OtherParticipantBio ?? "")</span>
                 </div>
             </div>
         </div>
@@ -106,51 +118,51 @@
         <!-- Desktop Action Buttons (md: and up) -->
         <div id="desktop-chat-actions" class="hidden md:flex items-center gap-1 shrink-0">
             <!-- Pin / Unpin Action -->
-            <form method="post" asp-controller="Chat" asp-action="Pin" class="inline">
+            <form method="post" asp-controller="Chat" asp-action="Pin" data-header-action-form="pin" class="inline">
                 @Html.AntiForgeryToken()
                 <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
                 <input type="hidden" name="isPinned" value="@((!Model.Conversation.IsPinned).ToString().ToLowerInvariant())" />
-                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer" title="@(Model.Conversation.IsPinned ? "Unpin conversation" : "Pin conversation")">
+                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" title="@(Model.Conversation.IsPinned ? "Unpin conversation" : "Pin conversation")">
                     <span class="material-symbols-outlined text-[18px]">@(Model.Conversation.IsPinned ? "keep_off" : "push_pin")</span>
                 </button>
             </form>
 
             <!-- Mute / Unmute Action -->
-            <form method="post" asp-controller="Chat" asp-action="Mute" class="inline">
+            <form method="post" asp-controller="Chat" asp-action="Mute" data-header-action-form="mute" class="inline">
                 @Html.AntiForgeryToken()
                 <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
                 <input type="hidden" name="isMuted" value="@((!Model.Conversation.IsMuted).ToString().ToLowerInvariant())" />
-                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer" title="@(Model.Conversation.IsMuted ? "Unmute conversation" : "Mute conversation")">
+                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" title="@(Model.Conversation.IsMuted ? "Unmute conversation" : "Mute conversation")">
                     <span class="material-symbols-outlined text-[18px]">@(Model.Conversation.IsMuted ? "volume_up" : "volume_off")</span>
                 </button>
             </form>
 
-            <!-- Archive Action -->
-            <form method="post" asp-controller="Chat" asp-action="Archive" class="inline">
+            <!-- Archive / Unarchive Action -->
+            <form method="post" asp-controller="Chat" asp-action="Archive" data-header-action-form="archive" class="inline">
                 @Html.AntiForgeryToken()
                 <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                <input type="hidden" name="isArchived" value="true" />
-                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer" title="Archive conversation">
-                    <span class="material-symbols-outlined text-[18px]">archive</span>
+                <input type="hidden" name="isArchived" value="@((!Model.Conversation.IsArchived).ToString().ToLowerInvariant())" />
+                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" title="@(Model.Conversation.IsArchived ? "Unarchive conversation" : "Archive conversation")">
+                    <span class="material-symbols-outlined text-[18px]">@(Model.Conversation.IsArchived ? "unarchive" : "archive")</span>
                 </button>
             </form>
 
             <div class="h-4 w-px bg-[#E3DCD7] dark:bg-[#514D48] mx-1"></div>
 
             <!-- Clear Chat Action -->
-            <form method="post" asp-controller="Chat" asp-action="Clear" class="inline" data-confirm="Clear chat history for yourself? Other participants will not be affected.">
+            <form method="post" asp-controller="Chat" asp-action="Clear" data-header-action-form="clear" class="inline" data-confirm="Clear chat history for yourself? Other participants will not be affected.">
                 @Html.AntiForgeryToken()
                 <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#A07860] dark:hover:text-[#D8C080] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer" title="Clear chat history">
+                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#A07860] dark:hover:text-[#D8C080] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" title="Clear chat history">
                     <span class="material-symbols-outlined text-[18px]">cleaning_services</span>
                 </button>
             </form>
 
             <!-- Delete Conversation Action -->
-            <form method="post" asp-controller="Chat" asp-action="Delete" class="inline" data-confirm="Delete this conversation? It will remain hidden until a new message arrives.">
+            <form method="post" asp-controller="Chat" asp-action="Delete" data-header-action-form="delete" class="inline" data-confirm="Delete this conversation? It will remain hidden until a new message arrives.">
                 @Html.AntiForgeryToken()
                 <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer" title="Delete conversation">
+                <button type="submit" class="w-8 h-8 rounded-lg flex items-center justify-center text-red-500 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed" title="Delete conversation">
                     <span class="material-symbols-outlined text-[18px]">delete</span>
                 </button>
             </form>
@@ -168,55 +180,55 @@
             <div data-chat-actions-menu
                  class="hidden absolute right-0 top-full mt-1.5 w-48 rounded-xl bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-lg py-1.5 z-50 text-xs flex flex-col">
                 <!-- Pin / Unpin Action -->
-                <form method="post" asp-controller="Chat" asp-action="Pin" class="w-full">
+                <form method="post" asp-controller="Chat" asp-action="Pin" data-header-action-form="pin" class="w-full">
                     @Html.AntiForgeryToken()
                     <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
                     <input type="hidden" name="isPinned" value="@((!Model.Conversation.IsPinned).ToString().ToLowerInvariant())" />
-                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
                         <span class="material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9]">@(Model.Conversation.IsPinned ? "keep_off" : "push_pin")</span>
                         <span>@(Model.Conversation.IsPinned ? "Unpin conversation" : "Pin conversation")</span>
                     </button>
                 </form>
 
                 <!-- Mute / Unmute Action -->
-                <form method="post" asp-controller="Chat" asp-action="Mute" class="w-full">
+                <form method="post" asp-controller="Chat" asp-action="Mute" data-header-action-form="mute" class="w-full">
                     @Html.AntiForgeryToken()
                     <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
                     <input type="hidden" name="isMuted" value="@((!Model.Conversation.IsMuted).ToString().ToLowerInvariant())" />
-                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
                         <span class="material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9]">@(Model.Conversation.IsMuted ? "volume_up" : "volume_off")</span>
                         <span>@(Model.Conversation.IsMuted ? "Unmute conversation" : "Mute conversation")</span>
                     </button>
                 </form>
 
-                <!-- Archive Action -->
-                <form method="post" asp-controller="Chat" asp-action="Archive" class="w-full">
+                <!-- Archive / Unarchive Action -->
+                <form method="post" asp-controller="Chat" asp-action="Archive" data-header-action-form="archive" class="w-full">
                     @Html.AntiForgeryToken()
                     <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                    <input type="hidden" name="isArchived" value="true" />
-                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
-                        <span class="material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9]">archive</span>
-                        <span>Archive conversation</span>
+                    <input type="hidden" name="isArchived" value="@((!Model.Conversation.IsArchived).ToString().ToLowerInvariant())" />
+                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+                        <span class="material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9]">@(Model.Conversation.IsArchived ? "unarchive" : "archive")</span>
+                        <span>@(Model.Conversation.IsArchived ? "Unarchive conversation" : "Archive conversation")</span>
                     </button>
                 </form>
 
                 <div class="h-px bg-[#E3DCD7] dark:bg-[#514D48] my-1"></div>
 
                 <!-- Clear Chat Action -->
-                <form method="post" asp-controller="Chat" asp-action="Clear" class="w-full" data-confirm="Clear chat history for yourself? Other participants will not be affected.">
+                <form method="post" asp-controller="Chat" asp-action="Clear" data-header-action-form="clear" class="w-full" data-confirm="Clear chat history for yourself? Other participants will not be affected.">
                     @Html.AntiForgeryToken()
                     <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#A07860] dark:text-[#D8C080] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#A07860] dark:text-[#D8C080] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
                         <span class="material-symbols-outlined text-[18px]">cleaning_services</span>
                         <span>Clear chat history</span>
                     </button>
                 </form>
 
                 <!-- Delete Conversation Action -->
-                <form method="post" asp-controller="Chat" asp-action="Delete" class="w-full" data-confirm="Delete this conversation? It will remain hidden until a new message arrives.">
+                <form method="post" asp-controller="Chat" asp-action="Delete" data-header-action-form="delete" class="w-full" data-confirm="Delete this conversation? It will remain hidden until a new message arrives.">
                     @Html.AntiForgeryToken()
                     <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer">
+                    <button type="submit" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
                         <span class="material-symbols-outlined text-[18px]">delete</span>
                         <span>Delete conversation</span>
                     </button>
@@ -233,6 +245,16 @@
             <span>Loading older messages...</span>
         </div>
 
+        <!-- Loading Skeleton for Zero-Refresh Switches -->
+        <div id="chat-loading-skeleton" class="hidden flex-1 flex-col gap-3 py-4" aria-hidden="true">
+            <div class="flex justify-start"><div class="h-10 w-52 rounded-2xl bg-[#E3DCD7]/60 dark:bg-[#45423E] animate-pulse"></div></div>
+            <div class="flex justify-end"><div class="h-10 w-60 rounded-2xl bg-[#B3929D]/30 animate-pulse"></div></div>
+            <div class="flex justify-start"><div class="h-12 w-44 rounded-2xl bg-[#E3DCD7]/60 dark:bg-[#45423E] animate-pulse"></div></div>
+        </div>
+
+        <!-- Safe Error Banner for 403/404/429/Network Failures -->
+        <div id="chat-error-banner" role="alert" class="hidden rounded-xl border border-red-200 dark:border-red-900/50 bg-red-50 dark:bg-red-950/30 px-4 py-3 text-xs text-red-700 dark:text-red-300 font-medium text-center"></div>
+
         <!-- Empty state when no messages exist -->
         <div id="no-messages-placeholder" class="@(Model.InitialMessages.Count == 0 ? "flex" : "hidden") flex-1 flex-col justify-center items-center text-center select-none py-12">
             <div class="w-16 h-16 rounded-2xl bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center mb-4 shadow-sm text-[#B3929D]">
@@ -241,7 +263,7 @@
             <h3 class="text-base font-bold text-[#2B2725] dark:text-[#F0E9E2] mb-1">
                 No messages yet in this conversation
             </h3>
-            <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9] max-w-sm">
+            <p data-empty-state-peer-prompt="true" class="text-xs text-[#6E6560] dark:text-[#C9C0B9] max-w-sm">
                 Send a message below to start the conversation with @Model.Conversation.OtherParticipantName.
             </p>
         </div>
@@ -280,7 +302,25 @@
                     }
 
                     <!-- Outgoing message (Right-aligned, warm rose) -->
-                    <div id="msg-@message.Id.Value" class="flex flex-wrap justify-end items-center message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                    <div id="msg-@message.Id.Value" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                        @if (!message.IsDeletedForEveryone)
+                        {
+                            <div class="message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 flex items-center gap-0.5">
+                                <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
+                                    <span class="material-symbols-outlined text-[16px]">add_reaction</span>
+                                </button>
+                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@message.Content">
+                                    <span class="material-symbols-outlined text-[16px]">reply</span>
+                                </button>
+                                <button type="button" data-action="edit" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Edit message" aria-label="Edit message">
+                                    <span class="material-symbols-outlined text-[16px]">edit</span>
+                                </button>
+                                <button type="button" data-action="delete" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-red-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Delete message" aria-label="Delete message">
+                                    <span class="material-symbols-outlined text-[16px]">delete</span>
+                                </button>
+                            </div>
+                        }
+
                         <div class="message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative">
                             @if (message.ReplyTo != null)
                             {
@@ -333,24 +373,6 @@
                                 }
                             </div>
                         </div>
-
-                        @if (!message.IsDeletedForEveryone)
-                        {
-                            <div class="message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 flex items-center gap-0.5">
-                                <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
-                                    <span class="material-symbols-outlined text-[16px]">add_reaction</span>
-                                </button>
-                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@message.Content">
-                                    <span class="material-symbols-outlined text-[16px]">reply</span>
-                                </button>
-                                <button type="button" data-action="edit" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Edit message" aria-label="Edit message">
-                                    <span class="material-symbols-outlined text-[16px]">edit</span>
-                                </button>
-                                <button type="button" data-action="delete" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-red-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Delete message" aria-label="Delete message">
-                                    <span class="material-symbols-outlined text-[16px]">delete</span>
-                                </button>
-                            </div>
-                        }
                     </div>
                 }
                 else
@@ -433,6 +455,23 @@
 
     <!-- Fixed Message Composer Area -->
     <div id="active-conversation-composer" class="bg-[#FFFFFF] dark:bg-[#3A3835] border-t border-[#E3DCD7] dark:border-[#514D48] shrink-0">
+        @if (Model.Conversation.IsBlocked)
+        {
+            <div id="chat-policy-notice" role="status" class="px-4 py-2 bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-900/50 text-xs text-red-700 dark:text-red-300 text-center font-medium">
+                You cannot send messages in this conversation.
+            </div>
+        }
+        else if (Model.Conversation.IsPeerDeleted)
+        {
+            <div id="chat-policy-notice" role="status" class="px-4 py-2 bg-[#F0E9DF] dark:bg-[#45423E] border-b border-[#E3DCD7] dark:border-[#514D48] text-xs text-[#6E6560] dark:text-[#C9C0B9] text-center font-medium">
+                This account has been deleted. Messages will only be visible if the account is recovered.
+            </div>
+        }
+        else
+        {
+            <div id="chat-policy-notice" role="status" class="hidden px-4 py-2 text-xs text-center font-medium"></div>
+        }
+
         <!-- Active Reply Quote Banner -->
         <div id="composer-reply-banner" class="hidden px-5 py-2 bg-[#F0E9DF]/70 dark:bg-[#45423E]/70 border-b border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between text-xs">
             <div class="flex items-center gap-2.5 min-w-0">
@@ -456,7 +495,7 @@
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
             </a>
             <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
-                <textarea id="message-content-input" maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32" placeholder="Write a message..."></textarea>
+                <textarea id="message-content-input" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
                 <button type="button" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0" title="Add Emoji">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
                 </button>
@@ -464,12 +503,12 @@
             <a asp-controller="Chat" asp-action="VoiceRecording" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Record Voice Message">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
             </a>
-            <button id="send-message-btn" type="button" class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send Message">
+            <button id="send-message-btn" type="button" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send Message">
                 <svg class="w-4 h-4 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"></path></svg>
             </button>
         </div>
         <div class="text-center pb-2">
-            <span class="text-[10px] text-[#6E6560] dark:text-[#C9C0B9] font-medium">Press <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Return</kbd> to send, <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Shift + Return</kbd> for new line</span>
+            <span class="text-[10px] text-[#6E6560] dark:text-[#C9C0B9] font-medium">Press <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Enter</kbd> to send, <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Shift + Enter</kbd> for new line</span>
         </div>
     </div>
 
@@ -478,62 +517,15 @@
         @Html.AntiForgeryToken()
     </form>
 
-    <!-- Hidden MVC Form Fallback -->
-    <form id="message-fallback-form" method="post" asp-controller="Chat" asp-action="SendMessage" class="hidden">
-        @Html.AntiForgeryToken()
-        <input type="hidden" name="conversationId" value="@Model.Conversation.Id.Value" />
-        <input type="hidden" name="content" id="fallback-content" />
-        <input type="hidden" name="replyToMessageId" id="fallback-reply-to" />
-        <input type="hidden" name="idempotencyKey" id="fallback-idempotency-key" />
-    </form>
-
-    <!-- Floating Emoji Reaction Picker Popover (clamped inside viewport) -->
-    <div id="reaction-picker-popover" role="menu" aria-label="Add reaction" class="hidden fixed z-50 flex items-center gap-1 bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-full shadow-lg px-2 py-1 select-none max-w-[calc(100vw-16px)]">
-        <button type="button" data-emoji-btn="👍" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Thumbs Up">👍</button>
-        <button type="button" data-emoji-btn="❤️" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Heart">❤️</button>
-        <button type="button" data-emoji-btn="😂" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Joy">😂</button>
-        <button type="button" data-emoji-btn="😮" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Open Mouth">😮</button>
-        <button type="button" data-emoji-btn="😢" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Cry">😢</button>
-        <button type="button" data-emoji-btn="🙏" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Pray">🙏</button>
-        <button type="button" data-emoji-btn="🔥" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Fire">🔥</button>
-        <button type="button" data-emoji-btn="🎉" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Party">🎉</button>
-    </div>
-
-    <!-- Edit Message Accessible Modal -->
-    <div id="edit-message-modal" role="dialog" aria-modal="true" aria-labelledby="edit-message-modal-title" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
-        <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-md p-4 sm:p-5 flex flex-col gap-3">
-            <div class="flex items-center justify-between">
-                <h3 id="edit-message-modal-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Edit message</h3>
-                <span class="text-xs text-[#6E6560] dark:text-[#C9C0B9]">Max 4000 characters</span>
-            </div>
-            <p id="edit-message-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium"></p>
-            <textarea id="edit-message-input" rows="4" maxlength="4000" aria-label="Edit message content" class="w-full bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] rounded-xl p-3 text-xs text-[#2B2725] dark:text-[#F0E9E2] focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] resize-none" placeholder="Enter updated text..."></textarea>
-            <div class="flex items-center justify-end gap-2 pt-1">
-                <button type="button" id="cancel-edit-btn" class="px-3.5 py-1.5 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
-                <button type="button" id="save-edit-btn" class="px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-90 active:scale-95 transition-all shadow-2xs cursor-pointer">Save Changes</button>
-            </div>
+    @await Html.PartialAsync("_ChatModals")
         </div>
     </div>
 
-    <!-- Delete Message Accessible Confirmation Modal -->
-    <div id="delete-message-modal" role="dialog" aria-modal="true" aria-labelledby="delete-message-modal-title" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
-        <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-sm p-4 sm:p-5 flex flex-col gap-3">
-            <h3 id="delete-message-modal-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Delete message?</h3>
-            <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9]">Choose whether to hide this message for yourself or delete it for everyone in the conversation.</p>
-            <p id="delete-message-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium"></p>
-            <div class="flex flex-col gap-2 pt-2">
-                <button type="button" id="delete-for-everyone-btn" class="w-full px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-colors cursor-pointer">Delete for everyone</button>
-                <button type="button" id="delete-for-me-btn" class="w-full px-4 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Delete for me</button>
-                <button type="button" id="cancel-delete-btn" class="w-full px-4 py-1.5 rounded-xl text-xs font-medium text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors cursor-pointer">Cancel</button>
-            </div>
-        </div>
-    </div>
+    <script id="chat-bootstrap" type="application/json">@Json.Serialize(bootstrapData)</script>
 </div>
 
 @section Scripts {
     <script src="~/lib/signalr/signalr.min.js" asp-append-version="true"></script>
-    <script src="~/js/chat-realtime.js" asp-append-version="true"></script>
     <script type="module" src="~/js/chat-actions.js" asp-append-version="true"></script>
-    <script type="module" src="~/js/conversation-page.js" asp-append-version="true"></script>
-    <!-- ChatRealtime.init({ conversationId: conversationId, currentUserId: currentUserId, initialCursor: nextCursor }) initialized in conversation-page.js -->
+    <script type="module" src="~/js/chat-shell.js" asp-append-version="true"></script>
 }

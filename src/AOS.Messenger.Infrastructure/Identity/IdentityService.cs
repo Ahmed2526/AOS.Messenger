@@ -46,8 +46,8 @@ public sealed class IdentityService : IIdentityService
         _dbContext = dbContext;
         _passwordHasher = passwordHasher ?? new PasswordHasher<ApplicationUser>();
         _terminator = terminator ?? NullSessionConnectionTerminator.Instance;
-        _sessionCache = sessionCache ?? SessionCache.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _sessionCache = sessionCache ?? new SessionCache(_timeProvider);
     }
 
     public async Task<(bool Succeeded, UserId? UserId, IEnumerable<string> Errors)> RegisterAsync(

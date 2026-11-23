@@ -502,7 +502,9 @@ public sealed class ConversationService : IConversationService
             bio = profile.Bio;
         }
 
+        var isPeerDeleted = profile is null || profile.IsDeleted;
         var isBlocked = await _blockService.IsBlockedBidirectionalAsync(currentUserId, otherParticipantId, ct);
+        var canSend = !isBlocked;
         var state = await _conversationPersistence.GetUserStateAsync(conversation.Id, currentUserId, ct);
 
         var isPinned = state?.IsPinned ?? false;
@@ -514,7 +516,7 @@ public sealed class ConversationService : IConversationService
         MessageId? peerDelivered = null;
         MessageId? peerRead = null;
 
-        if (!isBlocked && profile is not null && !profile.IsDeleted)
+        if (!isBlocked && !isPeerDeleted)
         {
             var peerState = await _conversationPersistence.GetUserStateAsync(conversation.Id, otherParticipantId, ct);
             peerDelivered = peerState?.LastDeliveredMessageId;
@@ -542,6 +544,8 @@ public sealed class ConversationService : IConversationService
             isOnline,
             lastSeen,
             peerDelivered,
-            peerRead);
+            peerRead,
+            isPeerDeleted,
+            canSend);
     }
 }

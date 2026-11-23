@@ -29,12 +29,16 @@ public sealed class ConversationSidebarViewComponent : ViewComponent
             return View(new ConversationSidebarViewModel(Array.Empty<ConversationSummaryDto>(), null));
         }
 
-        if (activeConversationId is null &&
-            ViewContext.RouteData.Values.TryGetValue("id", out var routeId) &&
-            routeId is not null &&
-            Guid.TryParse(routeId.ToString(), out var parsedGuid))
+        if (activeConversationId is null)
         {
-            activeConversationId = new ConversationId(parsedGuid);
+            var routeValue = ViewContext.RouteData.Values.TryGetValue("id", out var routeId) && routeId is not null
+                ? routeId
+                : (ViewContext.RouteData.Values.TryGetValue("conversationId", out var convRouteId) ? convRouteId : null);
+
+            if (routeValue is not null && Guid.TryParse(routeValue.ToString(), out var parsedGuid))
+            {
+                activeConversationId = new ConversationId(parsedGuid);
+            }
         }
 
         var conversations = await _conversationService.GetConversationListAsync(

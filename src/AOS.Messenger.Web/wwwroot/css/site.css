@@ -1,14 +1,16 @@
 /* Site-wide base rules & overrides */
-html, body {
-  height: 100%;
-  width: 100%;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-}
+@layer base {
+  html, body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
 
-/* Ensure focus outline aesthetics blend with warm palette */
-:focus-visible {
-  outline: 2px solid #B3929D;
-  outline-offset: 1px;
+  /* Ensure focus outline aesthetics blend with warm palette */
+  :focus-visible {
+    outline: 2px solid #B3929D;
+    outline-offset: 1px;
+  }
 }

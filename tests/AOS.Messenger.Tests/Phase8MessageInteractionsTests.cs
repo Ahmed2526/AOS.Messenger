@@ -583,9 +583,11 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
         Assert.NotNull(current);
         var solutionDir = current.FullName;
         var conversationViewPath = Path.Combine(solutionDir, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
+        var modalsPartialPath = Path.Combine(solutionDir, "src", "AOS.Messenger.Web", "Views", "Chat", "_ChatModals.cshtml");
         Assert.True(File.Exists(conversationViewPath), $"Conversation.cshtml not found at {conversationViewPath}");
 
-        var html = File.ReadAllText(conversationViewPath);
+        var html = File.ReadAllText(conversationViewPath)
+            + (File.Exists(modalsPartialPath) ? "\n" + File.ReadAllText(modalsPartialPath) : string.Empty);
 
         // Strict CSP: Zero inline style="..." attributes
         var inlineStyleMatches = Regex.Matches(html, @"\sstyle\s*=\s*""[^""]*""", RegexOptions.IgnoreCase);

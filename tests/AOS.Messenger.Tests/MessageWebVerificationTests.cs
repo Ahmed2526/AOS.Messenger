@@ -637,22 +637,22 @@ public sealed class MessageWebVerificationTests
     {
         var slnRoot = FindSolutionRoot();
         var conversationViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
-        var clientScriptPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "conversation-page.js");
+        var composerScriptPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "composer.js");
 
         Assert.True(File.Exists(conversationViewPath), $"Conversation.cshtml not found at: {conversationViewPath}");
-        Assert.True(File.Exists(clientScriptPath), $"conversation-page.js not found at: {clientScriptPath}");
+        Assert.True(File.Exists(composerScriptPath), $"composer.js not found at: {composerScriptPath}");
 
         var viewContent = File.ReadAllText(conversationViewPath);
-        Assert.Contains("conversation-page.js", viewContent);
+        Assert.Contains("chat-shell.js", viewContent);
 
-        var content = File.ReadAllText(clientScriptPath);
+        var content = File.ReadAllText(composerScriptPath);
 
         // Assert crypto.randomUUID() is used
         Assert.Contains("crypto.randomUUID()", content);
 
         // Assert crypto.randomUUID() is stored in idempotencyKey
         var idempotencyPattern = new Regex(@"const\s+idempotencyKey\s*=\s*crypto\.randomUUID\(\)", RegexOptions.Compiled);
-        Assert.True(idempotencyPattern.IsMatch(content), "Expected 'const idempotencyKey = crypto.randomUUID()' in conversation-page.js.");
+        Assert.True(idempotencyPattern.IsMatch(content), "Expected 'const idempotencyKey = crypto.randomUUID()' in composer.js.");
 
         // Assert idempotencyKey is passed in request payload
         Assert.Contains("idempotencyKey: idempotencyKey", content);
@@ -663,17 +663,17 @@ public sealed class MessageWebVerificationTests
     {
         var slnRoot = FindSolutionRoot();
         var conversationViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
-        var clientScriptPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "conversation-page.js");
+        var composerScriptPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "composer.js");
         var rendererScriptPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "message-renderer.js");
 
         Assert.True(File.Exists(conversationViewPath), $"Conversation.cshtml not found at: {conversationViewPath}");
-        Assert.True(File.Exists(clientScriptPath), $"conversation-page.js not found at: {clientScriptPath}");
+        Assert.True(File.Exists(composerScriptPath), $"composer.js not found at: {composerScriptPath}");
         Assert.True(File.Exists(rendererScriptPath), $"message-renderer.js not found at: {rendererScriptPath}");
 
         var viewContent = File.ReadAllText(conversationViewPath);
-        Assert.Contains("conversation-page.js", viewContent);
+        Assert.Contains("chat-shell.js", viewContent);
 
-        var content = File.ReadAllText(rendererScriptPath) + "\n" + File.ReadAllText(clientScriptPath);
+        var content = File.ReadAllText(rendererScriptPath) + "\n" + File.ReadAllText(composerScriptPath);
 
         // 1. Assert escapeHtml function is defined
         Assert.Contains("function escapeHtml(str)", content);
@@ -693,8 +693,7 @@ public sealed class MessageWebVerificationTests
         Assert.Contains("replySenderEl.textContent = sender", content);
         Assert.Contains("replyPreviewEl.textContent = preview", content);
 
-        // 4. Assert no raw unencoded message.content is concatenated into innerHTML
-        // Any occurrence of message.content in script must be wrapped in escapeHtml(message.content)
+        // 4. Assert no raw unencoded message.content is concatenated into HTML strings
         var rawContentMatch = Regex.Matches(content, @"\$\{message\.content\}");
         Assert.Empty(rawContentMatch);
     }

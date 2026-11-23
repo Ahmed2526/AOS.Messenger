@@ -48,12 +48,18 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
         return current?.FullName ?? throw new InvalidOperationException("Could not locate solution root.");
     }
 
+    private static string JsUrl(string fileName)
+    {
+        var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
+        return new Uri(path).AbsoluteUri;
+    }
+
     private static (int ExitCode, string Output, string Error) RunNodeScript(string script)
     {
         var psi = new ProcessStartInfo
         {
             FileName = "node",
-            Arguments = "-",
+            Arguments = "--input-type=module -",
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -315,10 +321,15 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
         using var factory = CreateFactory();
         var client = factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
-        var routes = new[]
+        var chatShellRoutes = new[]
         {
             "/Chat",
-            $"/Chat/Conversation/{conv.Id.Value}",
+            $"/chat/{conv.Id.Value}",
+            $"/Chat/Conversation/{conv.Id.Value}"
+        };
+
+        var lobbyRoutes = new[]
+        {
             "/Chat/Archived",
             "/Chat/NewConversation",
             "/Settings",
@@ -327,14 +338,31 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             "/Account/Sessions"
         };
 
-        foreach (var route in routes)
+        foreach (var route in chatShellRoutes)
         {
             var resp = await client.GetAsync(route);
             Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
             var html = await resp.Content.ReadAsStringAsync();
 
             Assert.Single(Regex.Matches(html, @"signalr\.min\.js"));
-            Assert.Single(Regex.Matches(html, @"chat-realtime\.js"));
+            Assert.Single(Regex.Matches(html, @"chat-shell\.js"));
+            Assert.Empty(Regex.Matches(html, @"chat-realtime\.js"));
+            Assert.Contains($"data-current-user-id=\"{me.Id}\"", html);
+            Assert.Contains("data-unread-count=\"1\"", html);
+            Assert.Contains("data-unread-badge=\"true\"", html);
+            Assert.Contains("conversation-unread-badge", html);
+            Assert.Contains("data-is-pinned=\"false\"", html);
+        }
+
+        foreach (var route in lobbyRoutes)
+        {
+            var resp = await client.GetAsync(route);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            var html = await resp.Content.ReadAsStringAsync();
+
+            Assert.Single(Regex.Matches(html, @"signalr\.min\.js"));
+            Assert.Single(Regex.Matches(html, @"sidebar\.js"));
+            Assert.Empty(Regex.Matches(html, @"chat-realtime\.js"));
             Assert.Contains($"data-current-user-id=\"{me.Id}\"", html);
             Assert.Contains("data-unread-count=\"1\"", html);
             Assert.Contains("data-unread-badge=\"true\"", html);
@@ -346,12 +374,16 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
     [Fact]
     public void ChatRealtimeJs_LobbyIncomingMessage_UpdatesPreview_IncrementsUnreadBadge_ReordersBelowPinned_AndDeduplicates()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var chatStateUrl = JsUrl("chat-state.js");
+        var apiClientUrl = JsUrl("api-client.js");
+        var convListUrl = JsUrl("conversation-list.js");
+        var signalrClientUrl = JsUrl("signalr-client.js");
 
         var script = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
+            import {{ createChatState }} from '{chatStateUrl}';
+            import {{ configureApiClient }} from '{apiClientUrl}';
+            import {{ setSidebarUnreadCount, closeSidebarBroadcastChannel }} from '{convListUrl}';
+            import {{ createSignalRClient }} from '{signalrClientUrl}';
 
             // Lightweight DOM mock supporting elements, attributes, querySelector, insertBefore, and textContent
             class MockEl {{
@@ -367,7 +399,13 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     this.value = '';
                     this.classList = {{
                         add: (...cls) => {{ this.className = Array.from(new Set((this.className + ' ' + cls.join(' ')).trim().split(/\s+/))).join(' '); }},
-                        remove: (...cls) => {{ this.className = this.className.split(/\s+/).filter(c => c && !cls.includes(c)).join(' '); }}
+                        remove: (...cls) => {{ this.className = this.className.split(/\s+/).filter(c => c && !cls.includes(c)).join(' '); }},
+                        contains: (c) => this.className.split(/\s+/).includes(c),
+                        toggle: (c, force) => {{
+                            const has = this.className.split(/\s+/).includes(c);
+                            const next = force !== undefined ? !!force : !has;
+                            if (next) this.classList.add(c); else this.classList.remove(c);
+                        }}
                     }};
                 }}
                 get firstChild() {{ return this.children[0] || null; }}
@@ -471,7 +509,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
 
             const searchInput = new MockEl('input', {{ id: 'conversationSearchInput' }});
 
-            global.document = {{
+            globalThis.document = {{
                 title: 'A♡S Messenger',
                 visibilityState: 'visible',
                 hasFocus: () => true,
@@ -487,13 +525,14 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
 
             const handlers = {{}};
             const deliveredCalls = [];
-            global.signalR = {{
+            const signalRLib = {{
                 HubConnectionState: {{ Connected: 'Connected' }},
                 HubConnectionBuilder: class {{
                     withUrl() {{ return this; }}
                     withAutomaticReconnect() {{ return this; }}
                     build() {{
                         return {{
+                            state: 'Connected',
                             on: (name, fn) => {{ handlers[name] = fn; }},
                             onreconnecting: () => {{}},
                             onreconnected: () => {{}},
@@ -503,13 +542,34 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     }}
                 }}
             }};
-            global.window = global;
-            global.Receipts = {{
-                markDelivered: (cId, mId) => deliveredCalls.push([cId, String(mId)])
-            }};
+            globalThis.window = globalThis;
 
-            eval(code);
-            global.ChatRealtime.initLobby({{ currentUserId: 'user-me' }});
+            configureApiClient({{
+                getCsrfToken: () => 'csrf-lobby',
+                fetchImpl: async (url, opts) => {{
+                    const convMatch = url.match(/\/api\/conversations\/([^/]+)\/delivered$/);
+                    if (convMatch) {{
+                        const body = JSON.parse(opts.body);
+                        deliveredCalls.push([convMatch[1], String(body.upToMessageId)]);
+                    }}
+                    return {{
+                        ok: true,
+                        status: 200,
+                        redirected: false,
+                        headers: {{ get: () => 'application/json' }},
+                        text: async () => '{{}}'
+                    }};
+                }}
+            }});
+
+            const state = createChatState();
+            state.currentUserId = 'user-me';
+            const client = createSignalRClient({{
+                state,
+                onSessionExpired: () => {{}},
+                signalRLib
+            }});
+            await client.start();
 
             // 1. Incoming message 1 from peer on conv-bottom
             handlers['ReceiveMessage']({{
@@ -529,7 +589,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                 console.error('Expected order [pinned, bottom, top], got', container.children.map(c => c.getAttribute('data-conversation-id')));
                 process.exit(4);
             }}
-            if (global.document.title !== '(1) A♡S Messenger') {{ console.error('Bad title:', global.document.title); process.exit(5); }}
+            if (globalThis.document.title !== '(1) A♡S Messenger') {{ console.error('Bad title:', globalThis.document.title); process.exit(5); }}
             if (deliveredCalls.length !== 1 || deliveredCalls[0][0] !== 'conv-bottom') process.exit(6);
 
             // 2. Duplicate replay of msg 101 must NOT double-increment unread count
@@ -552,7 +612,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             }});
             if (bottomItem.querySelector('.conversation-unread-badge').textContent !== '2') process.exit(8);
             if (bottomItem.getAttribute('data-search').indexOf('Second live ping') < 0) process.exit(9);
-            if (global.document.title !== '(2) A♡S Messenger') process.exit(10);
+            if (globalThis.document.title !== '(2) A♡S Messenger') process.exit(10);
 
             // 4. Outgoing message on conv-top updates preview & bumps above conv-bottom WITHOUT creating unread badge
             handlers['ReceiveMessage']({{
@@ -567,10 +627,12 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             if (container.children[0] !== pinnedItem || container.children[1] !== topItem || container.children[2] !== bottomItem) process.exit(13);
 
             // 5. Clearing unread count removes badge and restores base document title
-            global.ChatRealtime.setSidebarUnreadCount('conv-bottom', 0);
+            setSidebarUnreadCount('conv-bottom', 0);
             if (bottomItem.querySelector('.conversation-unread-badge') !== null) process.exit(14);
-            if (global.document.title !== 'A♡S Messenger') process.exit(15);
+            if (globalThis.document.title !== 'A♡S Messenger') process.exit(15);
 
+            client.destroy();
+            closeSidebarBroadcastChannel();
             console.log('SUCCESS');
         ";
 
@@ -582,12 +644,16 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
     [Fact]
     public void ChatRealtimeJs_ActiveConversation_HandlesFocusedUnfocusedAndOtherConversationUnreadBadges()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var chatStateUrl = JsUrl("chat-state.js");
+        var apiClientUrl = JsUrl("api-client.js");
+        var convListUrl = JsUrl("conversation-list.js");
+        var signalrClientUrl = JsUrl("signalr-client.js");
 
         var script = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
+            import {{ createChatState }} from '{chatStateUrl}';
+            import {{ configureApiClient }} from '{apiClientUrl}';
+            import {{ closeSidebarBroadcastChannel }} from '{convListUrl}';
+            import {{ createSignalRClient }} from '{signalrClientUrl}';
 
             class MockEl {{
                 constructor(tag, attrs = {{}}) {{
@@ -601,9 +667,16 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     this.id = attrs.id || '';
                     this.classList = {{
                         add: (...cls) => {{ this.className = Array.from(new Set((this.className + ' ' + cls.join(' ')).trim().split(/\s+/))).join(' '); }},
-                        remove: (...cls) => {{ this.className = this.className.split(/\s+/).filter(c => c && !cls.includes(c)).join(' '); }}
+                        remove: (...cls) => {{ this.className = this.className.split(/\s+/).filter(c => c && !cls.includes(c)).join(' '); }},
+                        contains: (c) => this.className.split(/\s+/).includes(c),
+                        toggle: (c, force) => {{
+                            const has = this.className.split(/\s+/).includes(c);
+                            const next = force !== undefined ? !!force : !has;
+                            if (next) this.classList.add(c); else this.classList.remove(c);
+                        }}
                     }};
                 }}
+                get firstChild() {{ return this.children[0] || null; }}
                 get firstElementChild() {{ return this.children[0] || null; }}
                 get textContent() {{ return this._text; }}
                 set textContent(v) {{ this._text = String(v); }}
@@ -703,7 +776,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             let isFocused = true;
             let visState = 'visible';
 
-            global.document = {{
+            globalThis.document = {{
                 title: 'Alice - A♡S Messenger',
                 get visibilityState() {{ return visState; }},
                 hasFocus: () => isFocused,
@@ -721,16 +794,21 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                 }}
             }};
 
+            // Execute markRead debounce synchronously inside unit test
+            globalThis.setTimeout = (fn) => {{ fn(); return 1; }};
+            globalThis.clearTimeout = () => {{}};
+
             const handlers = {{}};
             const delivered = [];
             const read = [];
-            global.signalR = {{
+            const signalRLib = {{
                 HubConnectionState: {{ Connected: 'Connected' }},
                 HubConnectionBuilder: class {{
                     withUrl() {{ return this; }}
                     withAutomaticReconnect() {{ return this; }}
                     build() {{
                         return {{
+                            state: 'Connected',
                             on: (name, fn) => {{ handlers[name] = fn; }},
                             onreconnecting: () => {{}},
                             onreconnected: () => {{}},
@@ -741,15 +819,42 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     }}
                 }}
             }};
-            global.window = global;
-            global.addEventListener = () => {{}};
-            global.Receipts = {{
-                markDelivered: (c, m) => delivered.push([c, String(m)]),
-                markRead: (c, m) => read.push([c, String(m)])
-            }};
+            globalThis.window = globalThis;
+            globalThis.addEventListener = () => {{}};
 
-            eval(code);
-            global.ChatRealtime.init({{ conversationId: 'conv-active', currentUserId: 'user-me' }});
+            configureApiClient({{
+                getCsrfToken: () => 'csrf-active',
+                fetchImpl: async (url, opts) => {{
+                    const delivMatch = url.match(/\/api\/conversations\/([^/]+)\/delivered$/);
+                    if (delivMatch) {{
+                        const body = JSON.parse(opts.body);
+                        delivered.push([delivMatch[1], String(body.upToMessageId)]);
+                    }}
+                    const readMatch = url.match(/\/api\/conversations\/([^/]+)\/read$/);
+                    if (readMatch) {{
+                        const body = JSON.parse(opts.body);
+                        read.push([readMatch[1], String(body.upToMessageId)]);
+                    }}
+                    return {{
+                        ok: true,
+                        status: 200,
+                        redirected: false,
+                        headers: {{ get: () => 'application/json' }},
+                        text: async () => '{{}}'
+                    }};
+                }}
+            }});
+
+            const state = createChatState();
+            state.currentUserId = 'user-me';
+            state.commitActiveConversation('conv-active', {{ id: 'conv-active', canSend: true }}, []);
+
+            const client = createSignalRClient({{
+                state,
+                onSessionExpired: () => {{}},
+                signalRLib
+            }});
+            await client.start();
 
             // 1. Incoming on OTHER chat increments otherItem unread badge to 1, does NOT append to active stream, does NOT markRead
             handlers['ReceiveMessage']({{
@@ -798,6 +903,8 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             if (messagesContainer.children.length !== 2) process.exit(8);
             if (read.length !== 1) process.exit(9);
 
+            client.destroy();
+            closeSidebarBroadcastChannel();
             console.log('SUCCESS');
         ";
 
@@ -809,12 +916,16 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
     [Fact]
     public void ChatRealtimeJs_NewConversationArrival_TriggersSyncAndReplacesEmptyStateSafely()
     {
-        var slnRoot = FindSolutionRoot();
-        var jsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-realtime.js").Replace("\\", "/");
+        var chatStateUrl = JsUrl("chat-state.js");
+        var apiClientUrl = JsUrl("api-client.js");
+        var convListUrl = JsUrl("conversation-list.js");
+        var signalrClientUrl = JsUrl("signalr-client.js");
 
         var script = $@"
-            const fs = require('fs');
-            const code = fs.readFileSync('{jsPath}', 'utf8');
+            import {{ createChatState }} from '{chatStateUrl}';
+            import {{ configureApiClient }} from '{apiClientUrl}';
+            import {{ closeSidebarBroadcastChannel }} from '{convListUrl}';
+            import {{ createSignalRClient }} from '{signalrClientUrl}';
 
             class MockEl {{
                 constructor(tag, attrs = {{}}) {{
@@ -828,7 +939,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     this.id = attrs.id || '';
                     this.href = '';
                     this.title = '';
-                    this.classList = {{ add: () => {{}}, remove: () => {{}} }};
+                    this.classList = {{ add: () => {{}}, remove: () => {{}}, contains: () => false, toggle: () => {{}} }};
                 }}
                 get firstChild() {{ return this.children[0] || null; }}
                 get textContent() {{ return this._text; }}
@@ -894,7 +1005,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             const emptyState = new MockEl('div', {{ 'data-sidebar-empty-state': 'true' }});
             listEl.appendChild(emptyState);
 
-            global.document = {{
+            globalThis.document = {{
                 title: 'A♡S Messenger',
                 visibilityState: 'visible',
                 addEventListener: () => {{}},
@@ -906,38 +1017,53 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             }};
 
             const fetchUrls = [];
-            global.fetch = async (url) => {{
-                fetchUrls.push(url);
-                return {{
-                    ok: true,
-                    status: 200,
-                    redirected: false,
-                    url,
-                    json: async () => ([
-                        {{
-                            id: 'conv-brand-new',
-                            otherParticipantId: 'user-eve',
-                            otherParticipantName: '<b>Eve</b>',
-                            otherParticipantHandle: 'eve',
-                            lastMessagePreview: 'First message ever!',
-                            unreadCount: 1,
-                            isPinned: false,
-                            isMuted: false,
-                            isOnline: true,
-                            lastMessageId: 501
-                        }}
-                    ])
-                }};
-            }};
+            configureApiClient({{
+                getCsrfToken: () => 'csrf-new-conv',
+                fetchImpl: async (url) => {{
+                    if (url.startsWith('/api/conversations?')) {{
+                        fetchUrls.push(url);
+                        return {{
+                            ok: true,
+                            status: 200,
+                            redirected: false,
+                            url,
+                            headers: {{ get: () => 'application/json' }},
+                            text: async () => JSON.stringify([
+                                {{
+                                    id: 'conv-brand-new',
+                                    otherParticipantId: 'user-eve',
+                                    otherParticipantName: '<b>Eve</b>',
+                                    otherParticipantHandle: 'eve',
+                                    lastMessagePreview: 'First message ever!',
+                                    unreadCount: 1,
+                                    isPinned: false,
+                                    isMuted: false,
+                                    isOnline: true,
+                                    lastMessageId: 501
+                                }}
+                            ])
+                        }};
+                    }}
+                    return {{
+                        ok: true,
+                        status: 200,
+                        redirected: false,
+                        url,
+                        headers: {{ get: () => 'application/json' }},
+                        text: async () => '{{}}'
+                    }};
+                }}
+            }});
 
             const handlers = {{}};
-            global.signalR = {{
+            const signalRLib = {{
                 HubConnectionState: {{ Connected: 'Connected' }},
                 HubConnectionBuilder: class {{
                     withUrl() {{ return this; }}
                     withAutomaticReconnect() {{ return this; }}
                     build() {{
                         return {{
+                            state: 'Connected',
                             on: (name, fn) => {{ handlers[name] = fn; }},
                             onreconnecting: () => {{}},
                             onreconnected: () => {{}},
@@ -947,35 +1073,41 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
                     }}
                 }}
             }};
-            global.window = global;
+            globalThis.window = globalThis;
 
-            eval(code);
-            global.ChatRealtime.initLobby({{ currentUserId: 'user-me' }});
+            const state = createChatState();
+            state.currentUserId = 'user-me';
+            const client = createSignalRClient({{
+                state,
+                onSessionExpired: () => {{}},
+                signalRLib
+            }});
+            await client.start();
 
-            (async () => {{
-                handlers['ReceiveMessage']({{
-                    id: 501,
-                    conversationId: 'conv-brand-new',
-                    senderId: 'user-eve',
-                    content: 'First message ever!',
-                    isDeletedForEveryone: false
-                }});
+            handlers['ReceiveMessage']({{
+                id: 501,
+                conversationId: 'conv-brand-new',
+                senderId: 'user-eve',
+                content: 'First message ever!',
+                isDeletedForEveryone: false
+            }});
 
-                // Allow async fetch microtasks to settle
-                await new Promise(r => setTimeout(r, 50));
+            // Allow async fetch microtasks to settle
+            await new Promise(r => setTimeout(r, 50));
 
-                if (fetchUrls.length !== 1 || fetchUrls[0] !== '/api/conversations?includeArchived=false') process.exit(1);
-                if (listEl.querySelector('[data-sidebar-empty-state]') !== null) process.exit(2);
+            if (fetchUrls.length !== 1 || fetchUrls[0] !== '/api/conversations?includeArchived=false') process.exit(1);
+            if (listEl.querySelector('[data-sidebar-empty-state]') !== null) process.exit(2);
 
-                const newItem = listEl.querySelector('.conversation-item');
-                if (!newItem || newItem.getAttribute('data-conversation-id') !== 'conv-brand-new') process.exit(3);
-                if (newItem.getAttribute('data-peer-name') !== '<b>Eve</b>') process.exit(4);
-                if (newItem.querySelector('.conversation-last-message').textContent !== 'First message ever!') process.exit(5);
-                if (newItem.querySelector('.conversation-unread-badge').textContent !== '1') process.exit(6);
-                if (global.document.title !== '(1) A♡S Messenger') process.exit(7);
+            const newItem = listEl.querySelector('.conversation-item');
+            if (!newItem || newItem.getAttribute('data-conversation-id') !== 'conv-brand-new') process.exit(3);
+            if (newItem.getAttribute('data-peer-name') !== '<b>Eve</b>') process.exit(4);
+            if (newItem.querySelector('.conversation-last-message').textContent !== 'First message ever!') process.exit(5);
+            if (newItem.querySelector('.conversation-unread-badge').textContent !== '1') process.exit(6);
+            if (globalThis.document.title !== '(1) A♡S Messenger') process.exit(7);
 
-                console.log('SUCCESS');
-            }})();
+            client.destroy();
+            closeSidebarBroadcastChannel();
+            console.log('SUCCESS');
         ";
 
         var (exitCode, output, error) = RunNodeScript(script);

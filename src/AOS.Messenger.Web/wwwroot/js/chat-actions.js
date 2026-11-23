@@ -10,6 +10,18 @@
  * - Zero inline styles.
  */
 
+export function closeChatActionsMenu() {
+    if (typeof document === 'undefined') return;
+    const toggleBtn = document.querySelector('[data-chat-actions-toggle]');
+    const menuContainer = document.querySelector('[data-chat-actions-menu]');
+    if (menuContainer && !menuContainer.classList.contains('hidden')) {
+        menuContainer.classList.add('hidden');
+    }
+    if (toggleBtn) {
+        toggleBtn.setAttribute('aria-expanded', 'false');
+    }
+}
+
 export function initChatActions() {
     const toggleBtn = document.querySelector('[data-chat-actions-toggle]');
     const menuContainer = document.querySelector('[data-chat-actions-menu]');

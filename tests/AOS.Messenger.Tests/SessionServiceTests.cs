@@ -215,4 +215,54 @@ public sealed class SessionServiceTests : IClassFixture<SqlTestDatabaseFixture>
         Assert.True(session.UserAgent.Length <= 100);
         Assert.Equal("Chrome on Windows", session.UserAgent);
     }
+
+    [Fact]
+    public void SessionCache_SetLastActiveAtUtc_OnCacheMiss_DoesNotFabricateActiveEntry_AndPreservesExistingExpiration()
+    {
+        var startTime = new DateTimeOffset(2026, 11, 23, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new TestTimeProvider(startTime);
+        using var cache = new SessionCache(timeProvider);
+
+        // 1. Cache miss on SetLastActiveAtUtc must NOT fabricate a +30-day active session entry
+        var missingSessionId = Guid.NewGuid();
+        cache.SetLastActiveAtUtc(missingSessionId, startTime);
+
+        Assert.False(cache.TryGet(missingSessionId, out _));
+        Assert.Null(cache.GetLastActiveAtUtc(missingSessionId));
+
+        // 2. Existing entry with a short AbsoluteExpiresAtUtc (+2 min) preserves its exact expiration
+        var activeSessionId = Guid.NewGuid();
+        var originalExpiresAt = startTime.AddMinutes(2);
+        cache.Set(activeSessionId, new CachedSessionInfo(IsRevoked: false, AbsoluteExpiresAtUtc: originalExpiresAt));
+        Assert.Equal(startTime, cache.GetLastActiveAtUtc(activeSessionId));
+
+        timeProvider.Advance(TimeSpan.FromMinutes(1));
+        var updatedLastActive = timeProvider.GetUtcNow();
+        cache.SetLastActiveAtUtc(activeSessionId, updatedLastActive);
+
+        Assert.True(cache.TryGet(activeSessionId, out var cachedInfo));
+        Assert.False(cachedInfo.IsRevoked);
+        Assert.Equal(originalExpiresAt, cachedInfo.AbsoluteExpiresAtUtc);
+        Assert.Equal(updatedLastActive, cache.GetLastActiveAtUtc(activeSessionId));
+    }
+
+    [Fact]
+    public void SessionCache_IsIsolatedPerServiceProvider_WithNoStaticSingleton()
+    {
+        var provider1 = _fixture.CreateServiceProvider();
+        var provider2 = _fixture.CreateServiceProvider();
+
+        var cache1 = provider1.GetService(typeof(ISessionCache)) as ISessionCache;
+        var cache2 = provider2.GetService(typeof(ISessionCache)) as ISessionCache;
+
+        Assert.NotNull(cache1);
+        Assert.NotNull(cache2);
+        Assert.False(ReferenceEquals(cache1, cache2));
+
+        var sessionId = Guid.NewGuid();
+        cache1!.Set(sessionId, new CachedSessionInfo(IsRevoked: false, AbsoluteExpiresAtUtc: DateTimeOffset.UtcNow.AddMinutes(10)));
+
+        Assert.True(cache1.TryGet(sessionId, out _));
+        Assert.False(cache2!.TryGet(sessionId, out _));
+    }
 }

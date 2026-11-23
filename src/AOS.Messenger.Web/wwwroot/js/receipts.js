@@ -10,9 +10,19 @@
  * - Safe DOM tree construction exclusively - zero innerHTML/outerHTML/insertAdjacentHTML.
  */
 
+import {
+    markDelivered as apiMarkDelivered,
+    markRead as apiMarkRead
+} from './api-client.js';
+import {
+    setSidebarUnreadCount,
+    broadcastConversationRead
+} from './conversation-list.js';
+
 const lastSentDeliveredMap = new Map();
 const lastSentReadMap = new Map();
 let readDebounceTimer = null;
+let pendingReadResolve = null;
 
 const STATUS_RANKS = {
     'sent': 1,
@@ -20,16 +30,6 @@ const STATUS_RANKS = {
     'delivered': 2,
     'read': 3
 };
-
-/**
- * Gets anti-forgery request verification token from document.
- * @returns {string}
- */
-function getVerificationToken() {
-    if (typeof document === 'undefined') return '';
-    const input = document.querySelector('input[name="__RequestVerificationToken"]');
-    return input ? input.value : '';
-}
 
 /**
  * Safely parses a message ID into a BigInt.
@@ -48,37 +48,39 @@ function toBigIntSafe(val) {
     }
 }
 
+export function cancelPendingRead() {
+    if (readDebounceTimer) {
+        clearTimeout(readDebounceTimer);
+        readDebounceTimer = null;
+    }
+    if (pendingReadResolve) {
+        const resolve = pendingReadResolve;
+        pendingReadResolve = null;
+        resolve(null);
+    }
+}
+
+export function resetReceiptsState() {
+    cancelPendingRead();
+    lastSentDeliveredMap.clear();
+    lastSentReadMap.clear();
+}
+
 /**
- * Sends HTTP POST receipt request to server.
- * @param {string} endpoint
+ * Sends HTTP POST receipt request to server via api-client.
+ * @param {'delivered'|'read'} type
+ * @param {string} conversationId
  * @param {bigint} upToMessageIdVal
- * @returns {Promise<Response|null>}
+ * @returns {Promise<object|null>}
  */
-async function postReceipt(endpoint, upToMessageIdVal) {
+async function postReceipt(type, conversationId, upToMessageIdVal) {
     try {
-        const token = getVerificationToken();
-        const headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        };
-        if (token) {
-            headers['RequestVerificationToken'] = token;
-        }
-
-        const response = await fetch(endpoint, {
-            method: 'POST',
-            headers: headers,
-            body: JSON.stringify({ upToMessageId: Number(upToMessageIdVal) })
-        });
-
-        if (!response.ok) {
-            console.warn(`[Receipts] POST ${endpoint} failed with status ${response.status}`);
-            return null;
-        }
-
-        return response;
+        const result = type === 'delivered'
+            ? await apiMarkDelivered(conversationId, upToMessageIdVal)
+            : await apiMarkRead(conversationId, upToMessageIdVal);
+        return result || { ok: true };
     } catch (err) {
-        console.error(`[Receipts] Error posting to ${endpoint}:`, err);
+        console.warn(`[Receipts] POST ${type} failed:`, err?.status || err);
         return null;
     }
 }
@@ -89,7 +91,7 @@ async function postReceipt(endpoint, upToMessageIdVal) {
  *
  * @param {string} conversationId
  * @param {string|number|bigint} upToMessageId
- * @returns {Promise<Response|null>}
+ * @returns {Promise<object|null>}
  */
 export async function markDelivered(conversationId, upToMessageId) {
     if (!conversationId) return null;
@@ -103,8 +105,7 @@ export async function markDelivered(conversationId, upToMessageId) {
     }
 
     lastSentDeliveredMap.set(normalizedConvId, upToIdVal);
-    const endpoint = `/api/conversations/${conversationId}/delivered`;
-    return await postReceipt(endpoint, upToIdVal);
+    return await postReceipt('delivered', conversationId, upToIdVal);
 }
 
 /**
@@ -113,7 +114,7 @@ export async function markDelivered(conversationId, upToMessageId) {
  *
  * @param {string} conversationId
  * @param {string|number|bigint} upToMessageId
- * @returns {Promise<Response|null>}
+ * @returns {Promise<object|null>}
  */
 export function markRead(conversationId, upToMessageId) {
     if (!conversationId) return Promise.resolve(null);
@@ -130,14 +131,14 @@ export function markRead(conversationId, upToMessageId) {
         document.visibilityState === 'visible' &&
         (typeof document.hasFocus === 'function' ? document.hasFocus() : true);
 
-    if (readDebounceTimer) {
-        clearTimeout(readDebounceTimer);
-        readDebounceTimer = null;
-    }
+    cancelPendingRead();
 
     return new Promise((resolve) => {
+        pendingReadResolve = resolve;
         readDebounceTimer = setTimeout(async () => {
             readDebounceTimer = null;
+            pendingReadResolve = null;
+
             if (typeof document !== 'undefined') {
                 const stillVisibleAndFocused = document.visibilityState === 'visible' &&
                     (typeof document.hasFocus === 'function' ? document.hasFocus() : true);
@@ -148,17 +149,10 @@ export function markRead(conversationId, upToMessageId) {
             }
 
             lastSentReadMap.set(normalizedConvId, upToIdVal);
-            const endpoint = `/api/conversations/${conversationId}/read`;
-            const resp = await postReceipt(endpoint, upToIdVal);
+            const resp = await postReceipt('read', conversationId, upToIdVal);
             if (resp) {
-                if (typeof window !== 'undefined' && window.ChatRealtime) {
-                    if (typeof window.ChatRealtime.setSidebarUnreadCount === 'function') {
-                        window.ChatRealtime.setSidebarUnreadCount(conversationId, 0);
-                    }
-                    if (typeof window.ChatRealtime.broadcastConversationRead === 'function') {
-                        window.ChatRealtime.broadcastConversationRead(conversationId);
-                    }
-                }
+                setSidebarUnreadCount(conversationId, 0);
+                broadcastConversationRead(conversationId);
             } else if (lastSentReadMap.get(normalizedConvId) === upToIdVal) {
                 // Allow retry on subsequent focus/scroll if the HTTP request failed
                 lastSentReadMap.set(normalizedConvId, lastSent);
@@ -271,34 +265,52 @@ export function checkAndMarkIncoming(container, conversationId, currentUserId) {
  * @param {string|null} currentUserId
  * @returns {object} Receipts controller
  */
-export function initReceipts(connection, conversationId, currentUserId) {
-    const normalizedConvId = String(conversationId || '').toLowerCase();
-    const normalizedUserId = currentUserId ? String(currentUserId).toLowerCase() : null;
+export function initReceipts(connection, convIdOrGetter, userIdOrGetter) {
+    const resolveConvId = typeof convIdOrGetter === 'function' ? convIdOrGetter : () => convIdOrGetter;
+    const resolveUserId = typeof userIdOrGetter === 'function' ? userIdOrGetter : () => userIdOrGetter;
+
+    const handleReceiptUpdated = (receipt) => {
+        if (!receipt) return;
+        const currentConvId = resolveConvId();
+        if (!currentConvId) return;
+
+        const convId = receipt.conversationId || receipt.ConversationId;
+        if (!convId || String(convId).toLowerCase() !== String(currentConvId).toLowerCase()) return;
+
+        const currentUserId = resolveUserId();
+        const normalizedUserId = currentUserId ? String(currentUserId).toLowerCase() : null;
+        const actorUserId = receipt.userId || receipt.UserId;
+        // Only update our outgoing checkmarks if the peer updated receipts
+        if (normalizedUserId && String(actorUserId).toLowerCase() === normalizedUserId) {
+            return;
+        }
+
+        const upToId = receipt.upToMessageId !== undefined ? receipt.upToMessageId : receipt.UpToMessageId;
+        const rType = receipt.receiptType || receipt.ReceiptType || 'delivered';
+        const container = document.getElementById('messages-container') || document;
+        updateMessageCheckmarks(container, upToId, rType);
+    };
 
     if (connection && typeof connection.on === 'function') {
-        connection.on('ReceiveReceiptUpdated', (receipt) => {
-            if (!receipt) return;
-            const convId = receipt.conversationId || receipt.ConversationId;
-            if (String(convId).toLowerCase() !== normalizedConvId) return;
-
-            const actorUserId = receipt.userId || receipt.UserId;
-            // Only update our outgoing checkmarks if the peer updated receipts
-            if (normalizedUserId && String(actorUserId).toLowerCase() === normalizedUserId) {
-                return;
-            }
-
-            const upToId = receipt.upToMessageId !== undefined ? receipt.upToMessageId : receipt.UpToMessageId;
-            const rType = receipt.receiptType || receipt.ReceiptType || 'delivered';
-            const container = document.getElementById('messages-container') || document;
-            updateMessageCheckmarks(container, upToId, rType);
-        });
+        connection.on('ReceiveReceiptUpdated', handleReceiptUpdated);
     }
 
     const controller = {
-        markDelivered: (upToId) => markDelivered(conversationId, upToId),
-        markRead: (upToId) => markRead(conversationId, upToId),
+        markDelivered: (upToId) => markDelivered(resolveConvId(), upToId),
+        markRead: (upToId) => markRead(resolveConvId(), upToId),
         updateMessageCheckmarks: (container, upToId, rType) => updateMessageCheckmarks(container, upToId, rType),
-        checkAndMarkIncoming: (container) => checkAndMarkIncoming(container || document.getElementById('messages-container') || document, conversationId, currentUserId)
+        checkAndMarkIncoming: (container) => checkAndMarkIncoming(
+            container || document.getElementById('messages-container') || document,
+            resolveConvId(),
+            resolveUserId()
+        ),
+        resetForSwitch: cancelPendingRead,
+        destroy: () => {
+            cancelPendingRead();
+            if (connection && typeof connection.off === 'function') {
+                connection.off('ReceiveReceiptUpdated', handleReceiptUpdated);
+            }
+        }
     };
 
     return controller;
@@ -308,6 +320,8 @@ const receiptsApi = {
     initReceipts,
     markDelivered,
     markRead,
+    cancelPendingRead,
+    resetReceiptsState,
     updateMessageCheckmarks,
     checkAndMarkIncoming
 };

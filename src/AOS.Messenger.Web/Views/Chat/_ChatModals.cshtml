@@ -1,0 +1,41 @@
+<!-- Floating Emoji Reaction Picker Popover (clamped inside viewport) -->
+<div id="reaction-picker-popover" role="menu" aria-label="Add reaction" class="hidden fixed z-50 flex items-center gap-1 bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-full shadow-lg px-2 py-1 select-none max-w-[calc(100vw-16px)]">
+    <button type="button" data-emoji-btn="👍" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Thumbs Up">👍</button>
+    <button type="button" data-emoji-btn="❤️" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Heart">❤️</button>
+    <button type="button" data-emoji-btn="😂" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Joy">😂</button>
+    <button type="button" data-emoji-btn="😮" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Open Mouth">😮</button>
+    <button type="button" data-emoji-btn="😢" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Cry">😢</button>
+    <button type="button" data-emoji-btn="🙏" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Pray">🙏</button>
+    <button type="button" data-emoji-btn="🔥" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Fire">🔥</button>
+    <button type="button" data-emoji-btn="🎉" class="emoji-picker-btn w-7 h-7 flex items-center justify-center text-sm rounded-full hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] cursor-pointer" title="Party">🎉</button>
+</div>
+
+<!-- Edit Message Accessible Modal -->
+<div id="edit-message-modal" role="dialog" aria-modal="true" aria-labelledby="edit-message-modal-title" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-md p-4 sm:p-5 flex flex-col gap-3">
+        <div class="flex items-center justify-between">
+            <h3 id="edit-message-modal-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Edit message</h3>
+            <span class="text-xs text-[#6E6560] dark:text-[#C9C0B9]">Max 4000 characters</span>
+        </div>
+        <p id="edit-message-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium"></p>
+        <textarea id="edit-message-input" rows="4" maxlength="4000" aria-label="Edit message content" class="w-full bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] rounded-xl p-3 text-xs text-[#2B2725] dark:text-[#F0E9E2] focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] resize-none" placeholder="Enter updated text..."></textarea>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" id="cancel-edit-btn" class="px-3.5 py-1.5 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
+            <button type="button" id="save-edit-btn" class="px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-90 active:scale-95 transition-all shadow-2xs cursor-pointer">Save Changes</button>
+        </div>
+    </div>
+</div>
+
+<!-- Delete Message Accessible Confirmation Modal -->
+<div id="delete-message-modal" role="dialog" aria-modal="true" aria-labelledby="delete-message-modal-title" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-sm p-4 sm:p-5 flex flex-col gap-3">
+        <h3 id="delete-message-modal-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Delete message?</h3>
+        <p class="text-xs text-[#6E6560] dark:text-[#C9C0B9]">Choose whether to hide this message for yourself or delete it for everyone in the conversation.</p>
+        <p id="delete-message-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium"></p>
+        <div class="flex flex-col gap-2 pt-2">
+            <button type="button" id="delete-for-everyone-btn" class="w-full px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold transition-colors cursor-pointer">Delete for everyone</button>
+            <button type="button" id="delete-for-me-btn" class="w-full px-4 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Delete for me</button>
+            <button type="button" id="cancel-delete-btn" class="w-full px-4 py-1.5 rounded-xl text-xs font-medium text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors cursor-pointer">Cancel</button>
+        </div>
+    </div>
+</div>

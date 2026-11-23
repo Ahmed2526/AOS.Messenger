@@ -13,5 +13,9 @@ public interface ISessionCache
 
     void Invalidate(Guid sessionId);
 
+    DateTimeOffset? GetLastActiveAtUtc(Guid sessionId);
+
+    void SetLastActiveAtUtc(Guid sessionId, DateTimeOffset lastActiveAtUtc);
+
     void Clear();
 }

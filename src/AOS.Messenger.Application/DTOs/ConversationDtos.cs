@@ -33,7 +33,16 @@ public sealed record ConversationDetailDto(
     bool IsOnline = false,
     DateTimeOffset? LastSeenAtUtc = null,
     MessageId? PeerLastDeliveredMessageId = null,
-    MessageId? PeerLastReadMessageId = null);
+    MessageId? PeerLastReadMessageId = null,
+    bool IsPeerDeleted = false,
+    bool CanSend = true);
+
+public sealed record ConversationBundleDto(
+    UserId ViewerUserId,
+    ConversationDetailDto Conversation,
+    IReadOnlyList<MessageDto> Messages,
+    string? NextCursor,
+    bool HasMore);
 
 public sealed record CreateConversationRequestDto(
     UserId TargetUserId);

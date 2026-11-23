@@ -47,6 +47,7 @@ public sealed class ChatController : Controller
     }
 
     // Screen 2: A♡S Messenger - 1-to-1 Active Chat (Light Theme)
+    [HttpGet("chat/{id:guid}")]
     [HttpGet("Chat/Conversation/{id:guid}")]
     [HttpGet("Conversation/{id:guid}")]
     public async Task<IActionResult> Conversation(Guid id, CancellationToken ct = default)

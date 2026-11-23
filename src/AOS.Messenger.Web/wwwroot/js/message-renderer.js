@@ -14,6 +14,9 @@
  */
 
 import { renderReactionPills } from './reactions.js';
+import { formatLastSeen } from './presence.js';
+import { closeChatActionsMenu } from './chat-actions.js';
+import { updateSidebarLastMessage as updateSidebarLastMessageInList } from './conversation-list.js';
 
 /**
  * Sanitizes user-supplied text to prevent Cross-Site Scripting (XSS).
@@ -123,20 +126,180 @@ export function scrollToBottom(smooth = true) {
  * @param {string} previewText
  */
 export function updateSidebarLastMessage(convId, previewText, messageId = null, onlyIfLatest = false, forceClearId = false, shouldReorder = false) {
-    if (!convId || typeof document === 'undefined') return;
-    if (typeof window !== 'undefined' && window.ChatRealtime && typeof window.ChatRealtime.updateSidebarLastMessage === 'function') {
-        window.ChatRealtime.updateSidebarLastMessage(convId, previewText, messageId, onlyIfLatest, forceClearId, shouldReorder);
-        return;
-    }
-    const normalizedId = typeof convId === 'object' && convId.value ? convId.value : String(convId);
-    const item = document.querySelector(`.conversation-item[data-conversation-id="${normalizedId}"]`) ||
-                 document.querySelector(`.conversation-item[href*="${normalizedId}"]`);
-    if (item) {
-        const previewEl = item.querySelector('.conversation-last-message') ||
-                          item.querySelector('.text-\\[11px\\].truncate');
+    if (!convId || typeof document === 'undefined') return false;
+    return updateSidebarLastMessageInList(convId, previewText, messageId, onlyIfLatest, forceClearId, shouldReorder);
+}
+
+/**
+ * Checks whether msgId is currently the latest rendered row inside containerEl.
+ * @param {HTMLElement|null} containerEl
+ * @param {string|number} msgId
+ * @returns {boolean}
+ */
+export function isLatestRenderedMessage(containerEl, msgId) {
+    if (!containerEl || !msgId || typeof containerEl.querySelectorAll !== 'function') return false;
+    const rows = containerEl.querySelectorAll('.message-bubble-row');
+    if (!rows || rows.length === 0) return false;
+    const lastRow = rows[rows.length - 1];
+    return String(lastRow.getAttribute('data-message-id')) === String(msgId);
+}
+
+/**
+ * Truncates a reply quote preview safely by Unicode code points.
+ * @param {string} text
+ * @param {number} [maxCodePoints]
+ * @returns {string}
+ */
+export function truncateReplyPreview(text, maxCodePoints = 100) {
+    const chars = Array.from(String(text || ''));
+    return chars.length > maxCodePoints ? `${chars.slice(0, maxCodePoints).join('')}...` : chars.join('');
+}
+
+/**
+ * Updates child reply quote banners referencing an edited parent message.
+ * @param {string|number} parentMessageId
+ * @param {string} newContent
+ */
+export function updateReplyParentBanners(parentMessageId, newContent) {
+    if (!parentMessageId || typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const preview = truncateReplyPreview(newContent);
+    const quotes = document.querySelectorAll(`[data-reply-parent-id="${parentMessageId}"]`);
+    quotes.forEach((quote) => {
+        const previewEl = quote.querySelector('.reply-preview-text') ||
+                          (quote.children && quote.children.length > 1 ? quote.children[1] : null);
         if (previewEl) {
-            previewEl.textContent = previewText || 'No messages yet';
+            previewEl.textContent = preview;
         }
+    });
+}
+
+/**
+ * Replaces child reply quote banner text with a tombstoned placeholder when parent is deleted.
+ * @param {string|number} parentMessageId
+ */
+export function scrubReplyParentBanners(parentMessageId) {
+    if (!parentMessageId || typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+    const quotes = document.querySelectorAll(`[data-reply-parent-id="${parentMessageId}"]`);
+    quotes.forEach((quote) => {
+        const previewEl = quote.querySelector('.reply-preview-text') ||
+                          (quote.children && quote.children.length > 1 ? quote.children[1] : null);
+        if (previewEl) {
+            while (previewEl.firstChild) {
+                previewEl.removeChild(previewEl.firstChild);
+            }
+            const deletedSpan = document.createElement('span');
+            deletedSpan.className = 'italic';
+            deletedSpan.textContent = 'This message was deleted';
+            previewEl.appendChild(deletedSpan);
+        }
+    });
+}
+
+/**
+ * Applies an authoritative edit update to a rendered message row and its child reply banners.
+ * @param {string|number} msgId
+ * @param {string} newContent
+ * @param {string|null|undefined} editedAtUtc
+ */
+export function applyMessageEditedToRow(msgId, newContent, editedAtUtc) {
+    if (!msgId || typeof document === 'undefined') return;
+    const row = typeof document.getElementById === 'function' ? document.getElementById(`msg-${msgId}`) : null;
+    if (row) {
+        const contentEl = row.querySelector('.message-text-content');
+        if (contentEl && row.getAttribute('data-deleted') !== 'true') {
+            contentEl.textContent = newContent || '';
+        }
+        const editedLabel = row.querySelector('.edited-label');
+        if (editedLabel && editedAtUtc) {
+            editedLabel.classList.remove('hidden');
+        }
+        const replyBtn = row.querySelector('.reply-action-btn');
+        if (replyBtn) {
+            replyBtn.setAttribute('data-preview', newContent || '');
+        }
+    }
+    updateReplyParentBanners(msgId, newContent || '');
+}
+
+/**
+ * Transforms a rendered message row into a tombstoned state and scrubs child reply banners.
+ * @param {HTMLElement|null} row
+ * @param {string|number} msgId
+ */
+export function applyMessageDeletedForEveryone(row, msgId) {
+    if (row && typeof document !== 'undefined') {
+        row.setAttribute('data-deleted', 'true');
+        const isOutgoing = row.getAttribute('data-is-outgoing') === 'true' || row.classList.contains('justify-end');
+        const contentEl = row.querySelector('.message-text-content');
+        if (contentEl) {
+            while (contentEl.firstChild) {
+                contentEl.removeChild(contentEl.firstChild);
+            }
+            contentEl.className = isOutgoing
+                ? 'message-text-content italic text-xs text-white/80 flex items-center gap-1.5 py-0.5'
+                : 'message-text-content italic text-xs text-[#6E6560] dark:text-[#C9C0B9] flex items-center gap-1.5 py-0.5';
+
+            const blockIcon = document.createElement('span');
+            blockIcon.className = 'material-symbols-outlined text-[15px]';
+            blockIcon.textContent = 'block';
+            contentEl.appendChild(blockIcon);
+
+            const delText = document.createElement('span');
+            delText.textContent = 'This message was deleted';
+            contentEl.appendChild(delText);
+        }
+
+        for (const sel of ['.message-actions-bar', '[data-action="edit"]', '[data-action="delete"]', '[data-action="react"]', '.reply-action-btn', 'span[data-receipt-status]', '.reaction-pills-container', '.edited-label']) {
+            const node = row.querySelector(sel);
+            if (node && typeof node.remove === 'function') {
+                node.remove();
+            }
+        }
+    }
+
+    if (msgId) {
+        scrubReplyParentBanners(msgId);
+    }
+}
+
+/**
+ * Removes a caller-deleted message row and synchronizes sidebar preview safely.
+ * @param {string|number} msgId
+ * @param {string} convId
+ * @param {string|number|null} newLastMessageId
+ * @param {string|null} newLastMessagePreview
+ * @param {boolean} isActiveConv
+ */
+export function applyMessageDeletedForMe(msgId, convId, newLastMessageId, newLastMessagePreview, isActiveConv) {
+    if (typeof document === 'undefined') return;
+    if (isActiveConv && msgId) {
+        const row = typeof document.getElementById === 'function' ? document.getElementById(`msg-${msgId}`) : null;
+        if (row && typeof row.remove === 'function') {
+            row.remove();
+        }
+
+        if (typeof document.querySelectorAll === 'function') {
+            document.querySelectorAll(`[data-reply-parent-id="${msgId}"]`).forEach((q) => {
+                if (typeof q.remove === 'function') q.remove();
+            });
+        }
+
+        const containerEl = typeof document.getElementById === 'function' ? document.getElementById('messages-container') : null;
+        const emptyPlaceholderEl = typeof document.getElementById === 'function' ? document.getElementById('no-messages-placeholder') : null;
+        if (containerEl && emptyPlaceholderEl && containerEl.querySelectorAll('.message-bubble-row').length === 0) {
+            emptyPlaceholderEl.classList.remove('hidden');
+            emptyPlaceholderEl.classList.add('flex');
+        }
+    }
+
+    if (convId) {
+        const hasNew = newLastMessageId !== null && newLastMessageId !== undefined && newLastMessageId !== '';
+        updateSidebarLastMessage(
+            convId,
+            hasNew ? (newLastMessagePreview || '') : 'No messages yet',
+            hasNew ? newLastMessageId : null,
+            false,
+            !hasNew);
     }
 }
 
@@ -230,7 +393,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     }
 
     if (isOutgoing) {
-        row.className = 'flex flex-wrap justify-end items-center message-bubble-row group relative';
+        row.className = 'flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative';
         row.setAttribute('data-is-outgoing', 'true');
     } else {
         row.className = 'flex flex-wrap justify-start items-center gap-2.5 message-bubble-row group relative';
@@ -429,7 +592,11 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         delBtn.appendChild(delIcon);
         actionsBar.appendChild(delBtn);
 
-        row.appendChild(actionsBar);
+        if (isOutgoing) {
+            row.insertBefore(actionsBar, bubble);
+        } else {
+            row.appendChild(actionsBar);
+        }
     }
 
     return row;
@@ -504,7 +671,8 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
 
     if (isOutgoing) {
         return `
-        <div id="msg-${id}" class="flex justify-end message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="true"${senderIdAttr} data-created-at="${message.createdAtUtc}">
+        <div id="msg-${id}" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="true"${senderIdAttr} data-created-at="${message.createdAtUtc}">
+            ${replyBtnHtml}
             <div class="max-w-[75%] rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative">
                 ${replyBannerHtml}
                 ${contentHtml}
@@ -514,7 +682,6 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
                     ${receiptHtml}
                 </div>
             </div>
-            ${replyBtnHtml}
         </div>`;
     } else {
         return `
@@ -533,5 +700,601 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
             </div>
             ${replyBtnHtml}
         </div>`;
+    }
+}
+
+function normalizeIdValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'object' && value.value !== undefined) {
+        return String(value.value);
+    }
+    return String(value);
+}
+
+function parseBigIntSafe(val) {
+    if (val === null || val === undefined || val === '') return 0n;
+    try {
+        return BigInt(String(val));
+    } catch {
+        return 0n;
+    }
+}
+
+/**
+ * Deterministic total ordering key comparator: (CreatedAtUtc, Id).
+ * @param {object} a
+ * @param {object} b
+ * @returns {number}
+ */
+export function compareMessages(a, b) {
+    const rawTimeA = a?.createdAtUtc ?? a?.CreatedAtUtc ?? '';
+    const rawTimeB = b?.createdAtUtc ?? b?.CreatedAtUtc ?? '';
+    const timeA = rawTimeA ? Date.parse(rawTimeA) : NaN;
+    const timeB = rawTimeB ? Date.parse(rawTimeB) : NaN;
+
+    if (!Number.isNaN(timeA) && !Number.isNaN(timeB) && timeA !== timeB) {
+        return timeA - timeB;
+    }
+
+    const idA = parseBigIntSafe(getMessageId(a));
+    const idB = parseBigIntSafe(getMessageId(b));
+    if (idA < idB) return -1;
+    if (idA > idB) return 1;
+    return 0;
+}
+
+function clearElementChildren(el) {
+    if (!el) return;
+    while (el.firstChild) {
+        el.removeChild(el.firstChild);
+    }
+}
+
+function syncMessagesContainerAttributes(containerEl, currentUserId, meta) {
+    if (!containerEl) return;
+
+    if (currentUserId !== undefined && currentUserId !== null) {
+        containerEl.setAttribute('data-current-user-id', String(currentUserId));
+    }
+
+    if (!meta) return;
+
+    const convId = normalizeIdValue(meta.id ?? meta.Id);
+    const peerUserId = normalizeIdValue(meta.otherParticipantId ?? meta.OtherParticipantId);
+    const isOnline = !!(meta.isOnline ?? meta.IsOnline);
+    const lastSeen = meta.lastSeenAtUtc ?? meta.LastSeenAtUtc ?? '';
+    const lastDelivered = normalizeIdValue(meta.peerLastDeliveredMessageId ?? meta.PeerLastDeliveredMessageId);
+    const lastRead = normalizeIdValue(meta.peerLastReadMessageId ?? meta.PeerLastReadMessageId);
+
+    if (convId) containerEl.setAttribute('data-conversation-id', convId);
+    containerEl.setAttribute('data-peer-user-id', peerUserId);
+    containerEl.setAttribute('data-peer-is-online', isOnline ? 'true' : 'false');
+    containerEl.setAttribute('data-peer-last-seen', lastSeen || '');
+    containerEl.setAttribute('data-peer-last-delivered-id', lastDelivered);
+    containerEl.setAttribute('data-peer-last-read-id', lastRead);
+}
+
+/**
+ * Inserts a message into containerEl in deterministic (CreatedAtUtc, Id) order with ID deduplication.
+ * @param {HTMLElement|null} containerEl
+ * @param {object} message
+ * @param {string|null} currentUserId
+ * @param {object|null} [peerWatermarks]
+ * @returns {HTMLElement|null}
+ */
+export function insertMessageOrdered(containerEl, message, currentUserId, peerWatermarks = null) {
+    if (!containerEl || !message || typeof document === 'undefined') return null;
+
+    const msgId = getMessageId(message);
+    if (!msgId) return null;
+
+    if ((typeof containerEl.querySelector === 'function' && containerEl.querySelector(`[data-message-id="${msgId}"]`)) ||
+        document.getElementById(`msg-${msgId}`)) {
+        return null;
+    }
+
+    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks);
+    if (!el) return null;
+
+    const rows = typeof containerEl.querySelectorAll === 'function'
+        ? containerEl.querySelectorAll('.message-bubble-row')
+        : [];
+
+    let insertBeforeNode = null;
+    for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i];
+        const rowModel = {
+            id: row.getAttribute('data-message-id'),
+            createdAtUtc: row.getAttribute('data-created-at')
+        };
+        if (compareMessages(message, rowModel) < 0) {
+            insertBeforeNode = row;
+        } else {
+            break;
+        }
+    }
+
+    if (insertBeforeNode && typeof containerEl.insertBefore === 'function') {
+        containerEl.insertBefore(el, insertBeforeNode);
+    } else if (typeof containerEl.appendChild === 'function') {
+        containerEl.appendChild(el);
+    }
+
+    const emptyPlaceholder = document.getElementById('no-messages-placeholder');
+    if (emptyPlaceholder) {
+        emptyPlaceholder.classList.add('hidden');
+    }
+
+    return el;
+}
+
+/**
+ * Renders a full message page sorted ascending by (CreatedAtUtc, Id) using a DocumentFragment.
+ * @param {HTMLElement|null} containerEl
+ * @param {Array<object>} messages
+ * @param {string|null} currentUserId
+ * @param {object|null} [peerWatermarks]
+ * @param {{ scrollToEnd?: boolean }} [options]
+ */
+export function renderMessages(containerEl, messages, currentUserId, peerWatermarks = null, { scrollToEnd = true } = {}) {
+    if (!containerEl || typeof document === 'undefined') return;
+
+    clearElementChildren(containerEl);
+    syncMessagesContainerAttributes(containerEl, currentUserId, peerWatermarks);
+
+    const skeletonEl = document.getElementById('chat-loading-skeleton');
+    if (skeletonEl) skeletonEl.classList.add('hidden');
+
+    hideSafeError();
+
+    const list = Array.isArray(messages) ? [...messages] : [];
+    const seenIds = new Set();
+    const deduped = [];
+    for (const msg of list) {
+        const msgId = getMessageId(msg);
+        if (!msgId || seenIds.has(msgId)) continue;
+        seenIds.add(msgId);
+        deduped.push(msg);
+    }
+
+    deduped.sort(compareMessages);
+
+    const emptyPlaceholder = document.getElementById('no-messages-placeholder');
+    if (deduped.length === 0) {
+        if (emptyPlaceholder) {
+            emptyPlaceholder.classList.remove('hidden');
+            emptyPlaceholder.classList.add('flex');
+        }
+        return;
+    }
+
+    if (emptyPlaceholder) {
+        emptyPlaceholder.classList.add('hidden');
+    }
+
+    const frag = typeof document.createDocumentFragment === 'function'
+        ? document.createDocumentFragment()
+        : containerEl;
+
+    for (const msg of deduped) {
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
+        if (el) {
+            frag.appendChild(el);
+        }
+    }
+
+    if (frag !== containerEl && typeof containerEl.appendChild === 'function') {
+        containerEl.appendChild(frag);
+    }
+
+    if (scrollToEnd) {
+        const streamEl = document.getElementById('message-stream');
+        if (streamEl) {
+            streamEl.scrollTop = streamEl.scrollHeight;
+        }
+    }
+}
+
+/**
+ * Prepends older keyset-paginated messages while preserving the caller's scroll offset.
+ * @param {HTMLElement|null} containerEl
+ * @param {HTMLElement|null} streamEl
+ * @param {Array<object>} messages
+ * @param {string|null} currentUserId
+ * @param {object|null} [peerWatermarks]
+ * @returns {number}
+ */
+export function prependOlderMessages(containerEl, streamEl, messages, currentUserId, peerWatermarks = null) {
+    if (!containerEl || !Array.isArray(messages) || messages.length === 0 || typeof document === 'undefined') {
+        return 0;
+    }
+
+    const prevScrollHeight = streamEl ? streamEl.scrollHeight : 0;
+    const prevScrollTop = streamEl ? streamEl.scrollTop : 0;
+
+    const sorted = [...messages].sort(compareMessages);
+    const frag = typeof document.createDocumentFragment === 'function'
+        ? document.createDocumentFragment()
+        : null;
+
+    let added = 0;
+    for (const msg of sorted) {
+        const msgId = getMessageId(msg);
+        if (!msgId || isMessageRendered(msgId)) continue;
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
+        if (el && frag) {
+            frag.appendChild(el);
+            added++;
+        }
+    }
+
+    if (added > 0 && frag) {
+        if (containerEl.firstChild && typeof containerEl.insertBefore === 'function') {
+            containerEl.insertBefore(frag, containerEl.firstChild);
+        } else if (typeof containerEl.appendChild === 'function') {
+            containerEl.appendChild(frag);
+        }
+
+        if (streamEl) {
+            streamEl.scrollTop = prevScrollTop + (streamEl.scrollHeight - prevScrollHeight);
+        }
+    }
+
+    return added;
+}
+
+/**
+ * Clears peer identity, handle, initials, bio, and status badges from the active conversation header
+ * so stale peer metadata never remains visible while loading or displaying an error for another chat.
+ */
+export function clearConversationHeader() {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+
+    const headerEl = document.getElementById('active-conversation-header');
+    if (headerEl) {
+        if (typeof headerEl.setAttribute === 'function') {
+            headerEl.setAttribute('data-peer-user-id', '');
+        }
+        const initialsEl = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-initials]') : null;
+        if (initialsEl) initialsEl.textContent = '';
+
+        const nameEl = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-name]') : null;
+        if (nameEl) nameEl.textContent = '';
+
+        const handleEl = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-handle]') : null;
+        if (handleEl) handleEl.textContent = '';
+
+        const bioEl = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-bio]') : null;
+        if (bioEl) {
+            bioEl.textContent = '';
+            if (bioEl.classList) bioEl.classList.add('hidden');
+        }
+
+        const bioSep = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-bio-sep]') : null;
+        if (bioSep && bioSep.classList) bioSep.classList.add('hidden');
+
+        if (typeof headerEl.querySelector === 'function') {
+            for (const selector of ['[data-peer-pinned-badge]', '[data-peer-muted-badge]', '[data-peer-blocked-badge]']) {
+                const badge = headerEl.querySelector(selector);
+                if (badge && badge.classList) badge.classList.add('hidden');
+            }
+        }
+
+        const typingEl = document.getElementById('typing-indicator');
+        if (typingEl) {
+            typingEl.textContent = '';
+            if (typingEl.classList) typingEl.classList.add('hidden');
+        }
+    }
+
+    const emptyPromptEl = typeof document.querySelector === 'function'
+        ? document.querySelector('[data-empty-state-peer-prompt]')
+        : null;
+    if (emptyPromptEl) {
+        emptyPromptEl.textContent = 'Send a message below to start the conversation.';
+    }
+}
+
+/**
+ * Disables all 10 desktop & mobile header action forms, clears their hidden conversationId,
+ * and scrubs stale peer identity from the header before awaiting a switch.
+ */
+export function lockAndClearHeaderActions() {
+    closeChatActionsMenu();
+    clearConversationHeader();
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+
+    const forms = document.querySelectorAll('form[data-header-action-form]');
+    for (const form of forms) {
+        const convInput = form.querySelector('input[name="conversationId"]');
+        if (convInput) convInput.value = '';
+        const submitBtn = form.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = true;
+    }
+}
+
+function updateHeaderActionForms(convId, isPinned, isMuted, isArchived = false) {
+    if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return;
+
+    const forms = document.querySelectorAll('form[data-header-action-form]');
+    for (const form of forms) {
+        const actionType = form.getAttribute('data-header-action-form');
+        const convInput = form.querySelector('input[name="conversationId"]');
+        if (convInput) convInput.value = convId;
+
+        const submitBtn = form.querySelector('button[type="submit"]');
+        if (submitBtn) {
+            submitBtn.disabled = !convId;
+        }
+
+        if (actionType === 'pin') {
+            const pinInput = form.querySelector('input[name="isPinned"]');
+            if (pinInput) pinInput.value = isPinned ? 'false' : 'true';
+            const icon = form.querySelector('.material-symbols-outlined');
+            if (icon) icon.textContent = isPinned ? 'keep_off' : 'push_pin';
+            const label = isPinned ? 'Unpin conversation' : 'Pin conversation';
+            if (submitBtn && submitBtn.getAttribute('title')) {
+                submitBtn.setAttribute('title', label);
+            }
+            const spans = form.querySelectorAll('span');
+            if (spans.length > 1) {
+                spans[spans.length - 1].textContent = label;
+            }
+        } else if (actionType === 'mute') {
+            const muteInput = form.querySelector('input[name="isMuted"]');
+            if (muteInput) muteInput.value = isMuted ? 'false' : 'true';
+            const icon = form.querySelector('.material-symbols-outlined');
+            if (icon) icon.textContent = isMuted ? 'volume_up' : 'volume_off';
+            const label = isMuted ? 'Unmute conversation' : 'Mute conversation';
+            if (submitBtn && submitBtn.getAttribute('title')) {
+                submitBtn.setAttribute('title', label);
+            }
+            const spans = form.querySelectorAll('span');
+            if (spans.length > 1) {
+                spans[spans.length - 1].textContent = label;
+            }
+        } else if (actionType === 'archive') {
+            const archiveInput = form.querySelector('input[name="isArchived"]');
+            if (archiveInput) archiveInput.value = isArchived ? 'false' : 'true';
+            const icon = form.querySelector('.material-symbols-outlined');
+            if (icon) icon.textContent = isArchived ? 'unarchive' : 'archive';
+            const label = isArchived ? 'Unarchive conversation' : 'Archive conversation';
+            if (submitBtn && submitBtn.getAttribute('title')) {
+                submitBtn.setAttribute('title', label);
+            }
+            const spans = form.querySelectorAll('span');
+            if (spans.length > 1) {
+                spans[spans.length - 1].textContent = label;
+            }
+        }
+    }
+}
+
+/**
+ * Updates the active conversation header, presence state, badges, and all 10 desktop/mobile action forms.
+ * @param {object} meta
+ */
+export function renderConversationHeader(meta) {
+    if (!meta || typeof document === 'undefined') return;
+
+    const convId = normalizeIdValue(meta.id ?? meta.Id);
+    const peerId = normalizeIdValue(meta.otherParticipantId ?? meta.OtherParticipantId);
+    const peerName = meta.otherParticipantName ?? meta.OtherParticipantName ?? 'Unknown';
+    const peerHandle = meta.otherParticipantHandle ?? meta.OtherParticipantHandle ?? '';
+    const peerBio = meta.otherParticipantBio ?? meta.OtherParticipantBio ?? '';
+    const isBlocked = !!(meta.isBlocked ?? meta.IsBlocked);
+    const isPinned = !!(meta.isPinned ?? meta.IsPinned);
+    const isMuted = !!(meta.isMuted ?? meta.IsMuted);
+    const isArchived = !!(meta.isArchived ?? meta.IsArchived);
+    const isOnline = !!(meta.isOnline ?? meta.IsOnline);
+    const lastSeen = meta.lastSeenAtUtc ?? meta.LastSeenAtUtc ?? null;
+
+    const headerEl = document.getElementById('active-conversation-header');
+    if (headerEl) {
+        headerEl.setAttribute('data-peer-user-id', peerId);
+
+        const initialsEl = headerEl.querySelector('[data-peer-initials]');
+        if (initialsEl) initialsEl.textContent = getInitials(peerName, peerHandle);
+
+        const nameEl = headerEl.querySelector('[data-peer-name]');
+        if (nameEl) nameEl.textContent = peerName;
+
+        const handleEl = headerEl.querySelector('[data-peer-handle]');
+        if (handleEl) handleEl.textContent = peerHandle ? `@${peerHandle}` : '';
+
+        const pinnedBadge = headerEl.querySelector('[data-peer-pinned-badge]');
+        if (pinnedBadge) pinnedBadge.classList.toggle('hidden', !isPinned);
+
+        const mutedBadge = headerEl.querySelector('[data-peer-muted-badge]');
+        if (mutedBadge) mutedBadge.classList.toggle('hidden', !isMuted);
+
+        const blockedBadge = headerEl.querySelector('[data-peer-blocked-badge]');
+        if (blockedBadge) blockedBadge.classList.toggle('hidden', !isBlocked);
+
+        const bioSep = headerEl.querySelector('[data-peer-bio-sep]');
+        const bioEl = headerEl.querySelector('[data-peer-bio]');
+        const hasBio = !!(peerBio && String(peerBio).trim());
+        if (bioSep) bioSep.classList.toggle('hidden', !hasBio);
+        if (bioEl) {
+            bioEl.textContent = hasBio ? String(peerBio) : '';
+            bioEl.classList.toggle('hidden', !hasBio);
+        }
+
+        const dotEl = document.getElementById('header-presence-dot');
+        if (dotEl) {
+            dotEl.className = isOnline
+                ? 'absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-[#6F9473] border-2 border-[#FFFFFF] dark:border-[#3A3835]'
+                : 'absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full bg-stone-400 dark:bg-stone-500 border-2 border-[#FFFFFF] dark:border-[#3A3835]';
+        }
+
+        const presenceTextEl = document.getElementById('header-presence-text');
+        if (presenceTextEl) {
+            presenceTextEl.textContent = isOnline ? 'Online' : formatLastSeen(lastSeen);
+        }
+
+        const typingEl = document.getElementById('typing-indicator');
+        if (typingEl) {
+            typingEl.textContent = '';
+            typingEl.classList.add('hidden');
+        }
+    }
+
+    const emptyPromptEl = document.querySelector('[data-empty-state-peer-prompt]');
+    if (emptyPromptEl) {
+        emptyPromptEl.textContent = `Send a message below to start the conversation with ${peerName}.`;
+    }
+
+    updateHeaderActionForms(convId, isPinned, isMuted, isArchived);
+
+    const announcerEl = document.getElementById('chat-live-announcer');
+    if (announcerEl) {
+        announcerEl.textContent = `Switched to conversation with ${peerName}`;
+    }
+}
+
+/**
+ * Clears active message pane DOM elements without destroying shell structure.
+ */
+export function clearPane() {
+    if (typeof document === 'undefined') return;
+    const containerEl = document.getElementById('messages-container');
+    clearElementChildren(containerEl);
+    if (containerEl) {
+        containerEl.setAttribute('data-conversation-id', '');
+        containerEl.setAttribute('data-peer-user-id', '');
+        containerEl.setAttribute('data-peer-is-online', 'false');
+        containerEl.setAttribute('data-peer-last-seen', '');
+        containerEl.setAttribute('data-peer-last-delivered-id', '');
+        containerEl.setAttribute('data-peer-last-read-id', '');
+        containerEl.setAttribute('data-next-cursor', '');
+        containerEl.setAttribute('data-has-more', 'false');
+    }
+    const emptyPlaceholder = document.getElementById('no-messages-placeholder');
+    if (emptyPlaceholder) emptyPlaceholder.classList.add('hidden');
+    const loadingTop = document.getElementById('messages-loading-top');
+    if (loadingTop) loadingTop.classList.add('hidden');
+    const skeletonEl = document.getElementById('chat-loading-skeleton');
+    if (skeletonEl) skeletonEl.classList.add('hidden');
+    hideSafeError();
+}
+
+export function showEmptyState() {
+    if (typeof document === 'undefined') return;
+    const emptyEl = document.getElementById('chat-empty-state');
+    const activeEl = document.getElementById('chat-active-pane');
+    if (emptyEl) emptyEl.classList.remove('hidden');
+    if (activeEl) activeEl.classList.add('hidden');
+}
+
+export function showActivePane() {
+    if (typeof document === 'undefined') return;
+    const emptyEl = document.getElementById('chat-empty-state');
+    const activeEl = document.getElementById('chat-active-pane');
+    if (emptyEl) emptyEl.classList.add('hidden');
+    if (activeEl) activeEl.classList.remove('hidden');
+}
+
+export function showLoadingSkeleton() {
+    if (typeof document === 'undefined') return;
+    clearPane();
+    const skeletonEl = document.getElementById('chat-loading-skeleton');
+    if (skeletonEl) skeletonEl.classList.remove('hidden');
+}
+
+export function hideSafeError() {
+    if (typeof document === 'undefined') return;
+    const errEl = document.getElementById('chat-error-banner');
+    if (errEl) {
+        errEl.textContent = '';
+        errEl.classList.add('hidden');
+    }
+}
+
+export function showSafeError(message) {
+    if (typeof document === 'undefined') return;
+    clearPane();
+    const errEl = document.getElementById('chat-error-banner');
+    if (errEl) {
+        errEl.textContent = message || 'Could not load conversation. Try again.';
+        errEl.classList.remove('hidden');
+    }
+}
+
+/**
+ * Immediately purges all sensitive private data from the DOM before session-expiry redirect.
+ */
+export function wipeSensitiveDom() {
+    if (typeof document === 'undefined') return;
+
+    clearPane();
+    lockAndClearHeaderActions();
+
+    const headerEl = document.getElementById('active-conversation-header');
+    if (headerEl) {
+        headerEl.setAttribute('data-peer-user-id', '');
+        const initialsEl = headerEl.querySelector('[data-peer-initials]');
+        if (initialsEl) initialsEl.textContent = '';
+        const nameEl = headerEl.querySelector('[data-peer-name]');
+        if (nameEl) nameEl.textContent = '';
+        const handleEl = headerEl.querySelector('[data-peer-handle]');
+        if (handleEl) handleEl.textContent = '';
+        const bioEl = headerEl.querySelector('[data-peer-bio]');
+        if (bioEl) {
+            bioEl.textContent = '';
+            bioEl.classList.add('hidden');
+        }
+        const bioSep = headerEl.querySelector('[data-peer-bio-sep]');
+        if (bioSep) bioSep.classList.add('hidden');
+        for (const selector of ['[data-peer-pinned-badge]', '[data-peer-muted-badge]', '[data-peer-blocked-badge]']) {
+            const badge = headerEl.querySelector(selector);
+            if (badge) badge.classList.add('hidden');
+        }
+        const presenceText = document.getElementById('header-presence-text');
+        if (presenceText) presenceText.textContent = '';
+        const typingEl = document.getElementById('typing-indicator');
+        if (typingEl) {
+            typingEl.textContent = '';
+            typingEl.classList.add('hidden');
+        }
+    }
+
+    const inputEl = document.getElementById('message-content-input');
+    if (inputEl) {
+        inputEl.value = '';
+        inputEl.disabled = true;
+    }
+    const sendBtn = document.getElementById('send-message-btn');
+    if (sendBtn) sendBtn.disabled = true;
+
+    const replyBanner = document.getElementById('composer-reply-banner');
+    if (replyBanner) replyBanner.classList.add('hidden');
+    const replySender = document.getElementById('reply-banner-sender');
+    if (replySender) replySender.textContent = '';
+    const replyPreview = document.getElementById('reply-banner-preview');
+    if (replyPreview) replyPreview.textContent = '';
+
+    for (const id of ['chat-policy-notice', 'chat-action-error', 'edit-message-modal', 'delete-message-modal', 'reaction-picker-popover']) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.classList.add('hidden');
+            if (id === 'chat-policy-notice' || id === 'chat-action-error') {
+                el.textContent = '';
+            }
+        }
+    }
+
+    const editInput = document.getElementById('edit-message-input');
+    if (editInput) editInput.value = '';
+
+    const sidebarList = document.getElementById('conversationList');
+    if (sidebarList) {
+        clearElementChildren(sidebarList);
+    }
+
+    const announcerEl = document.getElementById('chat-live-announcer');
+    if (announcerEl) announcerEl.textContent = '';
+
+    if (typeof document.title === 'string') {
+        document.title = 'A♡S Messenger';
     }
 }

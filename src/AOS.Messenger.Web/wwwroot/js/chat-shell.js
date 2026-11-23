@@ -30,6 +30,8 @@ import { setupTypingEmitter, setupTypingReceiver } from './typing.js';
 import { initReceipts, resetReceiptsState } from './receipts.js';
 import { setupEmojiPicker } from './reactions.js';
 import { setupMessageActions } from './message-actions.js';
+import { createEmojiPicker } from './emoji-picker.js';
+import { createEmojiAutocomplete } from './emoji-autocomplete.js';
 
 const DEFAULT_SHELL_TITLE = 'A♡S Messenger - Desktop App';
 
@@ -56,6 +58,8 @@ export function initChatShell(overrides = {}) {
 
     const state = overrides.state || (overrides.isolatedState ? createChatState() : chatState);
     let signalrClient = null;
+    let composerEmojiPicker = null;
+    let emojiAutocomplete = null;
     let scrollReadDebounce = null;
     let lastVisibilitySyncAt = 0;
 
@@ -96,6 +100,8 @@ export function initChatShell(overrides = {}) {
         if (signalrClient && typeof signalrClient.stop === 'function') {
             signalrClient.stop();
         }
+        if (composerEmojiPicker) composerEmojiPicker.close();
+        if (emojiAutocomplete) emojiAutocomplete.close();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -110,6 +116,8 @@ export function initChatShell(overrides = {}) {
         if (signalrClient && typeof signalrClient.stop === 'function') {
             signalrClient.stop();
         }
+        if (composerEmojiPicker) composerEmojiPicker.close();
+        if (emojiAutocomplete) emojiAutocomplete.close();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -143,7 +151,13 @@ export function initChatShell(overrides = {}) {
     const presence = setupPresence(null, sidebarListEl, activeHeaderEl, { skipInitialFetch: true });
     const receipts = initReceipts(null, getActiveConversationId, getCurrentUserId);
     const emojiPicker = setupEmojiPicker(getActiveConversationId, getCurrentUserId, { getSwitchEpoch });
-    const messageActions = setupMessageActions(getActiveConversationId, getCurrentUserId, { getSwitchEpoch });
+    composerEmojiPicker = createEmojiPicker({ getUserId: getCurrentUserId });
+    emojiAutocomplete = createEmojiAutocomplete({ getUserId: getCurrentUserId });
+    const messageActions = setupMessageActions(getActiveConversationId, getCurrentUserId, {
+        getSwitchEpoch,
+        emojiPicker: composerEmojiPicker,
+        emojiAutocomplete
+    });
 
     let composer = null;
     signalrClient = createSignalRClient({
@@ -166,7 +180,12 @@ export function initChatShell(overrides = {}) {
     });
 
     const typingEmitter = setupTypingEmitter(signalrClient.connection, getActiveConversationId, inputEl);
-    composer = createComposer({ state, typingEmitter });
+    composer = createComposer({
+        state,
+        typingEmitter,
+        emojiPicker: composerEmojiPicker,
+        emojiAutocomplete
+    });
     composer.init();
 
     function markVisibleIncoming() {
@@ -186,6 +205,8 @@ export function initChatShell(overrides = {}) {
                 typingReceiver.resetForSwitch();
                 receipts.resetForSwitch();
                 emojiPicker.resetForSwitch();
+                composerEmojiPicker.resetForSwitch();
+                emojiAutocomplete.resetForSwitch();
                 messageActions.resetForSwitch();
                 presence.resetHeaderPresence();
                 composer.resetTransientState();
@@ -329,6 +350,8 @@ export function initChatShell(overrides = {}) {
         presence.destroy();
         receipts.destroy();
         emojiPicker.destroy();
+        composerEmojiPicker.destroy();
+        emojiAutocomplete.destroy();
         messageActions.destroy();
         signalrClient.destroy();
     }

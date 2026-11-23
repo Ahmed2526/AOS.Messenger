@@ -19,9 +19,14 @@
         </div>
         <p id="edit-message-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium"></p>
         <textarea id="edit-message-input" rows="4" maxlength="4000" aria-label="Edit message content" class="w-full bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] rounded-xl p-3 text-xs text-[#2B2725] dark:text-[#F0E9E2] focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] resize-none" placeholder="Enter updated text..."></textarea>
-        <div class="flex items-center justify-end gap-2 pt-1">
-            <button type="button" id="cancel-edit-btn" class="px-3.5 py-1.5 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
-            <button type="button" id="save-edit-btn" class="px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-90 active:scale-95 transition-all shadow-2xs cursor-pointer">Save Changes</button>
+        <div class="flex items-center justify-between gap-2 pt-1">
+            <button type="button" id="edit-message-emoji-btn" data-emoji-trigger="edit-modal" aria-label="Add emoji" aria-expanded="false" aria-haspopup="dialog" title="Add Emoji" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-[18px]">mood</span>
+            </button>
+            <div class="flex items-center gap-2">
+                <button type="button" id="cancel-edit-btn" class="px-3.5 py-1.5 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
+                <button type="button" id="save-edit-btn" class="px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-90 active:scale-95 transition-all shadow-2xs cursor-pointer">Save Changes</button>
+            </div>
         </div>
     </div>
 </div>

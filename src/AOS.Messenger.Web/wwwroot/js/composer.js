@@ -16,10 +16,10 @@ const POLICY_INFO_CLASS = 'px-4 py-2 bg-[#F0E9DF] dark:bg-[#45423E] border-b bor
 
 /**
  * Creates a composer controller bound to the active chat shell.
- * @param {{ state: object, typingEmitter?: object|null }} deps
+ * @param {{ state: object, typingEmitter?: object|null, emojiPicker?: object|null, emojiAutocomplete?: object|null }} deps
  * @returns {object}
  */
-export function createComposer({ state, typingEmitter = null }) {
+export function createComposer({ state, typingEmitter = null, emojiPicker = null, emojiAutocomplete = null }) {
     let isSending = false;
     let locked = true;
     let activeReplyTo = null;
@@ -30,6 +30,8 @@ export function createComposer({ state, typingEmitter = null }) {
     let boundInputEl = null;
     let boundSendBtn = null;
     let boundCancelReplyBtn = null;
+    let boundEmojiBtn = null;
+    let detachEmojiAutocomplete = null;
 
     function getInputEl() {
         return typeof document !== 'undefined' && typeof document.getElementById === 'function'
@@ -41,6 +43,21 @@ export function createComposer({ state, typingEmitter = null }) {
         return typeof document !== 'undefined' && typeof document.getElementById === 'function'
             ? document.getElementById('send-message-btn')
             : null;
+    }
+
+    function getEmojiBtn() {
+        return typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('composer-emoji-btn')
+            : null;
+    }
+
+    function closeEmojiOverlays() {
+        if (emojiPicker && typeof emojiPicker.close === 'function') {
+            emojiPicker.close();
+        }
+        if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') {
+            emojiAutocomplete.close();
+        }
     }
 
     function adjustTextareaHeight(inputEl) {
@@ -66,9 +83,14 @@ export function createComposer({ state, typingEmitter = null }) {
     function syncDisabledState() {
         const inputEl = getInputEl();
         const sendBtn = getSendBtn();
+        const emojiBtn = getEmojiBtn();
         const shouldDisable = locked || isSending;
         if (inputEl) inputEl.disabled = shouldDisable;
         if (sendBtn) sendBtn.disabled = shouldDisable;
+        if (emojiBtn) emojiBtn.disabled = shouldDisable;
+        if (shouldDisable) {
+            closeEmojiOverlays();
+        }
     }
 
     function setLocked(isLocked) {
@@ -191,6 +213,7 @@ export function createComposer({ state, typingEmitter = null }) {
         clearReply();
         hideActionError();
         hidePolicyNotice();
+        closeEmojiOverlays();
 
         const inputEl = getInputEl();
         if (inputEl) {
@@ -222,7 +245,10 @@ export function createComposer({ state, typingEmitter = null }) {
         const replyToMessageId = activeReplyTo ? activeReplyTo.id : null;
 
         isSending = true;
+        closeEmojiOverlays();
+        const emojiBtn = getEmojiBtn();
         if (sendBtn) sendBtn.disabled = true;
+        if (emojiBtn) emojiBtn.disabled = true;
         inputEl.disabled = true;
 
         if (typingEmitter && typeof typingEmitter.stopTyping === 'function') {
@@ -300,8 +326,10 @@ export function createComposer({ state, typingEmitter = null }) {
             if (epoch === state.switchEpoch) {
                 isSending = false;
                 const currentSendBtn = getSendBtn();
+                const currentEmojiBtn = getEmojiBtn();
                 const currentInput = getInputEl();
                 if (currentSendBtn) currentSendBtn.disabled = locked;
+                if (currentEmojiBtn) currentEmojiBtn.disabled = locked;
                 if (currentInput) {
                     currentInput.disabled = locked;
                     if (!locked && typeof currentInput.focus === 'function') {
@@ -318,8 +346,26 @@ export function createComposer({ state, typingEmitter = null }) {
 
     const onInputKeyDown = (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
+            if (emojiAutocomplete && typeof emojiAutocomplete.isOpen === 'function' && emojiAutocomplete.isOpen()) {
+                return;
+            }
             e.preventDefault();
             sendMessage();
+        }
+    };
+
+    const onEmojiBtnClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (locked || isSending) return;
+        const inputEl = getInputEl();
+        const emojiBtn = getEmojiBtn();
+        if (!inputEl || !emojiBtn || inputEl.disabled) return;
+        if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') {
+            emojiAutocomplete.close();
+        }
+        if (emojiPicker && typeof emojiPicker.toggle === 'function') {
+            emojiPicker.toggle(emojiBtn, inputEl, { surface: 'composer' });
         }
     };
 
@@ -347,6 +393,7 @@ export function createComposer({ state, typingEmitter = null }) {
         if (initialized || typeof document === 'undefined') return;
         boundInputEl = getInputEl();
         boundSendBtn = getSendBtn();
+        boundEmojiBtn = getEmojiBtn();
         boundCancelReplyBtn = typeof document.getElementById === 'function'
             ? document.getElementById('cancel-reply-btn')
             : null;
@@ -354,9 +401,15 @@ export function createComposer({ state, typingEmitter = null }) {
         if (boundInputEl && typeof boundInputEl.addEventListener === 'function') {
             boundInputEl.addEventListener('input', onInputResize);
             boundInputEl.addEventListener('keydown', onInputKeyDown);
+            if (emojiAutocomplete && typeof emojiAutocomplete.attach === 'function') {
+                detachEmojiAutocomplete = emojiAutocomplete.attach(boundInputEl);
+            }
         }
         if (boundSendBtn && typeof boundSendBtn.addEventListener === 'function') {
             boundSendBtn.addEventListener('click', onSendClick);
+        }
+        if (boundEmojiBtn && typeof boundEmojiBtn.addEventListener === 'function') {
+            boundEmojiBtn.addEventListener('click', onEmojiBtnClick);
         }
         if (boundCancelReplyBtn && typeof boundCancelReplyBtn.addEventListener === 'function') {
             boundCancelReplyBtn.addEventListener('click', onCancelReplyClick);
@@ -371,12 +424,20 @@ export function createComposer({ state, typingEmitter = null }) {
     function destroy() {
         if (!initialized) return;
         hideActionError();
+        closeEmojiOverlays();
+        if (detachEmojiAutocomplete) {
+            detachEmojiAutocomplete();
+            detachEmojiAutocomplete = null;
+        }
         if (boundInputEl && typeof boundInputEl.removeEventListener === 'function') {
             boundInputEl.removeEventListener('input', onInputResize);
             boundInputEl.removeEventListener('keydown', onInputKeyDown);
         }
         if (boundSendBtn && typeof boundSendBtn.removeEventListener === 'function') {
             boundSendBtn.removeEventListener('click', onSendClick);
+        }
+        if (boundEmojiBtn && typeof boundEmojiBtn.removeEventListener === 'function') {
+            boundEmojiBtn.removeEventListener('click', onEmojiBtnClick);
         }
         if (boundCancelReplyBtn && typeof boundCancelReplyBtn.removeEventListener === 'function') {
             boundCancelReplyBtn.removeEventListener('click', onCancelReplyClick);
@@ -386,6 +447,7 @@ export function createComposer({ state, typingEmitter = null }) {
         }
         boundInputEl = null;
         boundSendBtn = null;
+        boundEmojiBtn = null;
         boundCancelReplyBtn = null;
         initialized = false;
     }

@@ -17,6 +17,7 @@ import { renderReactionPills } from './reactions.js';
 import { formatLastSeen } from './presence.js';
 import { closeChatActionsMenu } from './chat-actions.js';
 import { updateSidebarLastMessage as updateSidebarLastMessageInList } from './conversation-list.js';
+import { getMessageContentClassName, truncateGraphemes } from './emoji-utils.js';
 
 /**
  * Sanitizes user-supplied text to prevent Cross-Site Scripting (XSS).
@@ -145,14 +146,13 @@ export function isLatestRenderedMessage(containerEl, msgId) {
 }
 
 /**
- * Truncates a reply quote preview safely by Unicode code points.
+ * Truncates a reply quote preview safely by grapheme clusters so complex emojis are never split.
  * @param {string} text
- * @param {number} [maxCodePoints]
+ * @param {number} [maxGraphemes]
  * @returns {string}
  */
-export function truncateReplyPreview(text, maxCodePoints = 100) {
-    const chars = Array.from(String(text || ''));
-    return chars.length > maxCodePoints ? `${chars.slice(0, maxCodePoints).join('')}...` : chars.join('');
+export function truncateReplyPreview(text, maxGraphemes = 100) {
+    return truncateGraphemes(text, maxGraphemes);
 }
 
 /**
@@ -208,6 +208,7 @@ export function applyMessageEditedToRow(msgId, newContent, editedAtUtc) {
         const contentEl = row.querySelector('.message-text-content');
         if (contentEl && row.getAttribute('data-deleted') !== 'true') {
             contentEl.textContent = newContent || '';
+            contentEl.className = getMessageContentClassName(newContent || '');
         }
         const editedLabel = row.querySelector('.edited-label');
         if (editedLabel && editedAtUtc) {
@@ -474,7 +475,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         bubble.appendChild(delDiv);
     } else {
         const contentDiv = document.createElement('div');
-        contentDiv.className = 'message-text-content text-xs leading-relaxed whitespace-pre-wrap break-words';
+        contentDiv.className = getMessageContentClassName(message.content || '');
         contentDiv.textContent = message.content || '';
         bubble.appendChild(contentDiv);
     }
@@ -652,7 +653,7 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
                 <span>This message was deleted</span>
             </div>`;
     } else {
-        contentHtml = `<div class="message-text-content text-xs leading-relaxed whitespace-pre-wrap break-words">${escapeHtml(message.content)}</div>`;
+        contentHtml = `<div class="${getMessageContentClassName(message.content || '')}">${escapeHtml(message.content)}</div>`;
     }
 
     const replyBtnHtml = !message.isDeletedForEveryone

@@ -71,8 +71,8 @@
 }
 
 @theme {
-  --font-sans: "Manrope", sans-serif;
-  --font-headline: "Manrope", sans-serif;
+  --font-sans: "Manrope", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif;
+  --font-headline: "Manrope", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", sans-serif;
   --color-brand-primary: #B3929D;
   --color-brand-secondary: #A07860;
   --color-brand-accent: #D8C080;
@@ -286,6 +286,21 @@
   }
   .emoji-picker-btn:hover {
     transform: scale(1.25);
+  }
+
+  /* WhatsApp-style Emoji Support */
+  .emoji-font {
+    font-family: "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji", "Manrope", sans-serif;
+  }
+  .emoji-jumbo-single {
+    line-height: 1.15;
+    padding-top: 2px;
+    padding-bottom: 2px;
+  }
+  .emoji-jumbo-few {
+    line-height: 1.25;
+    padding-top: 1px;
+    padding-bottom: 1px;
   }
 
   /* Presence Indicators */

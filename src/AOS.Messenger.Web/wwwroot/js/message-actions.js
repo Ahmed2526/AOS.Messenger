@@ -24,6 +24,7 @@ import {
     applyMessageDeletedForEveryone,
     applyMessageDeletedForMe
 } from './message-renderer.js';
+import { getMessageContentClassName } from './emoji-utils.js';
 
 function updateSidebarLastMessageIfLatest(conversationId, messageId, previewText) {
     const container = document.getElementById('messages-container');
@@ -48,10 +49,13 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
     const resolveConvId = typeof convIdOrGetter === 'function' ? convIdOrGetter : () => convIdOrGetter;
     const getSwitchEpoch = typeof options?.getSwitchEpoch === 'function' ? options.getSwitchEpoch : () => 0;
+    const emojiPicker = options?.emojiPicker || null;
+    const emojiAutocomplete = options?.emojiAutocomplete || null;
 
     // Modals
     const editModal = document.getElementById('edit-message-modal');
     const editInput = document.getElementById('edit-message-input');
+    const editEmojiBtn = document.getElementById('edit-message-emoji-btn');
     const editErrorEl = document.getElementById('edit-message-error');
     const saveEditBtn = document.getElementById('save-edit-btn');
     const cancelEditBtn = document.getElementById('cancel-edit-btn');
@@ -105,6 +109,12 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     function closeEditModal() {
         activeEditMessageId = null;
         setEditError('');
+        if (emojiPicker && typeof emojiPicker.close === 'function') {
+            emojiPicker.close();
+        }
+        if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') {
+            emojiAutocomplete.close();
+        }
         if (editInput) {
             editInput.value = '';
         }
@@ -141,6 +151,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
                 const contentEl = row.querySelector('.message-text-content');
                 if (contentEl) {
                     contentEl.textContent = updated.content;
+                    contentEl.className = getMessageContentClassName(updated.content || '');
                 }
                 const editedLabel = row.querySelector('.edited-label');
                 if (editedLabel && updated.editedAtUtc) {
@@ -164,6 +175,25 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         }
     };
 
+    const onEditEmojiBtnClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (!editEmojiBtn || !editInput || editInput.disabled) return;
+        if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') {
+            emojiAutocomplete.close();
+        }
+        if (emojiPicker && typeof emojiPicker.toggle === 'function') {
+            emojiPicker.toggle(editEmojiBtn, editInput, { surface: 'edit-modal' });
+        }
+    };
+
+    const detachEditAutocomplete = editInput && emojiAutocomplete && typeof emojiAutocomplete.attach === 'function'
+        ? emojiAutocomplete.attach(editInput)
+        : null;
+
+    if (editEmojiBtn) {
+        editEmojiBtn.addEventListener('click', onEditEmojiBtnClick);
+    }
     if (cancelEditBtn) {
         cancelEditBtn.addEventListener('click', closeEditModal);
     }
@@ -221,6 +251,10 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
     const onEscapeKeyDown = (e) => {
         if (e.key === 'Escape') {
+            if ((emojiPicker && typeof emojiPicker.isOpen === 'function' && emojiPicker.isOpen()) ||
+                (emojiAutocomplete && typeof emojiAutocomplete.isOpen === 'function' && emojiAutocomplete.isOpen())) {
+                return;
+            }
             if (editModal && !editModal.classList.contains('hidden')) {
                 closeEditModal();
             }
@@ -381,6 +415,8 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         closeDeleteModal,
         destroy: () => {
             resetForSwitch();
+            if (detachEditAutocomplete) detachEditAutocomplete();
+            if (editEmojiBtn) editEmojiBtn.removeEventListener('click', onEditEmojiBtnClick);
             document.removeEventListener('click', onActionClick);
             document.removeEventListener('keydown', onEscapeKeyDown);
             if (cancelEditBtn) cancelEditBtn.removeEventListener('click', closeEditModal);

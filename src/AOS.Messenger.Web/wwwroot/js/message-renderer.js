@@ -122,8 +122,12 @@ export function scrollToBottom(smooth = true) {
  * @param {string} convId
  * @param {string} previewText
  */
-export function updateSidebarLastMessage(convId, previewText) {
+export function updateSidebarLastMessage(convId, previewText, messageId = null, onlyIfLatest = false, forceClearId = false, shouldReorder = false) {
     if (!convId || typeof document === 'undefined') return;
+    if (typeof window !== 'undefined' && window.ChatRealtime && typeof window.ChatRealtime.updateSidebarLastMessage === 'function') {
+        window.ChatRealtime.updateSidebarLastMessage(convId, previewText, messageId, onlyIfLatest, forceClearId, shouldReorder);
+        return;
+    }
     const normalizedId = typeof convId === 'object' && convId.value ? convId.value : String(convId);
     const item = document.querySelector(`.conversation-item[data-conversation-id="${normalizedId}"]`) ||
                  document.querySelector(`.conversation-item[href*="${normalizedId}"]`);

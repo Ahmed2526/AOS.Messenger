@@ -131,6 +131,11 @@
     <!-- Core Scripts -->
     <script type="module" src="~/js/theme.js" asp-append-version="true"></script>
     <script src="~/js/site.js" asp-append-version="true"></script>
+    @if (User.Identity?.IsAuthenticated == true && !isChatIndex && !isConversation)
+    {
+        <script src="~/lib/signalr/signalr.min.js" asp-append-version="true"></script>
+        <script src="~/js/chat-realtime.js" asp-append-version="true"></script>
+    }
     <script type="module" src="~/js/sidebar.js" asp-append-version="true"></script>
     <script type="module" src="~/js/mobile-nav.js" asp-append-version="true"></script>
     @await RenderSectionAsync("Scripts", required: false)

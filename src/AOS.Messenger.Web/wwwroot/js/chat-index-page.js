@@ -12,8 +12,10 @@ import { setupPresence } from './presence.js';
     'use strict';
 
     const rootEl = document.getElementById('main-chat-container');
-    const currentUserId = rootEl ? (rootEl.getAttribute('data-current-user-id') || null) : null;
     const sidebarListEl = document.getElementById('conversationList');
+    const currentUserId = (rootEl ? rootEl.getAttribute('data-current-user-id') : null) ||
+                          (sidebarListEl ? sidebarListEl.getAttribute('data-current-user-id') : null) ||
+                          null;
 
     const realtime = typeof ChatRealtime !== 'undefined' && typeof ChatRealtime.initLobby === 'function'
         ? ChatRealtime.initLobby({ currentUserId })

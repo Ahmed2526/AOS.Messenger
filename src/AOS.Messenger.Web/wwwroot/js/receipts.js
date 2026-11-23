@@ -150,6 +150,19 @@ export function markRead(conversationId, upToMessageId) {
             lastSentReadMap.set(normalizedConvId, upToIdVal);
             const endpoint = `/api/conversations/${conversationId}/read`;
             const resp = await postReceipt(endpoint, upToIdVal);
+            if (resp) {
+                if (typeof window !== 'undefined' && window.ChatRealtime) {
+                    if (typeof window.ChatRealtime.setSidebarUnreadCount === 'function') {
+                        window.ChatRealtime.setSidebarUnreadCount(conversationId, 0);
+                    }
+                    if (typeof window.ChatRealtime.broadcastConversationRead === 'function') {
+                        window.ChatRealtime.broadcastConversationRead(conversationId);
+                    }
+                }
+            } else if (lastSentReadMap.get(normalizedConvId) === upToIdVal) {
+                // Allow retry on subsequent focus/scroll if the HTTP request failed
+                lastSentReadMap.set(normalizedConvId, lastSent);
+            }
             resolve(resp);
         }, isVisibleAndFocused ? 300 : 50);
     });

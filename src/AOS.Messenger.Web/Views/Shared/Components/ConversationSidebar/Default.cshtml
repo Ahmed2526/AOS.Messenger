@@ -96,10 +96,13 @@
     </div>
 
     <!-- Conversations Scrollable Area -->
-    <div class="flex-1 overflow-y-auto custom-scroll" id="conversationList">
+    <div class="flex-1 overflow-y-auto custom-scroll"
+         id="conversationList"
+         data-current-user-id="@(User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "")"
+         data-active-conversation-id="@(Model.ActiveConversationId?.Value.ToString() ?? "")">
         @if (Model.Conversations is not null && Model.Conversations.Count > 0)
         {
-            <div class="p-2 space-y-1">
+            <div class="p-2 space-y-1 conversation-items-container">
                 @foreach (var conv in Model.Conversations)
                 {
                     var isActive = Model.ActiveConversationId is not null && Model.ActiveConversationId.Equals(conv.Id);
@@ -108,7 +111,12 @@
                     <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value"
                        data-conversation-id="@conv.Id.Value"
                        data-peer-user-id="@conv.OtherParticipantId.Value"
+                       data-peer-name="@conv.OtherParticipantName"
+                       data-peer-handle="@conv.OtherParticipantHandle"
                        data-last-message-id="@(conv.LastMessageId?.Value.ToString() ?? "")"
+                       data-is-pinned="@(conv.IsPinned ? "true" : "false")"
+                       data-is-muted="@(conv.IsMuted ? "true" : "false")"
+                       data-unread-count="@conv.UnreadCount"
                        data-search="@conv.OtherParticipantName @conv.OtherParticipantHandle @conv.LastMessagePreview"
                        class="conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all @(isActive ? "bg-[#FFFFFF] dark:bg-[#45423E] shadow-xs border border-[#E3DCD7] dark:border-[#514D48]" : "hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/50 border border-transparent")">
                         <div class="relative flex-shrink-0">
@@ -120,7 +128,7 @@
                         <div class="flex-1 min-w-0">
                             <div class="flex items-center justify-between gap-1 mb-0.5">
                                 <span class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">@conv.OtherParticipantName</span>
-                                <div class="flex items-center gap-1 flex-shrink-0">
+                                <div class="conversation-badges flex items-center gap-1 flex-shrink-0">
                                     @if (conv.IsPinned)
                                     {
                                         <span class="material-symbols-outlined text-[14px] text-[#A07860] dark:text-[#D8C080]" title="Pinned">push_pin</span>
@@ -131,7 +139,9 @@
                                     }
                                     @if (conv.UnreadCount > 0)
                                     {
-                                        <span class="px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white">
+                                        <span class="conversation-unread-badge px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white"
+                                              data-unread-badge="true"
+                                              aria-label="@conv.UnreadCount unread @(conv.UnreadCount == 1 ? "message" : "messages")">
                                             @conv.UnreadCount
                                         </span>
                                     }
@@ -153,7 +163,7 @@
         else
         {
             <!-- Empty State -->
-            <div class="h-full p-6 flex flex-col items-center justify-center text-center">
+            <div class="h-full p-6 flex flex-col items-center justify-center text-center" data-sidebar-empty-state="true">
                 <div class="w-14 h-14 rounded-2xl bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center text-[#B3929D] shadow-xs mb-3.5">
                     <span class="material-symbols-outlined text-[28px]">chat_bubble_outline</span>
                 </div>

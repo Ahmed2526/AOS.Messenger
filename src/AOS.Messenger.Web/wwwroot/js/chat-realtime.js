@@ -147,6 +147,562 @@
         return String(lastRow.getAttribute('data-message-id')) === String(msgId);
     }
 
+    let baseDocumentTitle = null;
+    let sidebarBroadcastChannel = null;
+    let isSyncingSidebar = false;
+    let pendingSidebarSync = false;
+    let pendingSidebarActiveConvId = null;
+    let pendingSidebarOnSessionExpired = null;
+
+    /**
+     * Resolves the authenticated user ID from an explicit option or the sidebar container.
+     * @param {string|null|undefined} explicitUserId
+     * @returns {string|null}
+     */
+    function getEffectiveCurrentUserId(explicitUserId) {
+        if (explicitUserId) return String(explicitUserId);
+        if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return null;
+        const listEl = document.getElementById('conversationList');
+        const attr = listEl && typeof listEl.getAttribute === 'function'
+            ? listEl.getAttribute('data-current-user-id')
+            : null;
+        return attr ? String(attr) : null;
+    }
+
+    /**
+     * Checks whether the browser document is currently visible and focused.
+     * @returns {boolean}
+     */
+    function isDocumentVisibleAndFocused() {
+        if (typeof document === 'undefined') return true;
+        const visible = document.visibilityState === undefined || document.visibilityState === 'visible';
+        const focused = typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+        return visible && focused;
+    }
+
+    /**
+     * Finds a conversation sidebar item element by conversation ID (case-insensitive).
+     * @param {string|object} convId
+     * @returns {HTMLElement|null}
+     */
+    function findSidebarItem(convId) {
+        if (!convId || typeof document === 'undefined') return null;
+        const normalizedId = typeof convId === 'object' && convId.value ? String(convId.value) : String(convId);
+        const lowerId = normalizedId.toLowerCase();
+
+        if (typeof document.querySelector === 'function') {
+            const direct = document.querySelector(`.conversation-item[data-conversation-id="${normalizedId}"]`) ||
+                           document.querySelector(`.conversation-item[data-conversation-id="${lowerId}"]`) ||
+                           document.querySelector(`.conversation-item[href*="${normalizedId}"]`) ||
+                           document.querySelector(`.conversation-item[href*="${lowerId}"]`);
+            if (direct) return direct;
+        }
+
+        if (typeof document.querySelectorAll === 'function') {
+            const items = document.querySelectorAll('.conversation-item');
+            for (let i = 0; i < items.length; i++) {
+                const candidate = items[i];
+                const candidateId = candidate && typeof candidate.getAttribute === 'function'
+                    ? candidate.getAttribute('data-conversation-id')
+                    : null;
+                if (candidateId && String(candidateId).toLowerCase() === lowerId) {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Re-applies the active sidebar search query to all conversation items.
+     */
+    function applySidebarSearchFilter() {
+        if (typeof document === 'undefined' ||
+            typeof document.getElementById !== 'function' ||
+            typeof document.querySelectorAll !== 'function') {
+            return;
+        }
+        const searchInput = document.getElementById('conversationSearchInput');
+        if (!searchInput) return;
+        const query = (searchInput.value || '').toLowerCase().trim();
+        const items = document.querySelectorAll('.conversation-item');
+        items.forEach((item) => {
+            const text = (item.getAttribute('data-search') || '').toLowerCase();
+            if (item.style) {
+                item.style.display = text.includes(query) ? '' : 'none';
+            }
+        });
+    }
+
+    /**
+     * Synchronizes the document title prefix with total unread count across sidebar items.
+     */
+    function updateDocumentTitleUnreadBadge() {
+        if (typeof document === 'undefined' || typeof document.title !== 'string') return;
+        if (baseDocumentTitle === null) {
+            baseDocumentTitle = document.title.replace(/^\(\d+\)\s+/, '');
+        }
+        if (typeof document.querySelectorAll !== 'function') return;
+
+        const items = document.querySelectorAll('#conversationList .conversation-item');
+        let total = 0;
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const raw = item && typeof item.getAttribute === 'function'
+                ? item.getAttribute('data-unread-count')
+                : null;
+            const parsed = parseInt(raw || '0', 10);
+            if (!isNaN(parsed) && parsed > 0) {
+                total += parsed;
+            }
+        }
+
+        document.title = total > 0 ? `(${total}) ${baseDocumentTitle}` : baseDocumentTitle;
+    }
+
+    /**
+     * Updates the data-search attribute on a sidebar item when its preview changes.
+     * @param {HTMLElement} item
+     * @param {string} previewText
+     */
+    function updateSidebarItemSearchAttr(item, previewText) {
+        if (!item || typeof item.getAttribute !== 'function' || typeof item.setAttribute !== 'function') return;
+        const peerName = item.getAttribute('data-peer-name');
+        const peerHandle = item.getAttribute('data-peer-handle');
+        if (peerName !== null || peerHandle !== null) {
+            item.setAttribute('data-search', `${peerName || ''} ${peerHandle || ''} ${previewText || ''}`.trim());
+        }
+    }
+
+    /**
+     * Reorders a sidebar item to the top of its pinned or unpinned section.
+     * Matches server sorting: IsPinned DESC, LastActivityAtUtc DESC.
+     * @param {HTMLElement} item
+     */
+    function reorderSidebarItem(item) {
+        if (!item || !item.parentElement || typeof item.parentElement.insertBefore !== 'function') return;
+        const parent = item.parentElement;
+        const isPinned = typeof item.getAttribute === 'function' && item.getAttribute('data-is-pinned') === 'true';
+
+        if (isPinned) {
+            if (parent.firstElementChild && parent.firstElementChild !== item) {
+                parent.insertBefore(item, parent.firstElementChild);
+            }
+            return;
+        }
+
+        const children = parent.children;
+        if (!children || children.length <= 1) return;
+
+        let firstUnpinned = null;
+        for (let i = 0; i < children.length; i++) {
+            const child = children[i];
+            const childPinned = typeof child.getAttribute === 'function' && child.getAttribute('data-is-pinned') === 'true';
+            if (!childPinned) {
+                firstUnpinned = child;
+                break;
+            }
+        }
+
+        if (firstUnpinned && firstUnpinned !== item) {
+            parent.insertBefore(item, firstUnpinned);
+        } else if (!firstUnpinned && typeof parent.appendChild === 'function') {
+            parent.appendChild(item);
+        }
+    }
+
+    /**
+     * Sets the unread message count badge for a conversation in the sidebar.
+     * Creates, updates, or removes the badge using safe DOM APIs exclusively.
+     * @param {string|object} convId
+     * @param {number} count
+     * @returns {boolean} True if item was found
+     */
+    function setSidebarUnreadCount(convId, count) {
+        const item = findSidebarItem(convId);
+        if (!item) {
+            updateDocumentTitleUnreadBadge();
+            return false;
+        }
+
+        const safeCount = Math.max(0, parseInt(count, 10) || 0);
+        if (typeof item.setAttribute === 'function') {
+            item.setAttribute('data-unread-count', String(safeCount));
+        }
+
+        if (typeof item.querySelector !== 'function') {
+            updateDocumentTitleUnreadBadge();
+            return true;
+        }
+
+        let badge = item.querySelector('.conversation-unread-badge') || item.querySelector('[data-unread-badge]');
+
+        if (safeCount > 0) {
+            if (!badge && typeof document.createElement === 'function') {
+                const badgesContainer = item.querySelector('.conversation-badges') ||
+                                        item.querySelector('.flex.items-center.gap-1.flex-shrink-0');
+                if (badgesContainer && typeof badgesContainer.appendChild === 'function') {
+                    badge = document.createElement('span');
+                    badge.className = 'conversation-unread-badge px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white';
+                    badge.setAttribute('data-unread-badge', 'true');
+                    badgesContainer.appendChild(badge);
+                }
+            }
+            if (badge) {
+                badge.textContent = String(safeCount);
+                if (typeof badge.setAttribute === 'function') {
+                    badge.setAttribute('aria-label', safeCount === 1 ? '1 unread message' : `${safeCount} unread messages`);
+                }
+            }
+        } else if (badge && typeof badge.remove === 'function') {
+            badge.remove();
+        }
+
+        updateDocumentTitleUnreadBadge();
+        return true;
+    }
+
+    /**
+     * Increments the unread message count badge for a conversation in the sidebar.
+     * @param {string|object} convId
+     * @param {number} [delta]
+     * @returns {boolean} True if item was found
+     */
+    function incrementSidebarUnreadCount(convId, delta = 1) {
+        const item = findSidebarItem(convId);
+        if (!item) return false;
+
+        let current = 0;
+        if (typeof item.getAttribute === 'function') {
+            const attrVal = item.getAttribute('data-unread-count');
+            if (attrVal !== null && attrVal !== '') {
+                current = parseInt(attrVal, 10) || 0;
+            } else if (typeof item.querySelector === 'function') {
+                const existingBadge = item.querySelector('.conversation-unread-badge') || item.querySelector('[data-unread-badge]');
+                if (existingBadge) {
+                    current = parseInt(existingBadge.textContent || '0', 10) || 0;
+                }
+            }
+        }
+
+        return setSidebarUnreadCount(convId, current + delta);
+    }
+
+    /**
+     * Initializes same-origin cross-tab sidebar synchronization via BroadcastChannel.
+     */
+    function ensureSidebarBroadcastChannel() {
+        if (sidebarBroadcastChannel || typeof BroadcastChannel === 'undefined') return sidebarBroadcastChannel;
+        try {
+            sidebarBroadcastChannel = new BroadcastChannel('aos-messenger-sidebar');
+            if (typeof sidebarBroadcastChannel.unref === 'function') {
+                sidebarBroadcastChannel.unref();
+            }
+            sidebarBroadcastChannel.addEventListener('message', (event) => {
+                const data = event && event.data;
+                if (!data || typeof data !== 'object') return;
+                if (data.type === 'conversation-read' && data.conversationId) {
+                    setSidebarUnreadCount(data.conversationId, 0);
+                }
+            });
+        } catch {
+            sidebarBroadcastChannel = null;
+        }
+        return sidebarBroadcastChannel;
+    }
+
+    /**
+     * Notifies other open tabs in the same browser that a conversation was marked as read.
+     * @param {string|object} convId
+     */
+    function broadcastConversationRead(convId) {
+        if (!convId) return;
+        const normalizedId = typeof convId === 'object' && convId.value ? String(convId.value) : String(convId);
+        const channel = ensureSidebarBroadcastChannel();
+        if (channel && typeof channel.postMessage === 'function') {
+            try {
+                channel.postMessage({ type: 'conversation-read', conversationId: normalizedId });
+            } catch {}
+        }
+    }
+
+    /**
+     * Safely builds a conversation sidebar anchor element from a ConversationSummaryDto.
+     * Pure DOM creation with textContent only — zero HTML string injection.
+     * @param {object} summary
+     * @param {string|null} activeConvId
+     * @returns {HTMLElement|null}
+     */
+    function createSidebarConversationItemElement(summary, activeConvId) {
+        if (!summary || typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+
+        const idRaw = summary.id !== undefined ? summary.id : summary.Id;
+        const convId = typeof idRaw === 'object' && idRaw && idRaw.value ? String(idRaw.value) : String(idRaw || '');
+        if (!convId) return null;
+
+        const peerIdRaw = summary.otherParticipantId !== undefined ? summary.otherParticipantId : summary.OtherParticipantId;
+        const peerId = getUserId(peerIdRaw);
+        const peerName = summary.otherParticipantName || summary.OtherParticipantName || 'Unknown';
+        const peerHandle = summary.otherParticipantHandle || summary.OtherParticipantHandle || '';
+        const previewRaw = summary.lastMessagePreview !== undefined ? summary.lastMessagePreview : summary.LastMessagePreview;
+        const previewText = previewRaw && String(previewRaw).trim() ? String(previewRaw) : 'No messages yet';
+        const unreadCount = Math.max(0, parseInt(summary.unreadCount !== undefined ? summary.unreadCount : (summary.UnreadCount || 0), 10) || 0);
+        const isPinned = !!(summary.isPinned !== undefined ? summary.isPinned : summary.IsPinned);
+        const isMuted = !!(summary.isMuted !== undefined ? summary.isMuted : summary.IsMuted);
+        const isOnline = !!(summary.isOnline !== undefined ? summary.isOnline : summary.IsOnline);
+        const lastMsgRaw = summary.lastMessageId !== undefined ? summary.lastMessageId : summary.LastMessageId;
+        const lastMessageId = lastMsgRaw !== null && lastMsgRaw !== undefined
+            ? (typeof lastMsgRaw === 'object' && lastMsgRaw.value !== undefined ? String(lastMsgRaw.value) : String(lastMsgRaw))
+            : '';
+
+        const isActive = !!(activeConvId && String(activeConvId).toLowerCase() === convId.toLowerCase());
+        const initials = getInitials(peerName, peerHandle);
+
+        const link = document.createElement('a');
+        link.href = `/Chat/Conversation/${encodeURIComponent(convId)}`;
+        link.setAttribute('data-conversation-id', convId);
+        if (peerId) link.setAttribute('data-peer-user-id', peerId);
+        link.setAttribute('data-peer-name', peerName);
+        link.setAttribute('data-peer-handle', peerHandle);
+        link.setAttribute('data-last-message-id', lastMessageId);
+        link.setAttribute('data-is-pinned', isPinned ? 'true' : 'false');
+        link.setAttribute('data-is-muted', isMuted ? 'true' : 'false');
+        link.setAttribute('data-unread-count', String(unreadCount));
+        link.setAttribute('data-search', `${peerName} ${peerHandle} ${previewRaw || ''}`.trim());
+        link.className = isActive
+            ? 'conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all bg-[#FFFFFF] dark:bg-[#45423E] shadow-xs border border-[#E3DCD7] dark:border-[#514D48]'
+            : 'conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/50 border border-transparent';
+
+        const avatarWrap = document.createElement('div');
+        avatarWrap.className = 'relative flex-shrink-0';
+
+        const avatarCircle = document.createElement('div');
+        avatarCircle.className = 'w-11 h-11 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs';
+        avatarCircle.textContent = initials;
+        avatarWrap.appendChild(avatarCircle);
+
+        const presenceDot = document.createElement('span');
+        presenceDot.className = `presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-[#6F9473]' : 'bg-stone-400 dark:bg-stone-500'} border-2 border-[#F0E9DF] dark:border-[#3A3835]`;
+        avatarWrap.appendChild(presenceDot);
+        link.appendChild(avatarWrap);
+
+        const body = document.createElement('div');
+        body.className = 'flex-1 min-w-0';
+
+        const topRow = document.createElement('div');
+        topRow.className = 'flex items-center justify-between gap-1 mb-0.5';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate';
+        nameSpan.textContent = peerName;
+        topRow.appendChild(nameSpan);
+
+        const badgesDiv = document.createElement('div');
+        badgesDiv.className = 'conversation-badges flex items-center gap-1 flex-shrink-0';
+
+        if (isPinned) {
+            const pinIcon = document.createElement('span');
+            pinIcon.className = 'material-symbols-outlined text-[14px] text-[#A07860] dark:text-[#D8C080]';
+            pinIcon.title = 'Pinned';
+            pinIcon.textContent = 'push_pin';
+            badgesDiv.appendChild(pinIcon);
+        }
+
+        if (isMuted) {
+            const muteIcon = document.createElement('span');
+            muteIcon.className = 'material-symbols-outlined text-[14px] text-[#6E6560] dark:text-[#C9C0B9]';
+            muteIcon.title = 'Muted';
+            muteIcon.textContent = 'volume_off';
+            badgesDiv.appendChild(muteIcon);
+        }
+
+        if (unreadCount > 0) {
+            const unreadBadge = document.createElement('span');
+            unreadBadge.className = 'conversation-unread-badge px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white';
+            unreadBadge.setAttribute('data-unread-badge', 'true');
+            unreadBadge.setAttribute('aria-label', unreadCount === 1 ? '1 unread message' : `${unreadCount} unread messages`);
+            unreadBadge.textContent = String(unreadCount);
+            badgesDiv.appendChild(unreadBadge);
+        }
+
+        topRow.appendChild(badgesDiv);
+        body.appendChild(topRow);
+
+        const bottomRow = document.createElement('div');
+        bottomRow.className = 'flex items-center justify-between gap-1';
+
+        const previewSpan = document.createElement('span');
+        previewSpan.className = 'text-[11px] text-[#6E6560] dark:text-[#C9C0B9] truncate conversation-last-message';
+        previewSpan.textContent = previewText;
+        bottomRow.appendChild(previewSpan);
+
+        const handleSpan = document.createElement('span');
+        handleSpan.className = 'text-[10px] text-[#A07860] dark:text-[#C9C0B9] flex-shrink-0';
+        handleSpan.textContent = peerHandle ? `@${peerHandle}` : '';
+        bottomRow.appendChild(handleSpan);
+
+        body.appendChild(bottomRow);
+        link.appendChild(body);
+
+        return link;
+    }
+
+    /**
+     * Reconciles the sidebar conversation list DOM from authoritative server summaries.
+     * @param {Array<object>} conversations
+     * @param {string|null} [activeConvId]
+     */
+    function renderSidebarConversations(conversations, activeConvId = null) {
+        if (!Array.isArray(conversations) || typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+        const listEl = document.getElementById('conversationList');
+        if (!listEl) return;
+
+        const effectiveActiveId = activeConvId || (typeof listEl.getAttribute === 'function' ? listEl.getAttribute('data-active-conversation-id') : '') || '';
+
+        if (conversations.length === 0) {
+            while (listEl.firstChild) {
+                listEl.removeChild(listEl.firstChild);
+            }
+
+            const emptyWrap = document.createElement('div');
+            emptyWrap.className = 'h-full p-6 flex flex-col items-center justify-center text-center';
+            emptyWrap.setAttribute('data-sidebar-empty-state', 'true');
+
+            const iconBox = document.createElement('div');
+            iconBox.className = 'w-14 h-14 rounded-2xl bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center text-[#B3929D] shadow-xs mb-3.5';
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'material-symbols-outlined text-[28px]';
+            iconSpan.textContent = 'chat_bubble_outline';
+            iconBox.appendChild(iconSpan);
+            emptyWrap.appendChild(iconBox);
+
+            const heading = document.createElement('h3');
+            heading.className = 'text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] mb-1';
+            heading.textContent = 'No conversations yet';
+            emptyWrap.appendChild(heading);
+
+            const desc = document.createElement('p');
+            desc.className = 'text-xs text-[#6E6560] dark:text-[#C9C0B9] leading-relaxed max-w-[220px] mb-4';
+            desc.textContent = 'Find a contact in the directory to start chatting';
+            emptyWrap.appendChild(desc);
+
+            const cta = document.createElement('a');
+            cta.href = '/Chat/NewConversation';
+            cta.className = 'inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#B3929D] hover:bg-[#A07860] text-white text-xs font-semibold shadow-xs transition-colors';
+            const addIcon = document.createElement('span');
+            addIcon.className = 'material-symbols-outlined text-[16px]';
+            addIcon.textContent = 'add';
+            const ctaText = document.createElement('span');
+            ctaText.textContent = 'Start a chat';
+            cta.appendChild(addIcon);
+            cta.appendChild(ctaText);
+            emptyWrap.appendChild(cta);
+
+            listEl.appendChild(emptyWrap);
+            updateDocumentTitleUnreadBadge();
+            return;
+        }
+
+        const emptyState = typeof listEl.querySelector === 'function'
+            ? listEl.querySelector('[data-sidebar-empty-state]')
+            : null;
+        if (emptyState && typeof emptyState.remove === 'function') {
+            emptyState.remove();
+        }
+
+        let itemsContainer = typeof listEl.querySelector === 'function'
+            ? listEl.querySelector('.conversation-items-container')
+            : null;
+        if (!itemsContainer) {
+            while (listEl.firstChild) {
+                listEl.removeChild(listEl.firstChild);
+            }
+            itemsContainer = document.createElement('div');
+            itemsContainer.className = 'p-2 space-y-1 conversation-items-container';
+            listEl.appendChild(itemsContainer);
+        } else {
+            while (itemsContainer.firstChild) {
+                itemsContainer.removeChild(itemsContainer.firstChild);
+            }
+        }
+
+        const frag = typeof document.createDocumentFragment === 'function'
+            ? document.createDocumentFragment()
+            : itemsContainer;
+
+        for (let i = 0; i < conversations.length; i++) {
+            const el = createSidebarConversationItemElement(conversations[i], effectiveActiveId);
+            if (el) {
+                frag.appendChild(el);
+            }
+        }
+
+        if (frag !== itemsContainer) {
+            itemsContainer.appendChild(frag);
+        }
+
+        applySidebarSearchFilter();
+        updateDocumentTitleUnreadBadge();
+    }
+
+    /**
+     * Fetches the authoritative conversation list from GET /api/conversations
+     * and reconciles sidebar previews, unread counts, new conversations, and ordering.
+     * Coalesces concurrent requests cleanly.
+     * @param {string|null} [activeConvId]
+     * @param {Function|null} [onSessionExpired]
+     * @returns {Promise<void>}
+     */
+    async function syncSidebarConversations(activeConvId = null, onSessionExpired = null) {
+        if (typeof fetch !== 'function' || typeof document === 'undefined') return;
+        if (typeof document.getElementById === 'function' && !document.getElementById('conversationList')) return;
+
+        if (isSyncingSidebar) {
+            pendingSidebarSync = true;
+            pendingSidebarActiveConvId = activeConvId;
+            pendingSidebarOnSessionExpired = onSessionExpired;
+            return;
+        }
+
+        isSyncingSidebar = true;
+        try {
+            const resp = await fetch('/api/conversations?includeArchived=false', {
+                headers: { 'Accept': 'application/json' }
+            });
+
+            if (resp.status === 401 || resp.status === 403 ||
+                (resp.redirected && resp.url && resp.url.includes('/Account/Login'))) {
+                if (typeof onSessionExpired === 'function') {
+                    onSessionExpired();
+                }
+                return;
+            }
+
+            if (!resp.ok) {
+                console.warn('[Sidebar] Failed to sync conversations:', resp.status);
+                return;
+            }
+
+            const data = await resp.json();
+            if (Array.isArray(data)) {
+                renderSidebarConversations(data, activeConvId);
+            }
+        } catch (err) {
+            console.warn('[Sidebar] Error syncing conversations:', err);
+        } finally {
+            isSyncingSidebar = false;
+            if (pendingSidebarSync) {
+                pendingSidebarSync = false;
+                const nextActive = pendingSidebarActiveConvId;
+                const nextExpired = pendingSidebarOnSessionExpired;
+                pendingSidebarActiveConvId = null;
+                pendingSidebarOnSessionExpired = null;
+                await syncSidebarConversations(nextActive, nextExpired);
+            }
+        }
+    }
+
     /**
      * Updates the last message snippet in the left conversation sidebar.
      * When onlyIfLatest is true, avoids overwriting newer previews when older messages are edited/deleted.
@@ -154,21 +710,19 @@
      * @param {string} previewText
      * @param {string|number|null} [messageId]
      * @param {boolean} [onlyIfLatest]
+     * @param {boolean} [forceClearId]
+     * @param {boolean} [shouldReorder]
+     * @returns {boolean} True if sidebar item was found
      */
-    function updateSidebarLastMessage(convId, previewText, messageId = null, onlyIfLatest = false, forceClearId = false) {
-        if (!convId || typeof document === 'undefined') return;
-        const normalizedId = typeof convId === 'object' && convId.value ? String(convId.value) : String(convId);
-        const lowerId = normalizedId.toLowerCase();
-        const item = document.querySelector(`.conversation-item[data-conversation-id="${normalizedId}"]`) ||
-                     document.querySelector(`.conversation-item[data-conversation-id="${lowerId}"]`) ||
-                     document.querySelector(`.conversation-item[href*="${normalizedId}"]`) ||
-                     document.querySelector(`.conversation-item[href*="${lowerId}"]`);
-        if (!item) return;
+    function updateSidebarLastMessage(convId, previewText, messageId = null, onlyIfLatest = false, forceClearId = false, shouldReorder = false) {
+        if (!convId || typeof document === 'undefined') return false;
+        const item = findSidebarItem(convId);
+        if (!item) return false;
 
         if (onlyIfLatest && messageId !== null && messageId !== undefined) {
             const currentLastId = item.getAttribute('data-last-message-id');
             if (currentLastId && String(currentLastId) !== String(messageId)) {
-                return;
+                return true;
             }
         }
 
@@ -183,6 +737,15 @@
         } else if (!onlyIfLatest && messageId !== null && messageId !== undefined) {
             item.setAttribute('data-last-message-id', String(messageId));
         }
+
+        updateSidebarItemSearchAttr(item, previewText);
+
+        if (shouldReorder) {
+            reorderSidebarItem(item);
+        }
+
+        applySidebarSearchFilter();
+        return true;
     }
 
     /**
@@ -720,8 +1283,12 @@
         }
 
         const conversationId = String(options.conversationId);
-        const currentUserId = options.currentUserId ? String(options.currentUserId) : null;
+        const currentUserId = getEffectiveCurrentUserId(options.currentUserId);
         let latestReceivedCursor = options.initialCursor || null;
+        const seenIncomingIds = new Set();
+
+        ensureSidebarBroadcastChannel();
+        updateDocumentTitleUnreadBadge();
 
         const bannerEl = document.getElementById('connection-banner');
         const bannerTextEl = document.getElementById('connection-banner-text');
@@ -831,8 +1398,9 @@
                     window.Presence.fetchPresence(listEl, headerEl);
                 }
 
-                // Reconcile state: query authoritative REST API for missed messages
+                // Reconcile state: query authoritative REST API for missed messages and sidebar unread counts
                 await reconcileState();
+                await syncSidebarConversations(conversationId, handleSessionExpired);
 
                 // Trigger markRead/markDelivered for incoming messages
                 if (typeof window.Receipts !== 'undefined' && typeof window.Receipts.checkAndMarkIncoming === 'function') {
@@ -975,7 +1543,7 @@
                 scrollToBottom(true);
                 if (lastAddedMessage) {
                     const lastPreview = lastAddedMessage.isDeletedForEveryone ? 'This message was deleted' : lastAddedMessage.content;
-                    updateSidebarLastMessage(conversationId, lastPreview, getMessageId(lastAddedMessage), false);
+                    updateSidebarLastMessage(conversationId, lastPreview, getMessageId(lastAddedMessage), false, false, true);
                 }
             }
         }
@@ -1034,7 +1602,7 @@
 
             const eventConvId = getConversationId(message) || conversationId;
             const previewText = message.isDeletedForEveryone ? 'This message was deleted' : message.content;
-            updateSidebarLastMessage(eventConvId, previewText, msgId, false);
+            const sidebarFound = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
 
             const isOutgoing = currentUserId
                 ? (getUserId(message.senderId).toLowerCase() === String(currentUserId).toLowerCase())
@@ -1042,10 +1610,21 @@
 
             const isActiveConversation = eventConvId.toLowerCase() === conversationId.toLowerCase();
             if (!isActiveConversation) {
+                if (!sidebarFound) {
+                    syncSidebarConversations(conversationId, handleSessionExpired);
+                } else if (!isOutgoing && !seenIncomingIds.has(String(msgId))) {
+                    seenIncomingIds.add(String(msgId));
+                    incrementSidebarUnreadCount(eventConvId, 1);
+                }
+
                 if (!isOutgoing && typeof window.Receipts !== 'undefined' && typeof window.Receipts.markDelivered === 'function') {
                     window.Receipts.markDelivered(eventConvId, msgId);
                 }
                 return;
+            }
+
+            if (!sidebarFound) {
+                syncSidebarConversations(conversationId, handleSessionExpired);
             }
 
             // Strict deduplication: check if message ID already exists in DOM (#msg-${id})
@@ -1066,14 +1645,19 @@
             scrollToBottom(true);
 
             // Phase 7: Automatically mark incoming message as delivered and read if focused
-            if (!isOutgoing && typeof window.Receipts !== 'undefined') {
-                if (typeof window.Receipts.markDelivered === 'function') {
+            if (!isOutgoing) {
+                if (typeof window.Receipts !== 'undefined' && typeof window.Receipts.markDelivered === 'function') {
                     window.Receipts.markDelivered(conversationId, msgId);
                 }
-                if (typeof window.Receipts.markRead === 'function' &&
-                    document.visibilityState === 'visible' &&
-                    (typeof document.hasFocus === 'function' ? document.hasFocus() : true)) {
-                    window.Receipts.markRead(conversationId, msgId);
+
+                if (isDocumentVisibleAndFocused()) {
+                    if (typeof window.Receipts !== 'undefined' && typeof window.Receipts.markRead === 'function') {
+                        window.Receipts.markRead(conversationId, msgId);
+                    }
+                    setSidebarUnreadCount(conversationId, 0);
+                } else if (sidebarFound && !seenIncomingIds.has(String(msgId))) {
+                    seenIncomingIds.add(String(msgId));
+                    incrementSidebarUnreadCount(conversationId, 1);
                 }
             }
         });
@@ -1164,6 +1748,12 @@
             const isActive = eventConvId.toLowerCase() === conversationId.toLowerCase();
 
             applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, isActive);
+
+            const sidebarItem = findSidebarItem(eventConvId);
+            const currentUnread = sidebarItem ? (parseInt(sidebarItem.getAttribute('data-unread-count') || '0', 10) || 0) : 0;
+            if (currentUnread > 0) {
+                syncSidebarConversations(conversationId, handleSessionExpired);
+            }
         });
 
         connection.on("ReceiveReactionUpdated", function (reaction) {
@@ -1252,23 +1842,33 @@
             isMessageRendered,
             scrollToBottom,
             updateSidebarLastMessage,
+            setSidebarUnreadCount,
+            incrementSidebarUnreadCount,
+            syncSidebarConversations: () => syncSidebarConversations(conversationId, handleSessionExpired),
+            broadcastConversationRead,
             handleSessionExpired
         };
     }
 
     /**
-     * Initializes a lobby SignalR connection (e.g. on /Chat/Index) without joining a specific conversation.
-     * Keeps user online, syncs sidebar previews live, and marks incoming messages delivered.
+     * Initializes a lobby SignalR connection (e.g. on /Chat/Index or persistent sidebar pages)
+     * without joining a specific conversation.
+     * Keeps user online, syncs sidebar previews & unread counts live, and marks incoming messages delivered.
      *
      * @param {object} options
      * @param {string|null} [options.currentUserId]
      * @returns {object|null} Realtime controller instance
      */
     function initLobby(options) {
-        const currentUserId = options && options.currentUserId ? String(options.currentUserId) : null;
+        const currentUserId = getEffectiveCurrentUserId(options && options.currentUserId);
         const statusDotEl = document.getElementById('connectionStatusDot');
         const statusTextEl = document.getElementById('connectionStatusText');
         let isTerminated = false;
+        const seenIncomingIds = new Set();
+        let lastVisibilitySyncAt = 0;
+
+        ensureSidebarBroadcastChannel();
+        updateDocumentTitleUnreadBadge();
 
         function handleSessionExpired() {
             if (isTerminated) return;
@@ -1324,9 +1924,10 @@
             setStatus('reconnecting');
         });
 
-        connection.onreconnected(() => {
+        connection.onreconnected(async () => {
             if (isTerminated) return;
             setStatus('connected');
+            await syncSidebarConversations(null, handleSessionExpired);
             if (typeof window.Presence !== 'undefined' && typeof window.Presence.fetchPresence === 'function') {
                 window.Presence.fetchPresence(document.getElementById('conversationList'), null);
             }
@@ -1347,11 +1948,18 @@
             if (!convId || !msgId) return;
 
             const previewText = message.isDeletedForEveryone ? 'This message was deleted' : message.content;
-            updateSidebarLastMessage(convId, previewText, msgId, false);
+            const sidebarFound = updateSidebarLastMessage(convId, previewText, msgId, false, false, true);
 
             const isOutgoing = currentUserId
                 ? (getUserId(message.senderId).toLowerCase() === String(currentUserId).toLowerCase())
                 : !!message.isOutgoing;
+
+            if (!sidebarFound) {
+                syncSidebarConversations(null, handleSessionExpired);
+            } else if (!isOutgoing && !seenIncomingIds.has(String(msgId))) {
+                seenIncomingIds.add(String(msgId));
+                incrementSidebarUnreadCount(convId, 1);
+            }
 
             if (!isOutgoing && typeof window.Receipts !== 'undefined' && typeof window.Receipts.markDelivered === 'function') {
                 window.Receipts.markDelivered(convId, msgId);
@@ -1385,8 +1993,24 @@
             const newLastPreview = message.newLastMessagePreview !== undefined ? message.newLastMessagePreview : message.NewLastMessagePreview;
             if (convId && msgId) {
                 applyMessageDeletedForMe(msgId, convId, newLastId, newLastPreview, false);
+                const sidebarItem = findSidebarItem(convId);
+                const currentUnread = sidebarItem ? (parseInt(sidebarItem.getAttribute('data-unread-count') || '0', 10) || 0) : 0;
+                if (currentUnread > 0) {
+                    syncSidebarConversations(null, handleSessionExpired);
+                }
             }
         });
+
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+            document.addEventListener('visibilitychange', () => {
+                if (isTerminated || document.visibilityState !== 'visible') return;
+                const now = Date.now();
+                if (now - lastVisibilitySyncAt >= 10000) {
+                    lastVisibilitySyncAt = now;
+                    syncSidebarConversations(null, handleSessionExpired);
+                }
+            });
+        }
 
         connection.start()
             .then(() => {
@@ -1407,6 +2031,10 @@
         return {
             connection,
             updateSidebarLastMessage,
+            setSidebarUnreadCount,
+            incrementSidebarUnreadCount,
+            syncSidebarConversations: () => syncSidebarConversations(null, handleSessionExpired),
+            broadcastConversationRead,
             handleSessionExpired
         };
     }
@@ -1424,10 +2052,18 @@
         isLatestRenderedMessage,
         createMessageBubbleHtml,
         createMessageBubbleElement,
+        createSidebarConversationItemElement,
+        renderSidebarConversations,
+        syncSidebarConversations,
         updateReplyParentBanners,
         applyMessageDeletedForEveryone,
         applyMessageDeletedForMe,
         updateSidebarLastMessage,
+        setSidebarUnreadCount,
+        incrementSidebarUnreadCount,
+        broadcastConversationRead,
+        updateDocumentTitleUnreadBadge,
+        applySidebarSearchFilter,
         scrollToBottom
     };
 

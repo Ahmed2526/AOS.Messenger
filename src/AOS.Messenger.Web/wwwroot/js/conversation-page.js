@@ -433,10 +433,14 @@ import {
                 if (emptyPlaceholderEl) {
                     emptyPlaceholderEl.classList.add('hidden');
                 }
-                updateSidebarLastMessage(conversationId, sentMessage.content);
-                const sidebarItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
-                if (sidebarItem && msgId) {
-                    sidebarItem.setAttribute('data-last-message-id', String(msgId));
+                if (typeof window !== 'undefined' && window.ChatRealtime && typeof window.ChatRealtime.updateSidebarLastMessage === 'function') {
+                    window.ChatRealtime.updateSidebarLastMessage(conversationId, sentMessage.content, msgId, false, false, true);
+                } else {
+                    updateSidebarLastMessage(conversationId, sentMessage.content);
+                    const sidebarItem = document.querySelector(`.conversation-item[data-conversation-id="${conversationId}"]`);
+                    if (sidebarItem && msgId) {
+                        sidebarItem.setAttribute('data-last-message-id', String(msgId));
+                    }
                 }
             }
 

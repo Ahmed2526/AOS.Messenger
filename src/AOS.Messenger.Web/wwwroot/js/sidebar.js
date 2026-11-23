@@ -1,12 +1,18 @@
 /**
  * AOS Messenger - Conversation Sidebar Controller
  *
- * Implements client-side conversation list search filtering by contact name and username handle.
+ * Implements client-side conversation list search filtering and initializes
+ * live SignalR sidebar updates + presence on authenticated non-chat pages
+ * (e.g. /Profile, /Settings, /Chat/Archived, /Chat/NewConversation, /Account/Sessions).
  *
  * Invariants:
  * - Safe DOM manipulation exclusively.
  * - Zero HTML string injection into live DOM.
+ * - Single SignalR connection per browser tab (does not duplicate Chat/Index or Chat/Conversation connections).
  */
+
+import './receipts.js';
+import { setupPresence } from './presence.js';
 
 (() => {
     'use strict';
@@ -22,6 +28,22 @@
                     item.style.display = text.includes(query) ? '' : 'none';
                 });
             });
+        }
+
+        const sidebarListEl = document.getElementById('conversationList');
+        const hasDedicatedChatPage = !!(
+            document.getElementById('conversation-page-root') ||
+            document.getElementById('main-chat-container')
+        );
+
+        if (sidebarListEl &&
+            !hasDedicatedChatPage &&
+            typeof window.ChatRealtime !== 'undefined' &&
+            typeof window.ChatRealtime.initLobby === 'function') {
+            const currentUserId = sidebarListEl.getAttribute('data-current-user-id') || null;
+            const realtime = window.ChatRealtime.initLobby({ currentUserId });
+            const connection = realtime ? realtime.connection : null;
+            setupPresence(connection, sidebarListEl, null);
         }
     }
 

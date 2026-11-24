@@ -29,3 +29,14 @@ public sealed class ConflictException : Exception
 
     public ConflictException(string message, Exception innerException) : base(message, innerException) { }
 }
+
+/// <summary>
+/// Thrown when an external object-storage operation fails transiently or unexpectedly.
+/// Wraps SDK/HTTP errors without leaking raw infrastructure types into Application or Web.
+/// </summary>
+public sealed class MediaStorageException : Exception
+{
+    public MediaStorageException(string message) : base(message) { }
+
+    public MediaStorageException(string message, Exception innerException) : base(message, innerException) { }
+}

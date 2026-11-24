@@ -1,6 +1,11 @@
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
+using AOS.Messenger.Domain.Constants;
 using AOS.Messenger.Domain.Entities;
+using AOS.Messenger.Domain.Enums;
+using AOS.Messenger.Domain.Exceptions;
 using AOS.Messenger.Domain.ValueObjects;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace AOS.Messenger.Infrastructure.Persistence.Repositories;
@@ -74,14 +79,20 @@ public sealed class MessagePersistence : IMessagePersistence
         var existing = await GetByIdempotencyKeyAsync(message.SenderId, message.IdempotencyKey, ct);
         if (existing is not null)
         {
+            if (existing.IsDeletedForEveryone)
+            {
+                throw new ConflictException("This message was already deleted.");
+            }
+
             if (existing.ConversationId == message.ConversationId
                 && existing.Content == message.Content
-                && existing.ParentMessageId == message.ParentMessageId)
+                && existing.ParentMessageId == message.ParentMessageId
+                && existing.HasAttachments == message.HasAttachments)
             {
                 return new PersistMessageResult(existing, IsNewlyCreated: false);
             }
 
-            throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content.");
+            throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content or attachments.");
         }
 
         try
@@ -97,18 +108,163 @@ public sealed class MessagePersistence : IMessagePersistence
             var existingAfterRace = await GetByIdempotencyKeyAsync(message.SenderId, message.IdempotencyKey, ct);
             if (existingAfterRace is not null)
             {
+                if (existingAfterRace.IsDeletedForEveryone)
+                {
+                    throw new ConflictException("This message was already deleted.");
+                }
+
                 if (existingAfterRace.ConversationId == message.ConversationId
                     && existingAfterRace.Content == message.Content
-                    && existingAfterRace.ParentMessageId == message.ParentMessageId)
+                    && existingAfterRace.ParentMessageId == message.ParentMessageId
+                    && existingAfterRace.HasAttachments == message.HasAttachments)
                 {
                     return new PersistMessageResult(existingAfterRace, IsNewlyCreated: false);
                 }
 
-                throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content.");
+                throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content or attachments.");
             }
 
             throw;
         }
+    }
+
+    public async Task<PersistMessageResult> AddWithMediaAsync(
+        Message message,
+        IReadOnlyList<MediaId> mediaIds,
+        DateTimeOffset attachedAtUtc,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(message);
+        ArgumentNullException.ThrowIfNull(mediaIds);
+
+        if (mediaIds.Count > MediaConstraints.MaxAttachmentsPerMessage)
+        {
+            throw new DomainException(
+                $"A message cannot have more than {MediaConstraints.MaxAttachmentsPerMessage} attachments.");
+        }
+
+        if (message.HasAttachments && mediaIds.Count == 0)
+        {
+            throw new DomainException("At least one attachment is required when HasAttachments is true.");
+        }
+
+        if (!message.HasAttachments && mediaIds.Count > 0)
+        {
+            throw new DomainException("Message must be marked HasAttachments when attaching media.");
+        }
+
+        var distinctIds = new HashSet<MediaId>();
+        foreach (var mediaId in mediaIds)
+        {
+            ArgumentNullException.ThrowIfNull(mediaId);
+            if (!distinctIds.Add(mediaId))
+            {
+                throw new DomainException("Duplicate media attachments in the same message are not allowed.");
+            }
+        }
+
+        var preExisting = await ResolveExistingIdempotentMediaMessageAsync(message, mediaIds, ct);
+        if (preExisting is not null)
+        {
+            return preExisting;
+        }
+
+        PersistMessageResult? persistedResult = null;
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+
+            var attemptMessage = Message.Create(
+                message.ConversationId,
+                message.SenderId,
+                message.IdempotencyKey,
+                message.Content,
+                message.CreatedAtUtc,
+                message.ParentMessageId,
+                id: null,
+                hasAttachments: message.HasAttachments);
+
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            try
+            {
+                _db.Messages.Add(attemptMessage);
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+            {
+                await tx.RollbackAsync(ct);
+                _db.ChangeTracker.Clear();
+
+                var resolvedAfterRace = await ResolveExistingIdempotentMediaMessageAsync(message, mediaIds, ct);
+                if (resolvedAfterRace is not null)
+                {
+                    persistedResult = resolvedAfterRace;
+                    return;
+                }
+
+                throw;
+            }
+
+            if (mediaIds.Count > 0)
+            {
+                var orderedTargets = mediaIds
+                    .Select((mediaId, index) => (MediaId: mediaId, DisplayOrder: index))
+                    .OrderBy(item => item.MediaId.Value)
+                    .ToList();
+
+                foreach (var target in orderedTargets)
+                {
+                    var rowsAffected = await _db.Media
+                        .Where(m => m.Id == target.MediaId
+                                    && m.UploaderId == attemptMessage.SenderId
+                                    && m.ConversationId == attemptMessage.ConversationId
+                                    && m.State == MediaState.Uploaded
+                                    && m.MessageId == null)
+                        .ExecuteUpdateAsync(setters => setters
+                            .SetProperty(m => m.State, MediaState.Attached)
+                            .SetProperty(m => m.MessageId, (MessageId?)attemptMessage.Id)
+                            .SetProperty(m => m.DisplayOrder, target.DisplayOrder)
+                            .SetProperty(m => m.AttachedAtUtc, (DateTimeOffset?)attachedAtUtc), ct);
+
+                    if (rowsAffected != 1)
+                    {
+                        var isOwnedInConversation = await _db.Media
+                            .AsNoTracking()
+                            .AnyAsync(m => m.Id == target.MediaId
+                                           && m.UploaderId == attemptMessage.SenderId
+                                           && m.ConversationId == attemptMessage.ConversationId, ct);
+
+                        await tx.RollbackAsync(ct);
+                        _db.ChangeTracker.Clear();
+
+                        if (!isOwnedInConversation)
+                        {
+                            throw new ForbiddenException("One or more media attachments are not accessible.");
+                        }
+
+                        throw new ConflictException(
+                            "One or more media attachments are not ready or were already attached to another message.");
+                    }
+                }
+            }
+
+            var attachedMedia = mediaIds.Count == 0
+                ? (IReadOnlyList<Media>)[]
+                : await _db.Media
+                    .AsNoTracking()
+                    .Where(m => m.ConversationId == attemptMessage.ConversationId
+                                && m.MessageId == attemptMessage.Id
+                                && m.State == MediaState.Attached)
+                    .OrderBy(m => m.DisplayOrder)
+                    .ToListAsync(ct);
+
+            await tx.CommitAsync(ct);
+            persistedResult = new PersistMessageResult(attemptMessage, IsNewlyCreated: true, attachedMedia);
+        });
+
+        return persistedResult!;
     }
 
     public async Task UpdateAsync(Message message, CancellationToken ct = default)
@@ -287,6 +443,7 @@ public sealed class MessagePersistence : IMessagePersistence
         var strategy = _db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
             var message = await _db.Messages
@@ -303,18 +460,85 @@ public sealed class MessagePersistence : IMessagePersistence
                 catch (DbUpdateConcurrencyException ex)
                 {
                     _db.Entry(message).State = EntityState.Detached;
-                    throw new Application.Common.ConflictException(
+                    throw new ConflictException(
                         "The message was modified concurrently. Please refresh and try again.",
                         ex);
                 }
 
-                // Atomically scrub reactions after updating & X-locking Messages (consistent lock order)
+                // Atomically scrub reactions and attached media after updating & X-locking Messages (consistent lock order)
                 await _db.MessageReactions
                     .Where(r => r.ConversationId == conversationId && r.MessageId == messageId)
                     .ExecuteDeleteAsync(ct);
+
+                await _db.Media
+                    .Where(m => m.ConversationId == conversationId
+                                && m.MessageId == messageId
+                                && m.State == MediaState.Attached)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(m => m.State, MediaState.Deleted)
+                        .SetProperty(m => m.DeletedAtUtc, (DateTimeOffset?)deletedAtUtc), ct);
             }
 
             await tx.CommitAsync(ct);
         });
+    }
+
+    private async Task<PersistMessageResult?> ResolveExistingIdempotentMediaMessageAsync(
+        Message candidate,
+        IReadOnlyList<MediaId> requestedMediaIds,
+        CancellationToken ct)
+    {
+        var trimmedKey = candidate.IdempotencyKey.Trim();
+        var existing = await _db.Messages
+            .AsNoTracking()
+            .FirstOrDefaultAsync(m => m.SenderId == candidate.SenderId && m.IdempotencyKey == trimmedKey, ct);
+
+        if (existing is null)
+        {
+            return null;
+        }
+
+        if (existing.IsDeletedForEveryone)
+        {
+            throw new ConflictException("This message was already deleted.");
+        }
+
+        var existingMedia = existing.HasAttachments
+            ? await _db.Media
+                .AsNoTracking()
+                .Where(m => m.ConversationId == existing.ConversationId
+                            && m.MessageId == existing.Id
+                            && m.State == MediaState.Attached)
+                .OrderBy(m => m.DisplayOrder)
+                .ToListAsync(ct)
+            : [];
+
+        var matches = existing.ConversationId == candidate.ConversationId
+            && existing.Content == candidate.Content
+            && existing.ParentMessageId == candidate.ParentMessageId
+            && existing.HasAttachments == candidate.HasAttachments
+            && existingMedia.Count == requestedMediaIds.Count
+            && existingMedia.Select(m => m.Id).SequenceEqual(requestedMediaIds);
+
+        if (!matches)
+        {
+            throw new ConflictException(
+                "An existing message already exists with this idempotency key in a different context or with different content or attachments.");
+        }
+
+        return new PersistMessageResult(existing, IsNewlyCreated: false, existingMedia);
+    }
+
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+    {
+        for (Exception? current = ex.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlEx && sqlEx.Number is 2601 or 2627)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

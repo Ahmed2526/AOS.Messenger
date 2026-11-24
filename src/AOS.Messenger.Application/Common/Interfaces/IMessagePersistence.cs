@@ -13,6 +13,7 @@ public interface IMessagePersistence
     Task<IReadOnlyDictionary<MessageId, Message>> GetByIdsAsync(ConversationId conversationId, IEnumerable<MessageId> ids, CancellationToken ct = default);
     Task<Message?> GetByIdempotencyKeyAsync(UserId senderId, string idempotencyKey, CancellationToken ct = default);
     Task<PersistMessageResult> AddAsync(Message message, CancellationToken ct = default);
+    Task<PersistMessageResult> AddWithMediaAsync(Message message, IReadOnlyList<MediaId> mediaIds, DateTimeOffset attachedAtUtc, CancellationToken ct = default);
     Task UpdateAsync(Message message, CancellationToken ct = default);
     Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = 30, CancellationToken ct = default);
     Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, UserId callerId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = 30, CancellationToken ct = default);

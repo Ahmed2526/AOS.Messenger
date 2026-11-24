@@ -21,6 +21,7 @@ public sealed class Message : Entity<MessageId>
     public bool IsDeletedForEveryone { get; private set; }
     public DateTimeOffset? DeletedForEveryoneAtUtc { get; private set; }
     public MessageId? ParentMessageId { get; private set; }
+    public bool HasAttachments { get; private set; }
     public byte[] RowVersion { get; private set; } = [];
 
     private Message()
@@ -31,10 +32,11 @@ public sealed class Message : Entity<MessageId>
         ConversationId conversationId,
         UserId senderId,
         string idempotencyKey,
-        string content,
+        string? content,
         DateTimeOffset nowUtc,
         MessageId? parentMessageId = null,
-        MessageId? id = null)
+        MessageId? id = null,
+        bool hasAttachments = false)
     {
         ArgumentNullException.ThrowIfNull(conversationId);
         ArgumentNullException.ThrowIfNull(senderId);
@@ -50,15 +52,35 @@ public sealed class Message : Entity<MessageId>
             throw new DomainException("IdempotencyKey cannot exceed 128 characters.");
         }
 
-        if (!HasVisibleContent(content))
+        string? normalizedContent;
+        if (!hasAttachments)
         {
-            throw new DomainException("Message content cannot be empty.");
-        }
+            if (!HasVisibleContent(content))
+            {
+                throw new DomainException("Message content cannot be empty.");
+            }
 
-        var trimmed = content.Trim();
-        if (trimmed.Length > 4000)
+            var trimmed = content!.Trim();
+            if (trimmed.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            normalizedContent = trimmed;
+        }
+        else if (HasVisibleContent(content))
         {
-            throw new DomainException("Message content cannot exceed 4000 characters.");
+            var trimmed = content!.Trim();
+            if (trimmed.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            normalizedContent = trimmed;
+        }
+        else
+        {
+            normalizedContent = null;
         }
 
         return new Message
@@ -67,9 +89,10 @@ public sealed class Message : Entity<MessageId>
             ConversationId = conversationId,
             SenderId = senderId,
             IdempotencyKey = trimmedKey,
-            Content = trimmed,
+            Content = normalizedContent,
             CreatedAtUtc = nowUtc,
             ParentMessageId = parentMessageId,
+            HasAttachments = hasAttachments,
             IsDeletedForEveryone = false,
             RowVersion = []
         };
@@ -98,25 +121,43 @@ public sealed class Message : Entity<MessageId>
         return false;
     }
 
-    public void Edit(string newContent, DateTimeOffset nowUtc)
+    public void Edit(string? newContent, DateTimeOffset nowUtc)
     {
         if (IsDeletedForEveryone)
         {
             throw new DomainException("Cannot edit a message that has been deleted for everyone.");
         }
 
-        if (!HasVisibleContent(newContent))
+        if (!HasAttachments)
         {
-            throw new DomainException("Message content cannot be empty.");
+            if (!HasVisibleContent(newContent))
+            {
+                throw new DomainException("Message content cannot be empty.");
+            }
+
+            var trimmed = newContent!.Trim();
+            if (trimmed.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            Content = trimmed;
+        }
+        else if (HasVisibleContent(newContent))
+        {
+            var trimmed = newContent!.Trim();
+            if (trimmed.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            Content = trimmed;
+        }
+        else
+        {
+            Content = null;
         }
 
-        var trimmed = newContent.Trim();
-        if (trimmed.Length > 4000)
-        {
-            throw new DomainException("Message content cannot exceed 4000 characters.");
-        }
-
-        Content = trimmed;
         EditedAtUtc = nowUtc;
     }
 

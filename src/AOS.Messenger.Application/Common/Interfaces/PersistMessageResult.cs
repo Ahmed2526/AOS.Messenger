@@ -6,8 +6,12 @@ namespace AOS.Messenger.Application.Common.Interfaces;
 /// <summary>
 /// Result of persisting a message, indicating whether the message was newly created or resolved via idempotency.
 /// </summary>
-public sealed record PersistMessageResult(Message Message, bool IsNewlyCreated)
+public sealed record PersistMessageResult(
+    Message Message,
+    bool IsNewlyCreated,
+    IReadOnlyList<Media>? AttachedMedia = null)
 {
+    public IReadOnlyList<Media> AttachedMedia { get; init; } = AttachedMedia ?? [];
     public MessageId Id => Message.Id;
     public ConversationId ConversationId => Message.ConversationId;
     public UserId SenderId => Message.SenderId;

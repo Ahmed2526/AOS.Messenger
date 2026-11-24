@@ -44,3 +44,31 @@
         </div>
     </div>
 </div>
+
+<!-- Accessible Image Lightbox Modal -->
+<div id="media-lightbox-modal" role="dialog" aria-modal="true" aria-labelledby="media-lightbox-title" class="hidden fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/85 p-4 backdrop-blur-xs">
+    <div class="w-full max-w-4xl flex items-center justify-between gap-3 text-white mb-3">
+        <div class="flex items-center gap-2 min-w-0">
+            <h3 id="media-lightbox-title" class="text-xs sm:text-sm font-semibold truncate">Image preview</h3>
+            <span id="media-lightbox-counter" class="hidden text-xs text-white/75 shrink-0"></span>
+        </div>
+        <div class="flex items-center gap-2 shrink-0">
+            <button type="button" id="media-lightbox-download-btn" class="w-8 h-8 rounded-lg flex items-center justify-center text-white/90 hover:text-white hover:bg-white/15 transition-colors cursor-pointer" title="Download original" aria-label="Download image">
+                <span class="material-symbols-outlined text-[18px]">download</span>
+            </button>
+            <button type="button" id="media-lightbox-close-btn" class="w-8 h-8 rounded-lg flex items-center justify-center text-white/90 hover:text-white hover:bg-white/15 transition-colors cursor-pointer" title="Close (Esc)" aria-label="Close image viewer">
+                <span class="material-symbols-outlined text-[20px]">close</span>
+            </button>
+        </div>
+    </div>
+    <div class="relative flex items-center justify-center w-full max-w-4xl flex-1 min-h-0">
+        <button type="button" id="media-lightbox-prev-btn" class="hidden absolute left-2 z-10 w-10 h-10 rounded-full bg-black/50 hover:bg-black/75 text-white flex items-center justify-center transition-colors cursor-pointer" title="Previous image" aria-label="Previous image">
+            <span class="material-symbols-outlined text-[22px]">chevron_left</span>
+        </button>
+        <img id="media-lightbox-img" alt="" class="max-h-[78vh] max-w-[90vw] w-auto h-auto object-contain rounded-lg select-none" />
+        <div id="media-lightbox-error" class="hidden px-4 py-3 rounded-xl bg-white/10 text-white text-xs font-medium">Media unavailable</div>
+        <button type="button" id="media-lightbox-next-btn" class="hidden absolute right-2 z-10 w-10 h-10 rounded-full bg-black/50 hover:bg-black/75 text-white flex items-center justify-center transition-colors cursor-pointer" title="Next image" aria-label="Next image">
+            <span class="material-symbols-outlined text-[22px]">chevron_right</span>
+        </button>
+    </div>
+</div>

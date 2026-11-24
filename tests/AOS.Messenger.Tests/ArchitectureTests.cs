@@ -26,6 +26,7 @@ public class ArchitectureTests
     [
         typeof(IConversationService),
         typeof(IMessageService),
+        typeof(IMediaService),
         typeof(IBlockService),
         typeof(IProfileService),
         typeof(IUserDiscoveryService),
@@ -100,6 +101,18 @@ public class ArchitectureTests
         Assert.Contains(referencedAssemblies, name => name.Equals("AOS.Messenger.Application", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(referencedAssemblies, name => name.Equals("AOS.Messenger.Domain", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(referencedAssemblies, name => name.Contains("Web", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Infrastructure_InternalsVisibleTo_MustOnlyTarget_TestsAssembly()
+    {
+        var attributes = InfrastructureAssembly
+            .GetCustomAttributes<InternalsVisibleToAttribute>()
+            .ToList();
+
+        Assert.NotEmpty(attributes);
+        Assert.All(attributes, attr =>
+            Assert.Equal("AOS.Messenger.Tests", attr.AssemblyName, StringComparer.Ordinal));
     }
 
     [Fact]

@@ -13,6 +13,15 @@
     <!-- Transient Action Error Banner -->
     <div id="chat-action-error" role="alert" class="hidden absolute top-16 left-1/2 -translate-x-1/2 z-40 max-w-[calc(100vw-2rem)] rounded-xl bg-red-600 text-white px-3.5 py-2 text-xs font-medium shadow-lg"></div>
 
+    <!-- Drag-and-Drop Overlay -->
+    <div id="chat-dropzone-overlay" class="hidden pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-[#F8F6F3]/90 dark:bg-[#302F2C]/90 border-2 border-dashed border-[#B3929D] rounded-xl m-2">
+        <div class="flex flex-col items-center gap-2 text-center px-6 py-4 rounded-2xl bg-white/90 dark:bg-[#3A3835]/90 border border-[#E3DCD7] dark:border-[#514D48] shadow-md">
+            <span class="material-symbols-outlined text-[32px] text-[#B3929D]">upload_file</span>
+            <p class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2]">Drop files to attach (up to 5 files)</p>
+            <p class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">Images, videos, and documents are scanned before delivery</p>
+        </div>
+    </div>
+
     <!-- Top Chat Header -->
     <div id="active-conversation-header"
          data-peer-user-id=""
@@ -204,6 +213,7 @@
              data-next-cursor=""
              data-has-more="false">
         </div>
+        <div id="pending-uploads-container" class="space-y-3 flex flex-col empty:hidden"></div>
     </div>
 
     <!-- Fixed Message Composer Area -->
@@ -228,11 +238,36 @@
             </button>
         </div>
 
+        <!-- Pending Attachments Tray -->
+        <div id="composer-attachments-tray" class="hidden px-4 py-2 bg-[#F8F6F3]/90 dark:bg-[#302F2C]/80 border-b border-[#E3DCD7] dark:border-[#514D48]"></div>
+
         <!-- Composer Input Bar -->
         <div class="px-4 py-2.5 max-w-4xl mx-auto flex items-end gap-2">
-            <a asp-controller="Chat" asp-action="Attachments" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Attach File or Media">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
-            </a>
+            <div class="relative flex-shrink-0">
+                <button id="composer-attach-btn"
+                        type="button"
+                        disabled
+                        aria-label="Attach files"
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                        aria-controls="composer-attach-menu"
+                        title="Attach File or Media"
+                        class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                </button>
+                <div id="composer-attach-menu" role="menu" aria-label="Attachment options" class="hidden absolute bottom-full left-0 mb-2 w-48 rounded-xl bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-lg py-1.5 z-50 text-xs flex flex-col">
+                    <button type="button" role="menuitem" data-attach-choice="media" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                        <span class="material-symbols-outlined text-[18px] text-[#B3929D]">photo_library</span>
+                        <span>Photos &amp; Videos</span>
+                    </button>
+                    <button type="button" role="menuitem" data-attach-choice="document" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                        <span class="material-symbols-outlined text-[18px] text-[#A07860] dark:text-[#D8C080]">description</span>
+                        <span>Document</span>
+                    </button>
+                </div>
+                <input id="media-file-input" type="file" multiple class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" />
+                <input id="document-file-input" type="file" multiple class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/csv,application/zip" />
+            </div>
             <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
                 <textarea id="message-content-input" disabled maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
                 <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled aria-label="Add emoji" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Add Emoji">

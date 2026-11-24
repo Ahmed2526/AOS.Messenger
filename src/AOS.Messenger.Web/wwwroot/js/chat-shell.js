@@ -22,7 +22,8 @@ import {
     resetDocumentTitleState,
     updateDocumentTitleUnreadBadge,
     ensureSidebarBroadcastChannel,
-    syncSidebarConversations
+    syncSidebarConversations,
+    updateSidebarLastMessage
 } from './conversation-list.js';
 import { initChatActions } from './chat-actions.js';
 import { setupPresence } from './presence.js';
@@ -32,6 +33,8 @@ import { setupEmojiPicker } from './reactions.js';
 import { setupMessageActions } from './message-actions.js';
 import { createEmojiPicker } from './emoji-picker.js';
 import { createEmojiAutocomplete } from './emoji-autocomplete.js';
+import { createMediaLightbox } from './media-lightbox.js';
+import { createMediaUploader } from './media-uploader.js';
 
 const DEFAULT_SHELL_TITLE = 'A♡S Messenger - Desktop App';
 
@@ -60,6 +63,9 @@ export function initChatShell(overrides = {}) {
     let signalrClient = null;
     let composerEmojiPicker = null;
     let emojiAutocomplete = null;
+    let composer = null;
+    let mediaLightbox = null;
+    let mediaUploader = null;
     let scrollReadDebounce = null;
     let lastVisibilitySyncAt = 0;
 
@@ -102,6 +108,8 @@ export function initChatShell(overrides = {}) {
         }
         if (composerEmojiPicker) composerEmojiPicker.close();
         if (emojiAutocomplete) emojiAutocomplete.close();
+        if (mediaUploader) mediaUploader.abortAllAndWipe();
+        if (mediaLightbox) mediaLightbox.wipe();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -118,6 +126,8 @@ export function initChatShell(overrides = {}) {
         }
         if (composerEmojiPicker) composerEmojiPicker.close();
         if (emojiAutocomplete) emojiAutocomplete.close();
+        if (mediaUploader) mediaUploader.abortAllAndWipe();
+        if (mediaLightbox) mediaLightbox.wipe();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -153,13 +163,41 @@ export function initChatShell(overrides = {}) {
     const emojiPicker = setupEmojiPicker(getActiveConversationId, getCurrentUserId, { getSwitchEpoch });
     composerEmojiPicker = createEmojiPicker({ getUserId: getCurrentUserId });
     emojiAutocomplete = createEmojiAutocomplete({ getUserId: getCurrentUserId });
+    mediaLightbox = createMediaLightbox();
+    mediaUploader = createMediaUploader({
+        state,
+        onError: (msg) => composer?.showActionError(msg),
+        onUnauthorized: handleSessionExpired,
+        onMessageSent: (convId, sentMessage) => {
+            const msgId = messageRenderer.getMessageId(sentMessage);
+            const previewText = messageRenderer.formatMessagePreview(sentMessage);
+            updateSidebarLastMessage(convId, previewText, msgId, false, false, true);
+            if (typeof state.deleteDraft === 'function') {
+                state.deleteDraft(convId);
+            }
+            const isSameActive = state.activeConversationId
+                && String(state.activeConversationId).trim().toLowerCase() === String(convId).trim().toLowerCase()
+                && state.pendingConversationId === null;
+            if (isSameActive) {
+                const containerEl = document.getElementById('messages-container');
+                if (containerEl) {
+                    messageRenderer.insertMessageOrdered(containerEl, sentMessage, state.currentUserId, state.activeMeta);
+                }
+                if (msgId && state.messagesById && typeof state.messagesById.set === 'function') {
+                    state.messagesById.set(msgId, sentMessage);
+                }
+                messageRenderer.scrollToBottom(true);
+            }
+        }
+    });
+    mediaUploader.init();
     const messageActions = setupMessageActions(getActiveConversationId, getCurrentUserId, {
         getSwitchEpoch,
         emojiPicker: composerEmojiPicker,
-        emojiAutocomplete
+        emojiAutocomplete,
+        mediaLightbox
     });
 
-    let composer = null;
     signalrClient = createSignalRClient({
         state,
         onSessionExpired: handleSessionExpired,
@@ -176,6 +214,8 @@ export function initChatShell(overrides = {}) {
         onTypingIndicator: typingReceiver.handleTypingIndicator,
         onPresenceChanged: presence.handlePresenceChanged,
         onRefreshPresence: () => presence.fetchPresence(),
+        onIncomingMessage: (convId, msg) => mediaUploader.reconcileIncomingMessage(convId, msg),
+        onMessageDeleted: (msgId) => mediaLightbox.closeIfMessage(msgId),
         signalRLib: overrides.signalRLib || null
     });
 
@@ -184,9 +224,11 @@ export function initChatShell(overrides = {}) {
         state,
         typingEmitter,
         emojiPicker: composerEmojiPicker,
-        emojiAutocomplete
+        emojiAutocomplete,
+        mediaUploader
     });
     composer.init();
+    composer.registerTransientResetHook(() => mediaUploader.resetTrayForSwitch());
 
     function markVisibleIncoming() {
         if (!state.activeConversationId || state.pendingConversationId !== null) return;
@@ -208,6 +250,10 @@ export function initChatShell(overrides = {}) {
                 composerEmojiPicker.resetForSwitch();
                 emojiAutocomplete.resetForSwitch();
                 messageActions.resetForSwitch();
+                mediaLightbox.resetForSwitch();
+                mediaUploader.resetTrayForSwitch();
+                mediaUploader.clearRenderedPendingJobs();
+                mediaUploader.setLocked(true);
                 presence.resetHeaderPresence();
                 composer.resetTransientState();
                 composer.setLocked(true);
@@ -223,6 +269,7 @@ export function initChatShell(overrides = {}) {
 
                 composer.setText(state.getDraft(nextId));
                 composer.applyConversationPolicy(conversation);
+                mediaUploader.renderPendingJobsForConversation(nextId);
 
                 signalrClient.replayBufferedEvents(nextId, bufferedEvents);
                 signalrClient.notifyActiveConversation(nextId);
@@ -231,11 +278,15 @@ export function initChatShell(overrides = {}) {
             },
             onSwitchToEmpty: (prevId) => {
                 setActiveRow(null);
+                mediaLightbox.resetForSwitch();
+                mediaUploader.clearRenderedPendingJobs();
                 setDocumentBaseTitle(DEFAULT_SHELL_TITLE);
                 signalrClient.leaveActiveConversation(prevId);
             },
             onSwitchError: () => {
                 setActiveRow(null);
+                mediaLightbox.resetForSwitch();
+                mediaUploader.clearRenderedPendingJobs();
                 setDocumentBaseTitle(DEFAULT_SHELL_TITLE);
                 signalrClient.leaveActiveConversation();
             },
@@ -258,6 +309,8 @@ export function initChatShell(overrides = {}) {
         const initialName = state.activeMeta?.otherParticipantName ?? state.activeMeta?.OtherParticipantName;
         setDocumentBaseTitle(initialName ? `${initialName} - A♡S Messenger` : DEFAULT_SHELL_TITLE);
         composer.applyConversationPolicy(state.activeMeta);
+        messageRenderer.hydrateMediaElements(document.getElementById('messages-container'));
+        mediaUploader.renderPendingJobsForConversation(state.activeConversationId);
         messageRenderer.scrollToBottom(false);
         markVisibleIncoming();
     } else {
@@ -353,6 +406,8 @@ export function initChatShell(overrides = {}) {
         composerEmojiPicker.destroy();
         emojiAutocomplete.destroy();
         messageActions.destroy();
+        mediaUploader.destroy();
+        mediaLightbox.destroy();
         signalrClient.destroy();
     }
 
@@ -360,6 +415,8 @@ export function initChatShell(overrides = {}) {
         state,
         router,
         composer,
+        mediaUploader,
+        mediaLightbox,
         signalrClient,
         handleSessionExpired,
         destroy

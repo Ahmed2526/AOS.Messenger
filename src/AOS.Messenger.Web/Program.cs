@@ -21,6 +21,7 @@ var builder = WebApplication.CreateBuilder(args);
 // Service registration
 // --------------------------------------------------------------------------
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton(SecurityHeadersOptions.FromConfiguration(builder.Configuration));
 
 // Forwarded headers hardening - clear default networks/proxies and trust only configured ones
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
@@ -73,6 +74,7 @@ builder.Services.AddControllersWithViews(options =>
         options.JsonSerializerOptions.Converters.Add(new MessageIdJsonConverter());
         options.JsonSerializerOptions.Converters.Add(new UserIdJsonConverter());
         options.JsonSerializerOptions.Converters.Add(new ConversationIdJsonConverter());
+        options.JsonSerializerOptions.Converters.Add(new MediaIdJsonConverter());
     });
 
 builder.Services.AddRateLimiter(options =>
@@ -162,6 +164,45 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
                 QueueLimit = 0
             }));
+
+    options.AddPolicy("media-upload", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("media-cancel", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("media-download", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 240,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
 });
 
 builder.Services.AddSignalR(options =>
@@ -174,6 +215,7 @@ builder.Services.AddSignalR(options =>
         options.PayloadSerializerOptions.Converters.Add(new MessageIdJsonConverter());
         options.PayloadSerializerOptions.Converters.Add(new UserIdJsonConverter());
         options.PayloadSerializerOptions.Converters.Add(new ConversationIdJsonConverter());
+        options.PayloadSerializerOptions.Converters.Add(new MediaIdJsonConverter());
     });
 builder.Services.AddSingleton<SessionAndThrottleHubFilter>(sp =>
     new SessionAndThrottleHubFilter(
@@ -222,6 +264,8 @@ app.Use(async (context, next) =>
 app.UseAuthentication();
 app.UseRateLimiter();
 app.UseAuthorization();
+
+app.UseMiddleware<RequestSizeLimitEnforcementMiddleware>();
 
 // CSWSH protection: Enforce same-origin Origin header validation on SignalR endpoints
 app.UseMiddleware<SignalROriginValidationMiddleware>();

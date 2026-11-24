@@ -3,9 +3,10 @@ using AOS.Messenger.Domain.ValueObjects;
 namespace AOS.Messenger.Application.DTOs;
 
 public sealed record SendMessageRequestDto(
-    string Content,
+    string? Content,
     string IdempotencyKey,
-    MessageId? ReplyToMessageId = null);
+    MessageId? ReplyToMessageId = null,
+    IReadOnlyList<MediaId>? MediaIds = null);
 
 public sealed record MessageReplyDto(
     MessageId Id,
@@ -20,13 +21,14 @@ public sealed record MessageReplyDto(
 }
 
 public sealed record EditMessageRequestDto(
-    string Content);
+    string? Content);
 
 public sealed record MessageEditedDto(
     Guid ConversationId,
     long MessageId,
     string Content,
-    DateTimeOffset? EditedAtUtc);
+    DateTimeOffset? EditedAtUtc,
+    string? PreviewText = null);
 
 public sealed record MessageDeletedForMeDto(
     Guid ConversationId,
@@ -70,9 +72,11 @@ public sealed record MessageDto(
     bool IsDeletedForEveryone,
     MessageReplyDto? ReplyTo,
     bool IsOutgoing,
-    IReadOnlyList<ReactionSummaryDto>? Reactions = null)
+    IReadOnlyList<ReactionSummaryDto>? Reactions = null,
+    IReadOnlyList<MediaAttachmentDto>? Attachments = null)
 {
     public IReadOnlyList<ReactionSummaryDto> Reactions { get; init; } = Reactions ?? [];
+    public IReadOnlyList<MediaAttachmentDto> Attachments { get; init; } = Attachments ?? [];
 }
 
 public sealed record MessagesCursorPageDto(

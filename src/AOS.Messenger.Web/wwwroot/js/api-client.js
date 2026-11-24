@@ -318,3 +318,44 @@ export function markRead(conversationId, upToMessageId, { signal } = {}) {
 export function getPresence({ signal } = {}) {
     return apiFetch('/api/presence', { method: 'GET', signal });
 }
+
+/**
+ * Initiates a presigned upload for a pending media attachment.
+ */
+export function initiateMediaUpload(conversationId, payload, { signal } = {}) {
+    const url = `/api/conversations/${encodeURIComponent(conversationId)}/media/initiate`;
+    return apiFetch(url, { method: 'POST', body: payload, signal });
+}
+
+/**
+ * Verifies, sanitizes, and promotes a staged upload to permanent media storage.
+ */
+export function completeMediaUpload(conversationId, mediaId, { signal } = {}) {
+    const url = `/api/conversations/${encodeURIComponent(conversationId)}/media/${encodeURIComponent(mediaId)}/complete`;
+    return apiFetch(url, { method: 'POST', signal });
+}
+
+/**
+ * Cancels a pending or unattached uploaded media item and triggers cleanup.
+ */
+export function cancelMediaUpload(conversationId, mediaId, { signal } = {}) {
+    const url = `/api/conversations/${encodeURIComponent(conversationId)}/media/${encodeURIComponent(mediaId)}`;
+    return apiFetch(url, { method: 'DELETE', signal });
+}
+
+/**
+ * Resolves a short-lived signed download URL JSON payload for a message attachment.
+ */
+export function getMediaDownloadUrl(conversationId, messageId, mediaId, { download = false, signal } = {}) {
+    const base = `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/media/${encodeURIComponent(mediaId)}/url`;
+    const url = download ? `${base}?download=true` : base;
+    return apiFetch(url, { method: 'GET', signal });
+}
+
+/**
+ * Builds the cookie-authenticated inline/download redirect endpoint URL for images.
+ */
+export function buildMediaInlineUrl(conversationId, messageId, mediaId, { download = false } = {}) {
+    const base = `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/media/${encodeURIComponent(mediaId)}`;
+    return download ? `${base}?download=true` : base;
+}

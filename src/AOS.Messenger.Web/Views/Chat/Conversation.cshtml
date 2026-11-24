@@ -1,4 +1,5 @@
 @model AOS.Messenger.Web.Models.ChatConversationViewModel
+@using AOS.Messenger.Application.Common
 @using AOS.Messenger.Web.Helpers
 @{
     ViewData["Title"] = $"{Model.Conversation.OtherParticipantName} - A♡S Messenger";
@@ -48,6 +49,14 @@
         }
         return "U";
     }
+
+    public static string FormatFileSize(long bytes)
+    {
+        if (bytes < 1024) return $"{bytes} B";
+        if (bytes < 1024 * 1024) return $"{bytes / 1024.0:0.#} KB";
+        if (bytes < 1024L * 1024 * 1024) return $"{bytes / (1024.0 * 1024.0):0.#} MB";
+        return $"{bytes / (1024.0 * 1024.0 * 1024.0):0.##} GB";
+    }
 }
 
 <!-- Unified Chat Shell Root -->
@@ -74,6 +83,15 @@
 
     <!-- Transient Action Error Banner -->
     <div id="chat-action-error" role="alert" class="hidden absolute top-16 left-1/2 -translate-x-1/2 z-40 max-w-[calc(100vw-2rem)] rounded-xl bg-red-600 text-white px-3.5 py-2 text-xs font-medium shadow-lg"></div>
+
+    <!-- Drag-and-Drop Overlay -->
+    <div id="chat-dropzone-overlay" class="hidden pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-[#F8F6F3]/90 dark:bg-[#302F2C]/90 border-2 border-dashed border-[#B3929D] rounded-xl m-2">
+        <div class="flex flex-col items-center gap-2 text-center px-6 py-4 rounded-2xl bg-white/90 dark:bg-[#3A3835]/90 border border-[#E3DCD7] dark:border-[#514D48] shadow-md">
+            <span class="material-symbols-outlined text-[32px] text-[#B3929D]">upload_file</span>
+            <p class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2]">Drop files to attach (up to 5 files)</p>
+            <p class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">Images, videos, and documents are scanned before delivery</p>
+        </div>
+    </div>
 
     <!-- Top Chat Header -->
     <div id="active-conversation-header"
@@ -284,6 +302,18 @@
             @foreach (var message in Model.InitialMessages)
             {
                 var msgInitials = GetInitials(message.SenderName, message.SenderHandle);
+                var hasAttachments = !message.IsDeletedForEveryone && message.Attachments is { Count: > 0 };
+                var hasCaption = !string.IsNullOrEmpty(message.Content);
+                var formattedPreview = message.IsDeletedForEveryone
+                    ? "This message was deleted"
+                    : MediaPreviewFormatter.FormatPreview(message.Content, message.Attachments);
+                var imageAttachments = hasAttachments
+                    ? message.Attachments!.Where(a => string.Equals(a.Kind, "image", StringComparison.OrdinalIgnoreCase)).ToList()
+                    : [];
+                var otherAttachments = hasAttachments
+                    ? message.Attachments!.Where(a => !string.Equals(a.Kind, "image", StringComparison.OrdinalIgnoreCase)).ToList()
+                    : [];
+
                 if (message.IsOutgoing)
                 {
                     var receiptStatus = "sent";
@@ -303,14 +333,14 @@
                     }
 
                     <!-- Outgoing message (Right-aligned, warm rose) -->
-                    <div id="msg-@message.Id.Value" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                    <div id="msg-@message.Id.Value" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
                         @if (!message.IsDeletedForEveryone)
                         {
                             <div class="message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 flex items-center gap-0.5">
                                 <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
                                     <span class="material-symbols-outlined text-[16px]">add_reaction</span>
                                 </button>
-                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@message.Content">
+                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@formattedPreview">
                                     <span class="material-symbols-outlined text-[16px]">reply</span>
                                 </button>
                                 <button type="button" data-action="edit" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Edit message" aria-label="Edit message">
@@ -349,7 +379,89 @@
                             }
                             else
                             {
-                                <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)">@message.Content</div>
+                                if (hasAttachments)
+                                {
+                                    <div class="message-media-container mb-1.5 space-y-1.5">
+                                        @if (imageAttachments.Count == 1)
+                                        {
+                                            var img = imageAttachments[0];
+                                            <button type="button"
+                                                    data-lightbox-trigger="true"
+                                                    data-conversation-id="@Model.Conversation.Id.Value"
+                                                    data-message-id="@message.Id.Value"
+                                                    data-media-id="@img.Id.Value"
+                                                    data-file-name="@img.FileName"
+                                                    class="block w-full overflow-hidden rounded-xl bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer">
+                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                     alt="@img.FileName"
+                                                     width="@img.Width"
+                                                     height="@img.Height"
+                                                     loading="lazy"
+                                                     decoding="async"
+                                                     data-media-img="true"
+                                                     class="w-full h-auto max-h-80 object-contain rounded-xl" />
+                                            </button>
+                                        }
+                                        else if (imageAttachments.Count > 1)
+                                        {
+                                            <div class="grid grid-cols-2 gap-1.5">
+                                                @foreach (var img in imageAttachments)
+                                                {
+                                                    <button type="button"
+                                                            data-lightbox-trigger="true"
+                                                            data-conversation-id="@Model.Conversation.Id.Value"
+                                                            data-message-id="@message.Id.Value"
+                                                            data-media-id="@img.Id.Value"
+                                                            data-file-name="@img.FileName"
+                                                            class="block aspect-square overflow-hidden rounded-lg bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer">
+                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                             alt="@img.FileName"
+                                                             width="@img.Width"
+                                                             height="@img.Height"
+                                                             loading="lazy"
+                                                             decoding="async"
+                                                             data-media-img="true"
+                                                             class="w-full h-full aspect-square object-cover" />
+                                                    </button>
+                                                }
+                                            </div>
+                                        }
+                                        @foreach (var att in otherAttachments)
+                                        {
+                                            if (string.Equals(att.Kind, "video", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <div class="media-video-wrapper overflow-hidden rounded-xl bg-black/20" data-video-container="true">
+                                                    <video controls preload="metadata" playsinline
+                                                           class="w-full max-h-80 rounded-xl bg-black"
+                                                           data-media-video="true"
+                                                           data-conversation-id="@Model.Conversation.Id.Value"
+                                                           data-message-id="@message.Id.Value"
+                                                           data-media-id="@att.Id.Value"
+                                                           data-file-name="@att.FileName"></video>
+                                                    <div class="media-video-fallback hidden px-3 py-2 text-xs opacity-80">Media unavailable</div>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <button type="button"
+                                                        data-media-download="true"
+                                                        data-conversation-id="@Model.Conversation.Id.Value"
+                                                        data-message-id="@message.Id.Value"
+                                                        data-media-id="@att.Id.Value"
+                                                        data-file-name="@att.FileName"
+                                                        class="w-full max-w-xs min-w-0 flex items-center gap-2.5 px-3 py-2 rounded-xl bg-black/15 hover:bg-black/25 text-left transition-colors cursor-pointer">
+                                                    <span class="material-symbols-outlined text-[20px] shrink-0">description</span>
+                                                    <span class="flex-1 min-w-0">
+                                                        <span class="block text-xs font-semibold truncate">@att.FileName</span>
+                                                        <span class="block text-[10px] opacity-80">@FormatFileSize(att.SizeBytes)</span>
+                                                    </span>
+                                                    <span class="material-symbols-outlined text-[18px] shrink-0 opacity-90">download</span>
+                                                </button>
+                                            }
+                                        }
+                                    </div>
+                                }
+                                <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)@(hasCaption ? "" : " hidden")">@message.Content</div>
                             }
 
                             <div class="flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80">
@@ -379,7 +491,7 @@
                 else
                 {
                     <!-- Incoming message (Left-aligned, surface container) -->
-                    <div id="msg-@message.Id.Value" class="flex flex-wrap justify-start items-center gap-2.5 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="false" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                    <div id="msg-@message.Id.Value" class="flex flex-wrap justify-start items-center gap-2.5 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="false" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
                         <div class="w-8 h-8 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1">
                             @msgInitials
                         </div>
@@ -412,7 +524,89 @@
                             }
                             else
                             {
-                                <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)">@message.Content</div>
+                                if (hasAttachments)
+                                {
+                                    <div class="message-media-container mb-1.5 space-y-1.5">
+                                        @if (imageAttachments.Count == 1)
+                                        {
+                                            var img = imageAttachments[0];
+                                            <button type="button"
+                                                    data-lightbox-trigger="true"
+                                                    data-conversation-id="@Model.Conversation.Id.Value"
+                                                    data-message-id="@message.Id.Value"
+                                                    data-media-id="@img.Id.Value"
+                                                    data-file-name="@img.FileName"
+                                                    class="block w-full overflow-hidden rounded-xl bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer">
+                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                     alt="@img.FileName"
+                                                     width="@img.Width"
+                                                     height="@img.Height"
+                                                     loading="lazy"
+                                                     decoding="async"
+                                                     data-media-img="true"
+                                                     class="w-full h-auto max-h-80 object-contain rounded-xl" />
+                                            </button>
+                                        }
+                                        else if (imageAttachments.Count > 1)
+                                        {
+                                            <div class="grid grid-cols-2 gap-1.5">
+                                                @foreach (var img in imageAttachments)
+                                                {
+                                                    <button type="button"
+                                                            data-lightbox-trigger="true"
+                                                            data-conversation-id="@Model.Conversation.Id.Value"
+                                                            data-message-id="@message.Id.Value"
+                                                            data-media-id="@img.Id.Value"
+                                                            data-file-name="@img.FileName"
+                                                            class="block aspect-square overflow-hidden rounded-lg bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer">
+                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                             alt="@img.FileName"
+                                                             width="@img.Width"
+                                                             height="@img.Height"
+                                                             loading="lazy"
+                                                             decoding="async"
+                                                             data-media-img="true"
+                                                             class="w-full h-full aspect-square object-cover" />
+                                                    </button>
+                                                }
+                                            </div>
+                                        }
+                                        @foreach (var att in otherAttachments)
+                                        {
+                                            if (string.Equals(att.Kind, "video", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                <div class="media-video-wrapper overflow-hidden rounded-xl bg-black/10 dark:bg-black/25" data-video-container="true">
+                                                    <video controls preload="metadata" playsinline
+                                                           class="w-full max-h-80 rounded-xl bg-black"
+                                                           data-media-video="true"
+                                                           data-conversation-id="@Model.Conversation.Id.Value"
+                                                           data-message-id="@message.Id.Value"
+                                                           data-media-id="@att.Id.Value"
+                                                           data-file-name="@att.FileName"></video>
+                                                    <div class="media-video-fallback hidden px-3 py-2 text-xs text-[#6E6560] dark:text-[#C9C0B9]">Media unavailable</div>
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <button type="button"
+                                                        data-media-download="true"
+                                                        data-conversation-id="@Model.Conversation.Id.Value"
+                                                        data-message-id="@message.Id.Value"
+                                                        data-media-id="@att.Id.Value"
+                                                        data-file-name="@att.FileName"
+                                                        class="w-full max-w-xs min-w-0 flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] text-left transition-colors cursor-pointer">
+                                                    <span class="material-symbols-outlined text-[20px] text-[#735761] dark:text-[#E1BDC9] shrink-0">description</span>
+                                                    <span class="flex-1 min-w-0">
+                                                        <span class="block text-xs font-semibold truncate text-[#2B2725] dark:text-[#F0E9E2]">@att.FileName</span>
+                                                        <span class="block text-[10px] text-[#6E6560] dark:text-[#C9C0B9]">@FormatFileSize(att.SizeBytes)</span>
+                                                    </span>
+                                                    <span class="material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9] shrink-0">download</span>
+                                                </button>
+                                            }
+                                        }
+                                    </div>
+                                }
+                                <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)@(hasCaption ? "" : " hidden")">@message.Content</div>
                             }
 
                             <div class="flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]">
@@ -440,7 +634,7 @@
                                 <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
                                     <span class="material-symbols-outlined text-[16px]">add_reaction</span>
                                 </button>
-                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@message.Content">
+                                <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@formattedPreview">
                                     <span class="material-symbols-outlined text-[16px]">reply</span>
                                 </button>
                                 <button type="button" data-action="delete" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-red-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Delete message" aria-label="Delete message">
@@ -452,6 +646,7 @@
                 }
             }
         </div>
+        <div id="pending-uploads-container" class="space-y-3 flex flex-col empty:hidden"></div>
     </div>
 
     <!-- Fixed Message Composer Area -->
@@ -490,11 +685,36 @@
             </button>
         </div>
 
+        <!-- Pending Attachments Tray -->
+        <div id="composer-attachments-tray" class="hidden px-4 py-2 bg-[#F8F6F3]/90 dark:bg-[#302F2C]/80 border-b border-[#E3DCD7] dark:border-[#514D48]"></div>
+
         <!-- Composer Input Bar -->
         <div class="px-4 py-2.5 max-w-4xl mx-auto flex items-end gap-2">
-            <a asp-controller="Chat" asp-action="Attachments" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Attach File or Media">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
-            </a>
+            <div class="relative flex-shrink-0">
+                <button id="composer-attach-btn"
+                        type="button"
+                        disabled="@(!Model.Conversation.CanSend ? "disabled" : null)"
+                        aria-label="Attach files"
+                        aria-haspopup="menu"
+                        aria-expanded="false"
+                        aria-controls="composer-attach-menu"
+                        title="Attach File or Media"
+                        class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                </button>
+                <div id="composer-attach-menu" role="menu" aria-label="Attachment options" class="hidden absolute bottom-full left-0 mb-2 w-48 rounded-xl bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-lg py-1.5 z-50 text-xs flex flex-col">
+                    <button type="button" role="menuitem" data-attach-choice="media" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                        <span class="material-symbols-outlined text-[18px] text-[#B3929D]">photo_library</span>
+                        <span>Photos &amp; Videos</span>
+                    </button>
+                    <button type="button" role="menuitem" data-attach-choice="document" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                        <span class="material-symbols-outlined text-[18px] text-[#A07860] dark:text-[#D8C080]">description</span>
+                        <span>Document</span>
+                    </button>
+                </div>
+                <input id="media-file-input" type="file" multiple class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" />
+                <input id="document-file-input" type="file" multiple class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/csv,application/zip" />
+            </div>
             <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
                 <textarea id="message-content-input" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
                 <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" aria-label="Add emoji" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Add Emoji">

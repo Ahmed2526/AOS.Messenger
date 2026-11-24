@@ -270,6 +270,73 @@ public class ExceptionHandlingMiddlewareTests
         Assert.Contains("/css/app.css", html);
     }
 
+    [Fact]
+    public async Task InvokeAsync_MediaStorageException_Returns503WithEnvironmentScrubbingAndConfiguredCsp()
+    {
+        var securityOptions = SecurityHeadersOptions.FromServiceUrl("https://acct999.r2.cloudflarestorage.com");
+
+        var prodCtx = CreateHttpContext();
+        var prodMiddleware = new ExceptionHandlingMiddleware(
+            next: _ => throw new MediaStorageException("R2 secret key mismatch on bucket"),
+            logger: NullLogger<ExceptionHandlingMiddleware>.Instance,
+            environment: new TestHostEnvironment { EnvironmentName = "Production" },
+            securityHeadersOptions: securityOptions);
+
+        await prodMiddleware.InvokeAsync(prodCtx);
+
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, prodCtx.Response.StatusCode);
+        Assert.Equal("application/problem+json", prodCtx.Response.ContentType);
+        Assert.Equal(securityOptions.ContentSecurityPolicy, prodCtx.Response.Headers["Content-Security-Policy"]);
+
+        var prodJson = await ReadResponseBodyAsync(prodCtx);
+        using (var doc = JsonDocument.Parse(prodJson))
+        {
+            var root = doc.RootElement;
+            Assert.Equal(503, root.GetProperty("status").GetInt32());
+            Assert.Equal("Service Unavailable", root.GetProperty("title").GetString());
+            Assert.Equal("Media storage is temporarily unavailable. Please try again.", root.GetProperty("detail").GetString());
+            Assert.DoesNotContain("secret", prodJson, StringComparison.OrdinalIgnoreCase);
+        }
+
+        var devCtx = CreateHttpContext();
+        var devMiddleware = new ExceptionHandlingMiddleware(
+            next: _ => throw new MediaStorageException("R2 request timeout"),
+            logger: NullLogger<ExceptionHandlingMiddleware>.Instance,
+            environment: new TestHostEnvironment { EnvironmentName = "Development" },
+            securityHeadersOptions: securityOptions);
+
+        await devMiddleware.InvokeAsync(devCtx);
+
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, devCtx.Response.StatusCode);
+        var devJson = await ReadResponseBodyAsync(devCtx);
+        Assert.Contains("R2 request timeout", devJson);
+    }
+
+    [Fact]
+    public async Task InvokeAsync_BadHttpRequestException413_Returns413WithNoStoreAndScrubbedDetail()
+    {
+        var context = CreateHttpContext();
+        var middleware = new ExceptionHandlingMiddleware(
+            next: _ => throw new BadHttpRequestException(
+                "Internal Kestrel detail: Request body too large.",
+                StatusCodes.Status413PayloadTooLarge),
+            logger: NullLogger<ExceptionHandlingMiddleware>.Instance);
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal((int)HttpStatusCode.RequestEntityTooLarge, context.Response.StatusCode);
+        Assert.Equal("application/problem+json", context.Response.ContentType);
+        Assert.Contains("no-store", context.Response.Headers.CacheControl.ToString(), StringComparison.OrdinalIgnoreCase);
+
+        var json = await ReadResponseBodyAsync(context);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal(413, root.GetProperty("status").GetInt32());
+        Assert.Equal("Payload Too Large", root.GetProperty("title").GetString());
+        Assert.Equal("Request payload exceeds the maximum allowed size.", root.GetProperty("detail").GetString());
+        Assert.DoesNotContain("Kestrel", json, StringComparison.OrdinalIgnoreCase);
+    }
+
     private sealed class TestHostEnvironment : IHostEnvironment
     {
         public string EnvironmentName { get; set; } = "Production";

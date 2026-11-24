@@ -5,6 +5,7 @@ using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Domain.Constants;
 using AOS.Messenger.Domain.Entities;
+using AOS.Messenger.Domain.Enums;
 using AOS.Messenger.Domain.Exceptions;
 using AOS.Messenger.Domain.ValueObjects;
 using Microsoft.Extensions.DependencyInjection;
@@ -26,6 +27,7 @@ public sealed class MessageService : IMessageService
     private readonly IUserReader _userReader;
     private readonly IRealtimeNotifier _realtimeNotifier;
     private readonly IReactionPersistence _reactionPersistence;
+    private readonly IMediaPersistence _mediaPersistence;
     private readonly ILogger<MessageService> _logger;
     private readonly TimeProvider _timeProvider;
 
@@ -38,7 +40,8 @@ public sealed class MessageService : IMessageService
         IRealtimeNotifier realtimeNotifier,
         IReactionPersistence reactionPersistence,
         ILogger<MessageService> logger,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMediaPersistence? mediaPersistence = null)
     {
         ArgumentNullException.ThrowIfNull(messagePersistence);
         ArgumentNullException.ThrowIfNull(conversationPersistence);
@@ -54,6 +57,7 @@ public sealed class MessageService : IMessageService
         _userReader = userReader;
         _realtimeNotifier = realtimeNotifier;
         _reactionPersistence = reactionPersistence;
+        _mediaPersistence = mediaPersistence ?? NullMediaPersistence.Instance;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -105,15 +109,45 @@ public sealed class MessageService : IMessageService
         ArgumentNullException.ThrowIfNull(conversationId);
         ArgumentNullException.ThrowIfNull(dto);
 
-        if (!Message.HasVisibleContent(dto.Content))
+        var mediaIds = dto.MediaIds;
+        var hasAttachments = mediaIds is { Count: > 0 };
+        if (hasAttachments)
         {
-            throw new DomainException("Message content cannot be empty or whitespace.");
+            if (mediaIds!.Count > MediaConstraints.MaxAttachmentsPerMessage)
+            {
+                throw new DomainException(
+                    $"A message cannot have more than {MediaConstraints.MaxAttachmentsPerMessage} attachments.");
+            }
+
+            var uniqueIds = new HashSet<MediaId>();
+            foreach (var mediaId in mediaIds)
+            {
+                if (mediaId is null)
+                {
+                    throw new DomainException("Media attachment identifiers cannot be null.");
+                }
+
+                if (!uniqueIds.Add(mediaId))
+                {
+                    throw new DomainException("Duplicate media attachments in the same message are not allowed.");
+                }
+            }
         }
 
-        var trimmedContent = dto.Content.Trim();
-        if (trimmedContent.Length > 4000)
+        string? normalizedContent = null;
+        if (Message.HasVisibleContent(dto.Content))
         {
-            throw new DomainException("Message content cannot exceed 4000 characters.");
+            var trimmedContent = dto.Content!.Trim();
+            if (trimmedContent.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            normalizedContent = trimmedContent;
+        }
+        else if (!hasAttachments)
+        {
+            throw new DomainException("Message content cannot be empty or whitespace.");
         }
 
         if (string.IsNullOrWhiteSpace(dto.IdempotencyKey))
@@ -169,15 +203,24 @@ public sealed class MessageService : IMessageService
             }
         }
 
+        var nowUtc = _timeProvider.GetUtcNow();
         var message = Message.Create(
             conversationId,
             senderId,
             trimmedIdempotencyKey,
-            trimmedContent,
-            _timeProvider.GetUtcNow(),
-            dto.ReplyToMessageId);
+            normalizedContent,
+            nowUtc,
+            dto.ReplyToMessageId,
+            hasAttachments: hasAttachments);
 
-        var (persisted, isNewlyCreated) = await _messagePersistence.AddAsync(message, ct);
+        var persistResult = hasAttachments
+            ? await _messagePersistence.AddWithMediaAsync(message, mediaIds!, nowUtc, ct)
+            : await _messagePersistence.AddAsync(message, ct);
+
+        var (persisted, isNewlyCreated, attachedMedia) = (
+            persistResult.Message,
+            persistResult.IsNewlyCreated,
+            persistResult.AttachedMedia);
 
         MessageReplyDto? replyDto = null;
         if (persisted.ParentMessageId is not null)
@@ -190,10 +233,18 @@ public sealed class MessageService : IMessageService
             {
                 var parentSenderProfile = await _userReader.GetByIdAsync(parent.SenderId, ct);
                 var parentSenderName = FormatDisplayName(parentSenderProfile);
-                var parentContent = parent.Content ?? string.Empty;
+                IReadOnlyList<Media>? parentMedia = null;
+                if (!parent.IsDeletedForEveryone && parent.HasAttachments)
+                {
+                    var parentMediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [parent.Id], ct);
+                    parentMediaMap.TryGetValue(parent.Id, out parentMedia);
+                }
+
                 var preview = parent.IsDeletedForEveryone
                     ? "This message was deleted."
-                    : TruncatePreview(parentContent);
+                    : parentMedia is { Count: > 0 }
+                        ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
+                        : TruncatePreview(parent.Content ?? string.Empty);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -201,6 +252,26 @@ public sealed class MessageService : IMessageService
                     parentSenderName,
                     preview,
                     parent.IsDeletedForEveryone);
+            }
+        }
+
+        IReadOnlyList<MediaAttachmentDto> attachmentDtos = [];
+        if (!persisted.IsDeletedForEveryone)
+        {
+            IReadOnlyList<Media>? resolvedMedia = attachedMedia;
+            if ((resolvedMedia is null || resolvedMedia.Count == 0) && persisted.HasAttachments)
+            {
+                var msgMediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [persisted.Id], ct);
+                msgMediaMap.TryGetValue(persisted.Id, out resolvedMedia);
+            }
+
+            if (resolvedMedia is { Count: > 0 })
+            {
+                attachmentDtos = resolvedMedia
+                    .OrderBy(m => m.DisplayOrder)
+                    .ThenBy(m => m.Id.Value)
+                    .Select(ToMediaAttachmentDto)
+                    .ToList();
             }
         }
 
@@ -220,7 +291,8 @@ public sealed class MessageService : IMessageService
             persisted.IsDeletedForEveryone,
             replyDto,
             IsOutgoing: true,
-            Reactions: []);
+            Reactions: [],
+            Attachments: attachmentDtos);
 
         if (isNewlyCreated)
         {
@@ -331,6 +403,31 @@ public sealed class MessageService : IMessageService
             ? await _reactionPersistence.GetReactionsForMessagesAsync(conversationId, messageIds, callerId, ct)
             : new Dictionary<MessageId, IReadOnlyList<ReactionSummaryDto>>();
 
+        // Batch load attachments for non-tombstoned page messages AND visible non-tombstoned reply parents
+        var mediaMessageIds = new HashSet<MessageId>();
+        foreach (var m in pageItems)
+        {
+            if (!m.IsDeletedForEveryone && m.HasAttachments)
+            {
+                mediaMessageIds.Add(m.Id);
+            }
+        }
+
+        foreach (var parent in parentMessages.Values)
+        {
+            if (!hiddenParentIds.Contains(parent.Id)
+                && (!effectiveCutoffUtc.HasValue || parent.CreatedAtUtc >= effectiveCutoffUtc.Value)
+                && !parent.IsDeletedForEveryone
+                && parent.HasAttachments)
+            {
+                mediaMessageIds.Add(parent.Id);
+            }
+        }
+
+        var mediaByMessage = mediaMessageIds.Count > 0
+            ? await _mediaPersistence.GetByMessageIdsAsync(conversationId, mediaMessageIds, ct)
+            : new Dictionary<MessageId, IReadOnlyList<Media>>();
+
         var dtos = new List<MessageDto>(pageItems.Count);
         foreach (var m in pageItems)
         {
@@ -346,10 +443,17 @@ public sealed class MessageService : IMessageService
             {
                 profiles.TryGetValue(parent.SenderId, out var parentProfile);
                 var parentName = FormatDisplayName(parentProfile);
-                var parentContent = parent.Content ?? string.Empty;
+                IReadOnlyList<Media>? parentMedia = null;
+                if (!parent.IsDeletedForEveryone && parent.HasAttachments)
+                {
+                    mediaByMessage.TryGetValue(parent.Id, out parentMedia);
+                }
+
                 var preview = parent.IsDeletedForEveryone
                     ? "This message was deleted."
-                    : TruncatePreview(parentContent);
+                    : parentMedia is { Count: > 0 }
+                        ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
+                        : TruncatePreview(parent.Content ?? string.Empty);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -361,6 +465,14 @@ public sealed class MessageService : IMessageService
 
             var isOutgoing = m.SenderId == callerId;
             reactionsByMessage.TryGetValue(m.Id, out var reactions);
+            IReadOnlyList<MediaAttachmentDto> attachments = !m.IsDeletedForEveryone
+                && mediaByMessage.TryGetValue(m.Id, out var msgMedia)
+                ? msgMedia
+                    .OrderBy(a => a.DisplayOrder)
+                    .ThenBy(a => a.Id.Value)
+                    .Select(ToMediaAttachmentDto)
+                    .ToList()
+                : [];
 
             dtos.Add(new MessageDto(
                 m.Id,
@@ -374,7 +486,8 @@ public sealed class MessageService : IMessageService
                 m.IsDeletedForEveryone,
                 replyDto,
                 isOutgoing,
-                reactions ?? []));
+                reactions ?? [],
+                attachments));
         }
 
         return new MessagesCursorPageDto(dtos, nextCursor, hasMore);
@@ -428,35 +541,51 @@ public sealed class MessageService : IMessageService
 
         await EnsureMessageVisibleToUserAsync(conversationId, message, callerId, ct);
 
-        if (!Message.HasVisibleContent(dto.Content))
+        string? normalizedNewContent = null;
+        if (Message.HasVisibleContent(dto.Content))
+        {
+            var trimmedContent = dto.Content!.Trim();
+            if (trimmedContent.Length > 4000)
+            {
+                throw new DomainException("Message content cannot exceed 4000 characters.");
+            }
+
+            normalizedNewContent = trimmedContent;
+        }
+        else if (!message.HasAttachments)
         {
             throw new DomainException("Message content cannot be empty.");
         }
 
-        var trimmedContent = dto.Content.Trim();
-        if (trimmedContent.Length > 4000)
+        IReadOnlyList<Media>? attachedMedia = null;
+        if (message.HasAttachments)
         {
-            throw new DomainException("Message content cannot exceed 4000 characters.");
+            var mediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [message.Id], ct);
+            mediaMap.TryGetValue(message.Id, out attachedMedia);
         }
 
-        if (string.Equals(trimmedContent, message.Content, StringComparison.Ordinal))
+        if (string.Equals(normalizedNewContent, message.Content, StringComparison.Ordinal))
         {
+            var unchangedPreview = MediaPreviewFormatter.FormatPreview(message.Content, attachedMedia);
             return new MessageEditedDto(
                 conversationId.Value,
                 message.Id.Value,
-                message.Content!,
-                message.EditedAtUtc);
+                message.Content ?? string.Empty,
+                message.EditedAtUtc,
+                unchangedPreview);
         }
 
         var nowUtc = _timeProvider.GetUtcNow();
-        message.Edit(trimmedContent, nowUtc);
+        message.Edit(normalizedNewContent, nowUtc);
         await _messagePersistence.UpdateAsync(message, ct);
 
+        var previewText = MediaPreviewFormatter.FormatPreview(message.Content, attachedMedia);
         var editedDto = new MessageEditedDto(
             conversationId.Value,
             message.Id.Value,
-            message.Content!,
-            message.EditedAtUtc);
+            message.Content ?? string.Empty,
+            message.EditedAtUtc,
+            previewText);
 
         try
         {
@@ -514,9 +643,20 @@ public sealed class MessageService : IMessageService
             (!cutoff.HasValue || lastMessage.CreatedAtUtc >= cutoff.Value))
         {
             newLastMessageId = lastMessage.Id.Value;
-            newLastMessagePreview = lastMessage.IsDeletedForEveryone
-                ? "This message was deleted"
-                : lastMessage.Content;
+            if (lastMessage.IsDeletedForEveryone)
+            {
+                newLastMessagePreview = "This message was deleted";
+            }
+            else if (lastMessage.HasAttachments)
+            {
+                var mediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [lastMessage.Id], ct);
+                mediaMap.TryGetValue(lastMessage.Id, out var lastMsgMedia);
+                newLastMessagePreview = MediaPreviewFormatter.FormatPreview(lastMessage.Content, lastMsgMedia);
+            }
+            else
+            {
+                newLastMessagePreview = lastMessage.Content;
+            }
         }
 
         var deletedForMeDto = new MessageDeletedForMeDto(
@@ -874,6 +1014,20 @@ public sealed class MessageService : IMessageService
         {
             return false;
         }
+    }
+
+    private static MediaAttachmentDto ToMediaAttachmentDto(Media media)
+    {
+        return new MediaAttachmentDto(
+            media.Id,
+            media.Kind.ToApiString(),
+            media.SanitizedFileName,
+            media.VerifiedContentType ?? media.DeclaredContentType,
+            media.VerifiedSizeBytes ?? media.DeclaredSizeBytes,
+            media.Width,
+            media.Height,
+            media.DurationMs,
+            media.DisplayOrder);
     }
 }
 

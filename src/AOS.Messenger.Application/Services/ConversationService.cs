@@ -19,6 +19,7 @@ public sealed class ConversationService : IConversationService
     private readonly IBlockService _blockService;
     private readonly IOnlinePresenceTracker _onlinePresenceTracker;
     private readonly IUserPresencePersistence? _userPresencePersistence;
+    private readonly IMediaPersistence _mediaPersistence;
     private readonly TimeProvider _timeProvider;
 
     public ConversationService(
@@ -28,7 +29,8 @@ public sealed class ConversationService : IConversationService
         IBlockService blockService,
         IOnlinePresenceTracker? onlinePresenceTracker = null,
         IUserPresencePersistence? userPresencePersistence = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IMediaPersistence? mediaPersistence = null)
     {
         _conversationPersistence = conversationPersistence;
         _userReader = userReader;
@@ -36,6 +38,7 @@ public sealed class ConversationService : IConversationService
         _blockService = blockService;
         _onlinePresenceTracker = onlinePresenceTracker ?? NullOnlinePresenceTracker.Instance;
         _userPresencePersistence = userPresencePersistence;
+        _mediaPersistence = mediaPersistence ?? NullMediaPersistence.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -213,6 +216,25 @@ public sealed class ConversationService : IConversationService
         var allConversationStates = await _conversationPersistence.GetUserStatesForConversationsAsync(activeConvIds, ct);
         var stateByConvAndUser = allConversationStates.ToDictionary(s => (s.ConversationId, s.UserId));
 
+        var mediaLookupKeys = new List<(ConversationId ConversationId, MessageId MessageId)>();
+        foreach (var conversation in activeConversations)
+        {
+            stateByConversationId.TryGetValue(conversation.Id, out var state);
+            var minCreatedAtUtc = ComputeEffectiveCutoffUtc(state);
+
+            if (lastMessages.TryGetValue(conversation.Id, out var lm)
+                && (!minCreatedAtUtc.HasValue || lm.CreatedAtUtc >= minCreatedAtUtc.Value)
+                && !lm.IsDeletedForEveryone
+                && lm.HasAttachments)
+            {
+                mediaLookupKeys.Add((conversation.Id, lm.Id));
+            }
+        }
+
+        var lastMessageMedia = mediaLookupKeys.Count > 0
+            ? await _mediaPersistence.GetByMessageIdsAcrossConversationsAsync(mediaLookupKeys, ct)
+            : new Dictionary<(ConversationId ConversationId, MessageId MessageId), IReadOnlyList<Media>>();
+
         var summaries = new List<ConversationSummaryDto>(activeConversations.Count);
 
         foreach (var conversation in activeConversations)
@@ -223,14 +245,7 @@ public sealed class ConversationService : IConversationService
             var isPinned = state?.IsPinned ?? false;
             var isMuted = state?.MutedAtUtc != null;
 
-            DateTimeOffset? minCreatedAtUtc = state?.ClearedAtUtc;
-            if (state?.DeletedAtUtc is not null)
-            {
-                if (!minCreatedAtUtc.HasValue || state.DeletedAtUtc.Value > minCreatedAtUtc.Value)
-                {
-                    minCreatedAtUtc = state.DeletedAtUtc.Value;
-                }
-            }
+            var minCreatedAtUtc = ComputeEffectiveCutoffUtc(state);
 
             lastMessages.TryGetValue(conversation.Id, out var lastMessage);
             if (lastMessage is not null && minCreatedAtUtc.HasValue && lastMessage.CreatedAtUtc < minCreatedAtUtc.Value)
@@ -244,9 +259,19 @@ public sealed class ConversationService : IConversationService
             if (lastMessage is not null)
             {
                 lastActivityAtUtc = lastMessage.CreatedAtUtc;
-                lastMessagePreview = lastMessage.IsDeletedForEveryone
-                    ? "This message was deleted"
-                    : lastMessage.Content;
+                if (lastMessage.IsDeletedForEveryone)
+                {
+                    lastMessagePreview = "This message was deleted";
+                }
+                else if (lastMessage.HasAttachments)
+                {
+                    lastMessageMedia.TryGetValue((conversation.Id, lastMessage.Id), out var attachments);
+                    lastMessagePreview = MediaPreviewFormatter.FormatPreview(lastMessage.Content, attachments);
+                }
+                else
+                {
+                    lastMessagePreview = lastMessage.Content;
+                }
             }
 
             unreadCounts.TryGetValue(conversation.Id, out var unreadCount);
@@ -547,5 +572,17 @@ public sealed class ConversationService : IConversationService
             peerRead,
             isPeerDeleted,
             canSend);
+    }
+
+    private static DateTimeOffset? ComputeEffectiveCutoffUtc(UserConversationState? state)
+    {
+        DateTimeOffset? cutoff = state?.ClearedAtUtc;
+        if (state?.DeletedAtUtc is not null &&
+            (!cutoff.HasValue || state.DeletedAtUtc.Value > cutoff.Value))
+        {
+            cutoff = state.DeletedAtUtc.Value;
+        }
+
+        return cutoff;
     }
 }

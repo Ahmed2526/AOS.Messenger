@@ -24,6 +24,7 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityR
     public DbSet<UserSession> UserSessions => Set<UserSession>();
     public DbSet<UserMessageDeletion> UserMessageDeletions => Set<UserMessageDeletion>();
     public DbSet<MessageReaction> MessageReactions => Set<MessageReaction>();
+    public DbSet<Media> Media => Set<Media>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

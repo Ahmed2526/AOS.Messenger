@@ -80,3 +80,29 @@ public sealed class NullableMessageIdConverter : ValueConverter<MessageId?, long
     {
     }
 }
+
+/// <summary>
+/// EF Core ValueConverter for domain-neutral strongly-typed MediaId to Guid.
+/// </summary>
+public sealed class MediaIdConverter : ValueConverter<MediaId, Guid>
+{
+    public MediaIdConverter()
+        : base(
+            id => id == null ? Guid.Empty : id.Value,
+            value => MediaId.From(value))
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for nullable MediaId to nullable Guid.
+/// </summary>
+public sealed class NullableMediaIdConverter : ValueConverter<MediaId?, Guid?>
+{
+    public NullableMediaIdConverter()
+        : base(
+            id => id == null ? null : id.Value,
+            value => value.HasValue ? MediaId.From(value.Value) : null)
+    {
+    }
+}

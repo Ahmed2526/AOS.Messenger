@@ -860,6 +860,12 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             return Task.FromResult(new PersistMessageResult(message, IsNewlyCreated: true));
         }
 
+        public Task<PersistMessageResult> AddWithMediaAsync(Message message, IReadOnlyList<MediaId> mediaIds, DateTimeOffset attachedAtUtc, CancellationToken ct = default)
+        {
+            _executionLog.Add("IMessagePersistence.AddWithMediaAsync");
+            return Task.FromResult(new PersistMessageResult(message, IsNewlyCreated: true));
+        }
+
         public Task<Message?> GetByIdAsync(ConversationId conversationId, MessageId id, CancellationToken ct = default) => Task.FromResult<Message?>(null);
         public Task<IReadOnlyDictionary<MessageId, Message>> GetByIdsAsync(ConversationId conversationId, IEnumerable<MessageId> ids, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyDictionary<MessageId, Message>>(new Dictionary<MessageId, Message>());
@@ -885,6 +891,7 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         }
 
         public Task<PersistMessageResult> AddAsync(Message message, CancellationToken ct = default) => throw _exception;
+        public Task<PersistMessageResult> AddWithMediaAsync(Message message, IReadOnlyList<MediaId> mediaIds, DateTimeOffset attachedAtUtc, CancellationToken ct = default) => throw _exception;
         public Task<Message?> GetByIdAsync(ConversationId conversationId, MessageId id, CancellationToken ct = default) => Task.FromResult<Message?>(null);
         public Task<IReadOnlyDictionary<MessageId, Message>> GetByIdsAsync(ConversationId conversationId, IEnumerable<MessageId> ids, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyDictionary<MessageId, Message>>(new Dictionary<MessageId, Message>());
@@ -912,6 +919,12 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         public Task<PersistMessageResult> AddAsync(Message message, CancellationToken ct = default)
         {
             _executionLog.Add("IMessagePersistence.AddAsync");
+            return Task.FromResult(new PersistMessageResult(message, IsNewlyCreated: false));
+        }
+
+        public Task<PersistMessageResult> AddWithMediaAsync(Message message, IReadOnlyList<MediaId> mediaIds, DateTimeOffset attachedAtUtc, CancellationToken ct = default)
+        {
+            _executionLog.Add("IMessagePersistence.AddWithMediaAsync");
             return Task.FromResult(new PersistMessageResult(message, IsNewlyCreated: false));
         }
 

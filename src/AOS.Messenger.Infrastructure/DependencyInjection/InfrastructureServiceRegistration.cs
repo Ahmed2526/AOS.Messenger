@@ -1,17 +1,22 @@
 using System.Security.Claims;
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Infrastructure.Identity;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
+using AOS.Messenger.Infrastructure.Storage;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 
 namespace AOS.Messenger.Infrastructure;
 
@@ -165,9 +170,64 @@ public static class InfrastructureServiceRegistration
         services.AddScoped<IUserPresencePersistence, UserPresencePersistence>();
         services.AddScoped<IMessagePersistence, MessagePersistence>();
         services.AddScoped<IReactionPersistence, ReactionPersistence>();
+        services.AddScoped<IMediaPersistence, MediaPersistence>();
+
+        services.AddOptions<MediaOptions>()
+            .Bind(configuration.GetSection(MediaOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<MediaOptions>, MediaOptionsValidator>();
+
+        services.AddOptions<R2StorageOptions>()
+            .Bind(configuration.GetSection(R2StorageOptions.SectionName))
+            .ValidateOnStart();
+        services.AddSingleton<IValidateOptions<R2StorageOptions>>(sp =>
+            new R2StorageOptionsValidator(sp.GetService<IHostEnvironment>()));
+
+        services.AddSingleton<LocalMediaSigningService>();
+        services.AddSingleton(sp =>
+        {
+            var signingService = sp.GetRequiredService<LocalMediaSigningService>();
+            var environment = sp.GetService<IHostEnvironment>();
+            var configuredRoot = configuration["Media:LocalStoragePath"];
+            var rootDirectory = !string.IsNullOrWhiteSpace(configuredRoot)
+                ? configuredRoot
+                : Path.Combine(environment?.ContentRootPath ?? Directory.GetCurrentDirectory(), ".dev-media");
+            return new LocalDiskMediaStorage(signingService, rootDirectory);
+        });
+
+        services.AddSingleton<IMediaStorage>(sp =>
+        {
+            var r2Options = sp.GetRequiredService<IOptions<R2StorageOptions>>().Value;
+            if (r2Options.IsConfigured)
+            {
+                return ActivatorUtilities.CreateInstance<CloudflareR2MediaStorage>(sp);
+            }
+
+            var environment = sp.GetService<IHostEnvironment>();
+            if (environment is not null && !environment.IsDevelopment())
+            {
+                throw new InvalidOperationException(
+                    "Cloudflare R2 storage configuration ('R2:ServiceUrl', 'R2:BucketName', 'R2:AccessKeyId', 'R2:SecretAccessKey') is required outside Development.");
+            }
+
+            return sp.GetRequiredService<LocalDiskMediaStorage>();
+        });
+
+        services.AddSingleton<IMediaVerifier, MediaVerifier>();
+
+        services.AddTransient<IStartupFilter>(sp =>
+            new DevMediaStartupFilter(
+                sp.GetRequiredService<IHostEnvironment>(),
+                sp.GetRequiredService<IOptions<R2StorageOptions>>(),
+                sp.GetRequiredService<LocalMediaSigningService>(),
+                sp.GetRequiredService<LocalDiskMediaStorage>(),
+                sp.GetRequiredService<TimeProvider>()));
 
         services.AddSingleton<UnverifiedAccountCleanupService>();
         services.AddHostedService(sp => sp.GetRequiredService<UnverifiedAccountCleanupService>());
+
+        services.AddSingleton<MediaCleanupService>();
+        services.AddHostedService(sp => sp.GetRequiredService<MediaCleanupService>());
 
         return services;
     }

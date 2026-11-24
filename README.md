@@ -63,7 +63,7 @@ Web also references Infrastructure (composition root only — to wire DI)
 | Identity | ASP.NET Core Identity (`IdentityUser<Guid>`) |
 | Authentication | Cookie authentication (`__Host-` prefixed, persistent sessions) |
 | Realtime | SignalR |
-| Media storage | Cloudflare R2 *(Phase 9)* |
+| Media storage | Cloudflare R2 (private bucket, pure S3 API; local-disk fallback in Development) |
 | Push notifications | Web Push *(Phase 12)* |
 | Testing | xUnit + real SQL Server LocalDB |
 
@@ -121,6 +121,91 @@ Server=(localdb)\mssqllocaldb;Database=AOS.Messenger;Trusted_Connection=True;Mul
 
 For production, supply the connection string via environment variables or user secrets — **never commit credentials**.
 
+### Media Storage & Cloudflare R2 Setup (Pure S3 API)
+
+AOS Messenger stores chat media in a **private** Cloudflare R2 bucket via the pure S3 API (`AWSSDK.S3`) in non-Development environments, with an automatic zero-config local-disk simulator in `Development`.
+
+#### 1. Development Fallback (Zero-Config Local Mode)
+
+When all `R2:*` settings are left unset in `Development`, `InfrastructureServiceRegistration` automatically registers `LocalDiskMediaStorage` storing files under `.dev-media/` (git-ignored; overrideable via `Media:LocalStoragePath`) and mounts AEAD `IDataProtectionProvider`-signed `/dev-media/upload` and `/dev-media/download` endpoints via `DevMediaStartupFilter`. Outside `Development`, `R2StorageOptionsValidator` fails fast on startup if any required `R2` key is missing or invalid.
+
+#### 2. Cloudflare R2 Bucket & Least-Privilege API Token
+
+1. Create a **private** R2 bucket in your Cloudflare dashboard.
+2. Keep `r2.dev` public bucket access **disabled**, and do **not** attach a public R2 Custom Domain — S3 SigV4 presigned `PUT` / `GET` URLs validate against the S3 API endpoint (`https://<accountId>.r2.cloudflarestorage.com`), not a public custom domain.
+3. Create an R2 API token scoped strictly to **Object Read & Write** on **this single bucket only** (never an account-wide Admin token).
+4. AOS Messenger isolates uploads and verified objects under two bucket prefixes:
+   - `pending/{storageObjectId}` — untrusted client staging area targeted by short-lived presigned `PUT` URLs.
+   - `media/{storageObjectId}` — verified, immutable storage promoted server-side after magic-byte inspection (`Magick.NET` decompression-bomb checks + EXIF/GPS stripping on images; 4 KB header inspection on videos and documents).
+5. **CSP & Active-Content Hardening:** `SecurityHeadersOptions` derives the allowed R2 origin for `connect-src`, `img-src`, and `media-src` strictly from `R2:ServiceUrl` (must be an exact `https://` origin with no path, query, fragment, userinfo, or wildcards). Active-content execution risks are mitigated via strict extension/MIME allowlists (SVG/HTML/JS/XML/executables are prohibited), server-side `Magick.NET` image re-encoding, and forced `Content-Disposition: attachment` on all documents.
+
+#### 3. Exact-Origin Bucket CORS Policy
+
+Configure CORS on the private R2 bucket to permit only your application's exact HTTPS origin (never `"*"`):
+
+```json
+[
+  {
+    "AllowedOrigins": ["https://messenger.example.com"],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["Content-Type", "Content-Length"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3600
+  }
+]
+```
+
+#### 4. `R2` and `Media` Configuration Reference
+
+Supply `R2` credentials via environment variables (`R2__ServiceUrl`, `R2__BucketName`, `R2__AccessKeyId`, `R2__SecretAccessKey`) or user secrets — **never commit credentials to `appsettings.json`**.
+
+```json
+{
+  "R2": {
+    "ServiceUrl": "https://<accountId>.r2.cloudflarestorage.com",
+    "BucketName": "aos-messenger-media",
+    "AccessKeyId": "<single-bucket-access-key-id>",
+    "SecretAccessKey": "<single-bucket-secret-access-key>"
+  },
+  "Media": {
+    "MaxConcurrentPendingPerUser": 10,
+    "DailyUploadQuotaBytes": 1073741824,
+    "PresignedPutTtlMinutes": 5,
+    "PresignedGetTtlMinutes": 10,
+    "MaxImageProcessingConcurrency": 3,
+    "ImageProcessingTimeoutSeconds": 15,
+    "MaxAnimationFrames": 300,
+    "MaxTotalDecodedImagePixels": 40000000,
+    "StalePendingMinutes": 30,
+    "UnattachedUploadedHours": 2,
+    "OrphanGracePeriodHours": 1,
+    "PurgedMetadataRetentionHours": 48,
+    "CleanupIntervalMinutes": 15
+  }
+}
+```
+
+| Key | Default / Requirement | Description |
+|---|---|---|
+| `R2:ServiceUrl` | Required outside Dev | Exact `https://<accountId>.r2.cloudflarestorage.com` S3 API origin (used for S3 signing and CSP `connect-src`/`img-src`/`media-src`). |
+| `R2:BucketName` | Required outside Dev | Private R2 bucket name (3–63 chars, no whitespace or slashes). |
+| `R2:AccessKeyId` | Required outside Dev | S3 access key ID scoped to Object Read & Write on `R2:BucketName` only. |
+| `R2:SecretAccessKey` | Required outside Dev | S3 secret access key paired with `R2:AccessKeyId`. |
+| `Media:MaxConcurrentPendingPerUser` | `10` | Maximum simultaneous `Pending` upload records per user (messages are fixed at max 5 attachments in Domain `MediaConstraints`). |
+| `Media:DailyUploadQuotaBytes` | `1073741824` | Rolling 24-hour per-user upload quota in bytes (1 GB default). |
+| `Media:PresignedPutTtlMinutes` | `5` | Presigned staging `PUT` URL lifetime in minutes. |
+| `Media:PresignedGetTtlMinutes` | `10` | Presigned download/stream `GET` URL lifetime in minutes. |
+| `Media:MaxImageProcessingConcurrency` | `3` | Maximum concurrent server-side `Magick.NET` image sanitization jobs. |
+| `Media:ImageProcessingTimeoutSeconds` | `15` | Timeout in seconds for image decode/re-encode sanitization. |
+| `Media:MaxAnimationFrames` | `300` | Maximum animation frames permitted for GIF/WebP images. |
+| `Media:MaxTotalDecodedImagePixels` | `40000000` | Maximum total decoded pixels (across frames) for images. |
+| `Media:StalePendingMinutes` | `30` | Age threshold before abandoned `Pending` uploads expire to `Failed`. |
+| `Media:UnattachedUploadedHours` | `2` | Age threshold before unattached `Uploaded` drafts transition to `Deleted`. |
+| `Media:OrphanGracePeriodHours` | `1` | Grace period before untracked R2 objects are swept as orphans. |
+| `Media:PurgedMetadataRetentionHours` | `48` (min `24`) | Retention window before purged `Media` SQL rows are hard-deleted (must remain >= 24h for daily quota accuracy). |
+| `Media:CleanupIntervalMinutes` | `15` | Background interval for `MediaCleanupService` sweeps. |
+| `Media:LocalStoragePath` | `<ContentRoot>/.dev-media` | Optional override for the Development local-disk media directory. |
+
 ---
 
 ## Project Structure
@@ -157,6 +242,7 @@ AOS.Messenger/
 │   │
 │   └── AOS.Messenger.Infrastructure/
 │       ├── Identity/                 # ApplicationUser, IdentityService, CurrentUser, cleanup services
+│       ├── Media/                    # Cloudflare R2 & Dev local-disk storage, Magick.NET verifier, cleanup worker
 │       ├── Persistence/              # ApplicationDbContext, entity configs, migrations, repositories
 │       └── DependencyInjection/      # InfrastructureServiceRegistration.cs
 │
@@ -168,6 +254,6 @@ AOS.Messenger/
 
 ## Development Roadmap & Status
 
-- **Current Status:** Phase 8 ✅ Complete (Message operations: edit, delete for me, delete for everyone, reply, reactions)
-- **Next Up:** Phase 9 🔜 Next (Media messages and Cloudflare R2 integration)
+- **Current Status:** Phase 9 ✅ Complete (Media messages and Cloudflare R2 integration)
+- **Next Up:** Phase 10 🔜 Next (Voice messages)
 

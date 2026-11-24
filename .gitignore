@@ -32,8 +32,9 @@ efbundle*
 .DS_Store
 Thumbs.db
 
-## Local dev emails
+## Local dev emails & media simulator
 .dev-emails/
+.dev-media/
 
 ## Test results & coverage
 TestResults/

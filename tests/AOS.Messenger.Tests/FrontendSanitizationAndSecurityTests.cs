@@ -840,4 +840,56 @@ public sealed class FrontendSanitizationAndSecurityTests
         Assert.Contains("asp-action=\"Login\"", mobileElseSection);
         Assert.DoesNotContain("border-t", mobileElseSection);
     }
+
+    [Fact]
+    public void Phase9MediaViewsAndScripts_HaveZeroInlineStyleAttributes_AndBalancedMediaMarkup()
+    {
+        var slnRoot = FindSolutionRoot();
+        var viewsDir = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat");
+        var mediaViews = new[]
+        {
+            Path.Combine(viewsDir, "Conversation.cshtml"),
+            Path.Combine(viewsDir, "_ChatActivePaneEmpty.cshtml"),
+            Path.Combine(viewsDir, "_ChatModals.cshtml")
+        };
+
+        foreach (var viewPath in mediaViews)
+        {
+            Assert.True(File.Exists(viewPath));
+            var content = File.ReadAllText(viewPath);
+
+            // CSP style-src 'self' compliance: no inline style="..." HTML attributes
+            Assert.DoesNotMatch(@"\bstyle\s*=", content);
+
+            var openDivs = Regex.Matches(content, "<div[\\s>]").Count;
+            var closeDivs = Regex.Matches(content, "</div>").Count;
+            Assert.Equal(openDivs, closeDivs);
+        }
+
+        var convHtml = File.ReadAllText(mediaViews[0]);
+        Assert.Contains("id=\"composer-attach-btn\"", convHtml);
+        Assert.Contains("id=\"composer-attach-menu\"", convHtml);
+        Assert.Contains("id=\"composer-attachments-tray\"", convHtml);
+        Assert.Contains("id=\"chat-dropzone-overlay\"", convHtml);
+        Assert.Contains("id=\"pending-uploads-container\"", convHtml);
+        Assert.Contains("data-has-attachments=", convHtml);
+        Assert.Contains("data-message-preview=", convHtml);
+        Assert.DoesNotContain("asp-action=\"Attachments\"", convHtml);
+
+        // #pending-uploads-container must be a sibling AFTER #messages-container (not nested inside it)
+        var msgContainerIdx = convHtml.IndexOf("id=\"messages-container\"", StringComparison.Ordinal);
+        var pendingIdx = convHtml.IndexOf("id=\"pending-uploads-container\"", StringComparison.Ordinal);
+        Assert.True(msgContainerIdx >= 0 && pendingIdx > msgContainerIdx);
+
+        var modalsHtml = File.ReadAllText(mediaViews[2]);
+        Assert.Contains("id=\"media-lightbox-modal\"", modalsHtml);
+        Assert.Contains("id=\"media-lightbox-img\"", modalsHtml);
+
+        var jsDir = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "wwwroot", "js");
+        foreach (var jsPath in Directory.GetFiles(jsDir, "*.js", SearchOption.AllDirectories))
+        {
+            var jsContent = File.ReadAllText(jsPath);
+            Assert.DoesNotMatch(@"setAttribute\(\s*['""]style['""]", jsContent);
+        }
+    }
 }

@@ -1,10 +1,12 @@
 using AOS.Messenger.Application;
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure;
 using AOS.Messenger.Infrastructure.Identity;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
+using AOS.Messenger.Infrastructure.Storage;
 using AOS.Messenger.Web.Services;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.SqlClient;
@@ -24,15 +26,18 @@ public sealed class SqlTestDatabaseFixture : IAsyncLifetime
 {
     public string DatabaseName { get; }
     public string ConnectionString { get; }
+    public string MediaRootDirectory { get; }
 
     public SqlTestDatabaseFixture()
     {
         DatabaseName = $"AOS_Test_{Guid.NewGuid():N}";
         ConnectionString = $"Server=(localdb)\\mssqllocaldb;Database={DatabaseName};Trusted_Connection=True;MultipleActiveResultSets=true;Connect Timeout=30;Encrypt=False;";
+        MediaRootDirectory = Path.Combine(Path.GetTempPath(), $"AOS_TestMedia_{Guid.NewGuid():N}");
     }
 
     public async Task InitializeAsync()
     {
+        Directory.CreateDirectory(MediaRootDirectory);
         await using var context = CreateDbContext();
         await context.Database.MigrateAsync();
     }
@@ -48,6 +53,18 @@ public sealed class SqlTestDatabaseFixture : IAsyncLifetime
         catch
         {
             // Best effort database cleanup
+        }
+
+        try
+        {
+            if (Directory.Exists(MediaRootDirectory))
+            {
+                Directory.Delete(MediaRootDirectory, recursive: true);
+            }
+        }
+        catch
+        {
+            // Best effort temp media directory cleanup
         }
     }
 
@@ -100,6 +117,15 @@ public sealed class SqlTestDatabaseFixture : IAsyncLifetime
         services.AddScoped<IUserPresencePersistence, UserPresencePersistence>();
         services.AddScoped<IMessagePersistence, MessagePersistence>();
         services.AddScoped<IReactionPersistence, ReactionPersistence>();
+        services.AddScoped<IMediaPersistence, MediaPersistence>();
+        services.AddDataProtection();
+        services.Configure<MediaOptions>(_ => { });
+        services.Configure<R2StorageOptions>(_ => { });
+        services.AddSingleton<LocalMediaSigningService>();
+        services.AddSingleton(sp => new LocalDiskMediaStorage(sp.GetRequiredService<LocalMediaSigningService>(), MediaRootDirectory));
+        services.AddSingleton<IMediaStorage>(sp => sp.GetRequiredService<LocalDiskMediaStorage>());
+        services.AddSingleton<IMediaVerifier, MediaVerifier>();
+        services.AddSingleton<MediaCleanupService>();
         services.TryAddSingleton<IRealtimeNotifier, TestNoOpRealtimeNotifier>();
         services.AddScoped<ISessionService, SessionService>();
         services.AddScoped<IIdentityService, IdentityService>();

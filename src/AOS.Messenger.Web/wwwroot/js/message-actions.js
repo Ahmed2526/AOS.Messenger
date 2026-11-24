@@ -20,21 +20,15 @@ import {
 } from './conversation-list.js';
 import {
     isLatestRenderedMessage,
-    updateReplyParentBanners,
+    applyMessageEditedToRow,
     applyMessageDeletedForEveryone,
     applyMessageDeletedForMe
 } from './message-renderer.js';
-import { getMessageContentClassName } from './emoji-utils.js';
 
 function updateSidebarLastMessageIfLatest(conversationId, messageId, previewText) {
     const container = document.getElementById('messages-container');
     if (!conversationId || !messageId || !isLatestRenderedMessage(container, messageId)) return;
     updateSidebarLastMessage(conversationId, previewText, messageId, true);
-}
-
-function updateReplyParentBannersLocal(parentMessageId, newContent) {
-    if (!parentMessageId) return;
-    updateReplyParentBanners(parentMessageId, newContent);
 }
 
 /**
@@ -51,6 +45,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const getSwitchEpoch = typeof options?.getSwitchEpoch === 'function' ? options.getSwitchEpoch : () => 0;
     const emojiPicker = options?.emojiPicker || null;
     const emojiAutocomplete = options?.emojiAutocomplete || null;
+    const mediaLightbox = options?.mediaLightbox || null;
 
     // Modals
     const editModal = document.getElementById('edit-message-modal');
@@ -67,6 +62,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const cancelDeleteBtn = document.getElementById('cancel-delete-btn');
 
     let activeEditMessageId = null;
+    let activeEditHasAttachments = false;
     let activeDeleteMessageId = null;
 
     function setEditError(message) {
@@ -92,8 +88,9 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     }
 
     // --- EDIT MODAL HANDLING ---
-    function openEditModal(messageId, currentContent) {
+    function openEditModal(messageId, currentContent, hasAttachments = false) {
         activeEditMessageId = messageId;
+        activeEditHasAttachments = !!hasAttachments;
         setEditError('');
         if (editInput) {
             editInput.value = currentContent || '';
@@ -108,6 +105,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
     function closeEditModal() {
         activeEditMessageId = null;
+        activeEditHasAttachments = false;
         setEditError('');
         if (emojiPicker && typeof emojiPicker.close === 'function') {
             emojiPicker.close();
@@ -131,7 +129,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
     const onSaveEditClick = async () => {
         const newContent = editInput ? editInput.value.trim() : '';
-        if (!newContent) {
+        if (!newContent && !activeEditHasAttachments) {
             setEditError('Message content cannot be empty.');
             return;
         }
@@ -143,28 +141,15 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         setEditError('');
         saveEditBtn.disabled = true;
         try {
-            const updated = await apiEditMessage(targetConvId, targetMsgId, newContent);
+            const updated = await apiEditMessage(targetConvId, targetMsgId, newContent || null);
             if (epoch !== getSwitchEpoch()) return;
 
-            const row = document.getElementById(`msg-${targetMsgId}`);
-            if (row) {
-                const contentEl = row.querySelector('.message-text-content');
-                if (contentEl) {
-                    contentEl.textContent = updated.content;
-                    contentEl.className = getMessageContentClassName(updated.content || '');
-                }
-                const editedLabel = row.querySelector('.edited-label');
-                if (editedLabel && updated.editedAtUtc) {
-                    editedLabel.classList.remove('hidden');
-                }
-                const replyBtn = row.querySelector('.reply-action-btn');
-                if (replyBtn) {
-                    replyBtn.setAttribute('data-preview', updated.content || '');
-                }
-            }
+            const updatedContent = updated?.content ?? updated?.Content ?? '';
+            const updatedEditedAt = updated?.editedAtUtc ?? updated?.EditedAtUtc ?? null;
+            const previewText = updated?.previewText ?? updated?.PreviewText ?? updatedContent;
 
-            updateReplyParentBannersLocal(targetMsgId, updated.content);
-            updateSidebarLastMessageIfLatest(targetConvId, targetMsgId, updated.content);
+            applyMessageEditedToRow(targetMsgId, updatedContent, updatedEditedAt, previewText);
+            updateSidebarLastMessageIfLatest(targetConvId, targetMsgId, previewText);
             closeEditModal();
         } catch (err) {
             if (epoch !== getSwitchEpoch()) return;
@@ -303,11 +288,18 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
                     if (prevRow.getAttribute('data-deleted') === 'true') {
                         fallbackPreview = 'This message was deleted';
                     } else {
-                        fallbackPreview = prevRow.querySelector('.message-text-content')?.textContent || '';
+                        const attrPreview = prevRow.getAttribute('data-message-preview');
+                        fallbackPreview = attrPreview !== null && attrPreview !== ''
+                            ? attrPreview
+                            : (prevRow.querySelector('.message-text-content')?.textContent || '');
                     }
                 }
 
                 applyMessageDeletedForMe(msgId, targetConvId, fallbackLastId, fallbackPreview, true);
+            }
+
+            if (mediaLightbox && typeof mediaLightbox.closeIfMessage === 'function') {
+                mediaLightbox.closeIfMessage(msgId);
             }
 
             closeDeleteModal();
@@ -335,6 +327,9 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
             const row = document.getElementById(`msg-${msgId}`);
             if (row) {
                 applyMessageDeletedForEveryone(row, msgId);
+            }
+            if (mediaLightbox && typeof mediaLightbox.closeIfMessage === 'function') {
+                mediaLightbox.closeIfMessage(msgId);
             }
             updateSidebarLastMessageIfLatest(targetConvId, msgId, 'This message was deleted');
             closeDeleteModal();
@@ -371,9 +366,10 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
             const row = editBtn.closest('.message-bubble-row');
             if (!row) return;
             const messageId = row.getAttribute('data-message-id');
+            const hasAttachments = row.getAttribute('data-has-attachments') === 'true';
             const contentEl = row.querySelector('.message-text-content');
             const text = contentEl ? contentEl.textContent : '';
-            openEditModal(messageId, text);
+            openEditModal(messageId, text, hasAttachments);
             return;
         }
 

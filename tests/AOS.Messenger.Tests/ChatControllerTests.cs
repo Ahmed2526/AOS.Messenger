@@ -188,7 +188,7 @@ public sealed class ChatControllerTests
                 senderId,
                 "Sender",
                 "sender",
-                dto.Content,
+                dto.Content ?? string.Empty,
                 DateTimeOffset.UtcNow,
                 null,
                 false,
@@ -215,7 +215,7 @@ public sealed class ChatControllerTests
         }
 
         public Task<MessageEditedDto> EditMessageAsync(UserId callerId, ConversationId conversationId, MessageId messageId, EditMessageRequestDto dto, CancellationToken ct = default)
-            => Task.FromResult(new MessageEditedDto(conversationId.Value, messageId.Value, dto.Content, DateTimeOffset.UtcNow));
+            => Task.FromResult(new MessageEditedDto(conversationId.Value, messageId.Value, dto.Content ?? string.Empty, DateTimeOffset.UtcNow));
 
         public Task DeleteForMeAsync(UserId callerId, ConversationId conversationId, MessageId messageId, CancellationToken ct = default)
             => Task.CompletedTask;

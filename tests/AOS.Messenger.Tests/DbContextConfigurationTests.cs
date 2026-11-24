@@ -34,6 +34,7 @@ public sealed class DbContextConfigurationTests
         Assert.NotNull(model.FindEntityType(typeof(Message)));
         Assert.NotNull(model.FindEntityType(typeof(UserConversationState)));
         Assert.NotNull(model.FindEntityType(typeof(UserBlock)));
+        Assert.NotNull(model.FindEntityType(typeof(Media)));
     }
 
     [Fact]
@@ -149,6 +150,56 @@ public sealed class DbContextConfigurationTests
         Assert.NotNull(blockType);
         AssertConverter(blockType, nameof(UserBlock.BlockerId), typeof(UserId), typeof(Guid));
         AssertConverter(blockType, nameof(UserBlock.BlockedUserId), typeof(UserId), typeof(Guid));
+
+        // Media value converters
+        var mediaType = model.FindEntityType(typeof(Media));
+        Assert.NotNull(mediaType);
+        AssertConverter(mediaType, nameof(Media.Id), typeof(MediaId), typeof(Guid));
+        AssertConverter(mediaType, nameof(Media.UploaderId), typeof(UserId), typeof(Guid));
+        AssertConverter(mediaType, nameof(Media.ConversationId), typeof(ConversationId), typeof(Guid));
+        AssertConverter(mediaType, nameof(Media.MessageId), typeof(MessageId), typeof(long));
+    }
+
+    [Fact]
+    public void Media_HasNewSequentialIdClusteredPk_UniqueIndexes_AndMessageHasAttachments()
+    {
+        var model = BuildModel();
+
+        var mediaType = model.FindEntityType(typeof(Media));
+        Assert.NotNull(mediaType);
+
+        var pk = mediaType.FindPrimaryKey();
+        Assert.NotNull(pk);
+        Assert.True(pk.IsClustered());
+
+        var idProp = mediaType.FindProperty(nameof(Media.Id));
+        Assert.NotNull(idProp);
+        Assert.Equal("NEWSEQUENTIALID()", idProp.GetDefaultValueSql());
+
+        var objectKeyIdx = mediaType.GetIndexes().FirstOrDefault(i =>
+            i.Properties.Count == 1 && i.Properties[0].Name == nameof(Media.ObjectKey));
+        Assert.NotNull(objectKeyIdx);
+        Assert.True(objectKeyIdx.IsUnique);
+
+        var storageObjIdx = mediaType.GetIndexes().FirstOrDefault(i =>
+            i.Properties.Count == 1 && i.Properties[0].Name == nameof(Media.StorageObjectId));
+        Assert.NotNull(storageObjIdx);
+        Assert.True(storageObjIdx.IsUnique);
+
+        var quotaIdx = mediaType.GetIndexes().FirstOrDefault(i =>
+            i.Properties.Count == 2
+            && i.Properties[0].Name == nameof(Media.UploaderId)
+            && i.Properties[1].Name == nameof(Media.CreatedAtUtc));
+        Assert.NotNull(quotaIdx);
+        var includedProps = quotaIdx.GetIncludeProperties();
+        Assert.NotNull(includedProps);
+        Assert.Equal(
+            new[] { nameof(Media.State), nameof(Media.DeclaredSizeBytes), nameof(Media.VerifiedSizeBytes) },
+            includedProps);
+
+        var msgType = model.FindEntityType(typeof(Message));
+        Assert.NotNull(msgType);
+        Assert.NotNull(msgType.FindProperty(nameof(Message.HasAttachments)));
     }
 
     private static void AssertConverter(

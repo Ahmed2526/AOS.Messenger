@@ -7,7 +7,7 @@
  */
 
 import { sendMessage as apiSendMessage } from './api-client.js';
-import { getMessageId, insertMessageOrdered, scrollToBottom } from './message-renderer.js';
+import { formatMessagePreview, getMessageId, insertMessageOrdered, scrollToBottom } from './message-renderer.js';
 import { updateSidebarLastMessage } from './conversation-list.js';
 
 const POLICY_BASE_CLASS = 'px-4 py-2 text-xs text-center font-medium';
@@ -19,7 +19,7 @@ const POLICY_INFO_CLASS = 'px-4 py-2 bg-[#F0E9DF] dark:bg-[#45423E] border-b bor
  * @param {{ state: object, typingEmitter?: object|null, emojiPicker?: object|null, emojiAutocomplete?: object|null }} deps
  * @returns {object}
  */
-export function createComposer({ state, typingEmitter = null, emojiPicker = null, emojiAutocomplete = null }) {
+export function createComposer({ state, typingEmitter = null, emojiPicker = null, emojiAutocomplete = null, mediaUploader = null }) {
     let isSending = false;
     let locked = true;
     let activeReplyTo = null;
@@ -88,6 +88,9 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         if (inputEl) inputEl.disabled = shouldDisable;
         if (sendBtn) sendBtn.disabled = shouldDisable;
         if (emojiBtn) emojiBtn.disabled = shouldDisable;
+        if (mediaUploader && typeof mediaUploader.setLocked === 'function') {
+            mediaUploader.setLocked(shouldDisable);
+        }
         if (shouldDisable) {
             closeEmojiOverlays();
         }
@@ -239,7 +242,28 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         if (!targetConvId) return null;
 
         const content = (inputEl.value || '').trim();
-        if (!content) return null;
+        const hasPendingMedia = !!(mediaUploader && typeof mediaUploader.hasPendingFiles === 'function' && mediaUploader.hasPendingFiles());
+        if (!content && !hasPendingMedia) return null;
+
+        if (hasPendingMedia) {
+            const replySnapshot = activeReplyTo ? { ...activeReplyTo } : null;
+            if (typingEmitter && typeof typingEmitter.stopTyping === 'function') {
+                typingEmitter.stopTyping();
+            }
+            closeEmojiOverlays();
+            inputEl.value = '';
+            if (inputEl.style) inputEl.style.height = 'auto';
+            clearReply();
+            hideActionError();
+            if (typeof state.deleteDraft === 'function') {
+                state.deleteDraft(targetConvId);
+            }
+            return mediaUploader.startUploadJob({
+                conversationId: targetConvId,
+                caption: content,
+                replyTo: replySnapshot
+            });
+        }
 
         const epoch = state.switchEpoch;
         const replyToMessageId = activeReplyTo ? activeReplyTo.id : null;
@@ -265,9 +289,7 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         try {
             const sentMessage = await apiSendMessage(targetConvId, payload);
             const msgId = getMessageId(sentMessage);
-            const previewText = sentMessage?.isDeletedForEveryone
-                ? 'This message was deleted'
-                : (sentMessage?.content ?? content);
+            const previewText = formatMessagePreview(sentMessage) || content;
 
             // Always sync sidebar preview and consume any saved draft for the target chat
             updateSidebarLastMessage(targetConvId, previewText, msgId, false, false, true);

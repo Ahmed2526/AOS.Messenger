@@ -1,6 +1,8 @@
 using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
+using AOS.Messenger.Domain.Constants;
 using AOS.Messenger.Domain.Entities;
+using AOS.Messenger.Domain.Enums;
 using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure.Persistence;
 using Microsoft.Data.SqlClient;
@@ -380,5 +382,130 @@ public sealed class SqlServerConstraintsIntegrationTests : IClassFixture<SqlTest
         var updated = await db.Database.ExecuteSqlInterpolatedAsync(
             $"UPDATE Messages SET IsDeletedForEveryone = 1, Content = NULL, DeletedForEveryoneAtUtc = {now} WHERE Id = {msg.Id.Value}");
         Assert.Equal(1, updated);
+    }
+
+    // =========================================================================
+    // 6. Phase 9 Media Constraints, NEWSEQUENTIALID & Composite FKs
+    // =========================================================================
+
+    [Fact]
+    public async Task Media_InsertPopulatesIdViaNewSequentialId_AndSqlEnforcesCheckConstraints()
+    {
+        await using var db = _fixture.CreateDbContext();
+        var userA = UserId.New();
+        var userB = UserId.New();
+        var now = DateTimeOffset.UtcNow;
+
+        var conv = Conversation.CreateDirect(userA, userB, now);
+        db.Conversations.Add(conv);
+        await db.SaveChangesAsync();
+
+        var media = Media.CreatePending(userA, conv.Id, MediaKind.Image, "photo.jpg", "image/jpeg", 2048, now);
+        db.Media.Add(media);
+        await db.SaveChangesAsync();
+
+        Assert.NotNull(media.Id);
+        Assert.NotEqual(Guid.Empty, media.Id.Value);
+
+        var msg = Message.Create(conv.Id, userA, "media-ck-msg", null, now, hasAttachments: true);
+        db.Messages.Add(msg);
+        await db.SaveChangesAsync();
+
+        // CK_Media_State_MessageId: Attached (2) with NULL MessageId must fail
+        var ex1 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO Media (StorageObjectId, UploaderId, ConversationId, DisplayOrder, Kind, State, ObjectKey, SanitizedFileName, DeclaredContentType, DeclaredSizeBytes, CreatedAtUtc) VALUES ({MediaConstraints.GenerateStorageObjectId()}, {userA.Value}, {conv.Id.Value}, {0}, {(int)MediaKind.Image}, {(int)MediaState.Attached}, {$"media/{MediaConstraints.GenerateStorageObjectId()}"}, {"a.jpg"}, {"image/jpeg"}, {100L}, {now})"));
+        Assert.Contains("CK_Media_State_MessageId", ex1.Message, StringComparison.OrdinalIgnoreCase);
+
+        // CK_Media_State_MessageId: Pending (0) with non-null MessageId must fail
+        var ex2 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO Media (StorageObjectId, UploaderId, ConversationId, MessageId, DisplayOrder, Kind, State, ObjectKey, SanitizedFileName, DeclaredContentType, DeclaredSizeBytes, CreatedAtUtc) VALUES ({MediaConstraints.GenerateStorageObjectId()}, {userA.Value}, {conv.Id.Value}, {msg.Id.Value}, {0}, {(int)MediaKind.Image}, {(int)MediaState.Pending}, {$"pending/{MediaConstraints.GenerateStorageObjectId()}"}, {"a.jpg"}, {"image/jpeg"}, {100L}, {now})"));
+        Assert.Contains("CK_Media_State_MessageId", ex2.Message, StringComparison.OrdinalIgnoreCase);
+
+        // CK_Media_ObjectKey_Prefix: Uploaded (1) with pending/ prefix must fail
+        var ex3 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO Media (StorageObjectId, UploaderId, ConversationId, DisplayOrder, Kind, State, ObjectKey, SanitizedFileName, DeclaredContentType, DeclaredSizeBytes, CreatedAtUtc) VALUES ({MediaConstraints.GenerateStorageObjectId()}, {userA.Value}, {conv.Id.Value}, {0}, {(int)MediaKind.Image}, {(int)MediaState.Uploaded}, {$"pending/{MediaConstraints.GenerateStorageObjectId()}"}, {"a.jpg"}, {"image/jpeg"}, {100L}, {now})"));
+        Assert.Contains("CK_Media_ObjectKey_Prefix", ex3.Message, StringComparison.OrdinalIgnoreCase);
+
+        // CK_Media_ObjectKey_Prefix: Pending (0) with media/ prefix must fail
+        var ex4 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO Media (StorageObjectId, UploaderId, ConversationId, DisplayOrder, Kind, State, ObjectKey, SanitizedFileName, DeclaredContentType, DeclaredSizeBytes, CreatedAtUtc) VALUES ({MediaConstraints.GenerateStorageObjectId()}, {userA.Value}, {conv.Id.Value}, {0}, {(int)MediaKind.Image}, {(int)MediaState.Pending}, {$"media/{MediaConstraints.GenerateStorageObjectId()}"}, {"a.jpg"}, {"image/jpeg"}, {100L}, {now})"));
+        Assert.Contains("CK_Media_ObjectKey_Prefix", ex4.Message, StringComparison.OrdinalIgnoreCase);
+
+        // CK_Media_Sizes_Positive: DeclaredSizeBytes = 0 must fail
+        var ex5 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"INSERT INTO Media (StorageObjectId, UploaderId, ConversationId, DisplayOrder, Kind, State, ObjectKey, SanitizedFileName, DeclaredContentType, DeclaredSizeBytes, CreatedAtUtc) VALUES ({MediaConstraints.GenerateStorageObjectId()}, {userA.Value}, {conv.Id.Value}, {0}, {(int)MediaKind.Image}, {(int)MediaState.Pending}, {$"pending/{MediaConstraints.GenerateStorageObjectId()}"}, {"a.jpg"}, {"image/jpeg"}, {0L}, {now})"));
+        Assert.Contains("CK_Media_Sizes_Positive", ex5.Message, StringComparison.OrdinalIgnoreCase);
+
+        // CK_Media_Sizes_Positive: VerifiedSizeBytes = 0 must fail
+        var ex6 = await Assert.ThrowsAsync<SqlException>(() =>
+            db.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE Media SET VerifiedSizeBytes = 0 WHERE Id = {media.Id.Value}"));
+        Assert.Contains("CK_Media_Sizes_Positive", ex6.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Messages_TombstoneCheckConstraint_AllowsNullContentOnlyWhenHasAttachmentsAndNotDeleted()
+    {
+        await using var db = _fixture.CreateDbContext();
+        var userA = UserId.New();
+        var userB = UserId.New();
+        var now = DateTimeOffset.UtcNow;
+
+        var conv = Conversation.CreateDirect(userA, userB, now);
+        db.Conversations.Add(conv);
+        await db.SaveChangesAsync();
+
+        var mediaMsg = Message.Create(conv.Id, userA, "ck-att-null-content", null, now, hasAttachments: true);
+        db.Messages.Add(mediaMsg);
+        await db.SaveChangesAsync();
+
+        var loaded = await db.Messages.AsNoTracking().SingleAsync(m => m.Id == mediaMsg.Id);
+        Assert.True(loaded.HasAttachments);
+        Assert.Null(loaded.Content);
+        Assert.False(loaded.IsDeletedForEveryone);
+    }
+
+    [Fact]
+    public async Task Media_CompositeFk_RejectsCrossConversationMessage_AndAcceptsSameConversation()
+    {
+        await using var db = _fixture.CreateDbContext();
+        var userA = UserId.New();
+        var userB = UserId.New();
+        var userC = UserId.New();
+        var now = DateTimeOffset.UtcNow;
+
+        var conv1 = Conversation.CreateDirect(userA, userB, now);
+        var conv2 = Conversation.CreateDirect(userA, userC, now);
+        db.Conversations.AddRange(conv1, conv2);
+        await db.SaveChangesAsync();
+
+        var msgInConv1 = Message.Create(conv1.Id, userA, "media-fk-conv1", null, now, hasAttachments: true);
+        var msgInConv2 = Message.Create(conv2.Id, userA, "media-fk-conv2", null, now, hasAttachments: true);
+        db.Messages.AddRange(msgInConv1, msgInConv2);
+        await db.SaveChangesAsync();
+
+        var media = Media.CreatePending(userA, conv1.Id, MediaKind.Document, "doc.pdf", "application/pdf", 1024, now);
+        media.MarkUploaded($"media/{media.StorageObjectId}", "application/pdf", 1024, null, null, null, now);
+        db.Media.Add(media);
+        await db.SaveChangesAsync();
+
+        // Attempt to attach Conv1 media to Conv2 message -> rejected by FK_Media_Messages_ConversationId_MessageId
+        media.MarkAttached(msgInConv2.Id, 0, now);
+        var ex = await Assert.ThrowsAsync<DbUpdateException>(() => db.SaveChangesAsync());
+        Assert.NotNull(ex.InnerException);
+        Assert.Contains("FK_Media_Messages_ConversationId_MessageId", ex.InnerException.Message, StringComparison.OrdinalIgnoreCase);
+
+        // Reload and attach to same-conversation message -> succeeds
+        await db.Entry(media).ReloadAsync();
+        media.MarkAttached(msgInConv1.Id, 0, now);
+        await db.SaveChangesAsync();
+
+        Assert.Equal(MediaState.Attached, media.State);
+        Assert.Equal(msgInConv1.Id, media.MessageId);
     }
 }

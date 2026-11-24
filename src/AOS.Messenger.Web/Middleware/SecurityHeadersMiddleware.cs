@@ -8,27 +8,32 @@ namespace AOS.Messenger.Web.Middleware;
 public sealed class SecurityHeadersMiddleware
 {
     private readonly RequestDelegate _next;
+    private readonly SecurityHeadersOptions _options;
 
-    public SecurityHeadersMiddleware(RequestDelegate next)
+    public SecurityHeadersMiddleware(
+        RequestDelegate next,
+        SecurityHeadersOptions? options = null)
     {
         _next = next;
+        _options = options ?? SecurityHeadersOptions.Default;
     }
 
     public async Task InvokeAsync(HttpContext context)
     {
-        ApplySecurityHeaders(context.Response);
+        ApplySecurityHeaders(context.Response, _options);
 
         await _next(context);
     }
 
-    public static void ApplySecurityHeaders(HttpResponse response)
+    public static void ApplySecurityHeaders(HttpResponse response, SecurityHeadersOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(response);
 
+        var resolved = options ?? SecurityHeadersOptions.Default;
         response.Headers["X-Content-Type-Options"] = "nosniff";
         response.Headers["X-Frame-Options"] = "DENY";
         response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
-        response.Headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'";
+        response.Headers["Content-Security-Policy"] = resolved.ContentSecurityPolicy;
         response.Headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=(), payment=(), usb=()";
     }
 }

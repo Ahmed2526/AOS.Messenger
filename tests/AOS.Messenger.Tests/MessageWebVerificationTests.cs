@@ -98,7 +98,7 @@ public sealed class MessageWebVerificationTests
                 senderId,
                 "Test Sender",
                 "testsender",
-                dto.Content,
+                dto.Content ?? string.Empty,
                 DateTimeOffset.UtcNow,
                 null,
                 false,
@@ -107,7 +107,7 @@ public sealed class MessageWebVerificationTests
         }
 
         public Task<MessageEditedDto> EditMessageAsync(UserId callerId, ConversationId conversationId, MessageId messageId, EditMessageRequestDto dto, CancellationToken ct = default) =>
-            Task.FromResult(new MessageEditedDto(conversationId.Value, messageId.Value, dto.Content, DateTimeOffset.UtcNow));
+            Task.FromResult(new MessageEditedDto(conversationId.Value, messageId.Value, dto.Content ?? string.Empty, DateTimeOffset.UtcNow));
 
         public Task DeleteForMeAsync(UserId callerId, ConversationId conversationId, MessageId messageId, CancellationToken ct = default) =>
             Task.CompletedTask;

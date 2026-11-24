@@ -16,15 +16,18 @@ public sealed class ExceptionHandlingMiddleware
     private readonly RequestDelegate _next;
     private readonly ILogger<ExceptionHandlingMiddleware> _logger;
     private readonly IHostEnvironment? _environment;
+    private readonly SecurityHeadersOptions _securityHeadersOptions;
 
     public ExceptionHandlingMiddleware(
         RequestDelegate next,
         ILogger<ExceptionHandlingMiddleware> logger,
-        IHostEnvironment? environment = null)
+        IHostEnvironment? environment = null,
+        SecurityHeadersOptions? securityHeadersOptions = null)
     {
         _next = next;
         _logger = logger;
         _environment = environment;
+        _securityHeadersOptions = securityHeadersOptions ?? SecurityHeadersOptions.Default;
     }
 
     public async Task InvokeAsync(HttpContext context)
@@ -53,6 +56,25 @@ public sealed class ExceptionHandlingMiddleware
             _logger.LogWarning(ex, "Domain rule violation: {Message}", ex.Message);
             await HandleExceptionAsync(context, HttpStatusCode.BadRequest, "Bad Request", ex.Message);
         }
+        catch (MediaStorageException ex)
+        {
+            _logger.LogError(ex, "Media storage operation failed.");
+            string detail = (_environment?.IsDevelopment() ?? false)
+                ? ex.Message
+                : "Media storage is temporarily unavailable. Please try again.";
+            await HandleExceptionAsync(context, HttpStatusCode.ServiceUnavailable, "Service Unavailable", detail);
+        }
+        catch (BadHttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "Bad HTTP request ({StatusCode}).", ex.StatusCode);
+            var statusCode = Enum.IsDefined(typeof(HttpStatusCode), ex.StatusCode)
+                ? (HttpStatusCode)ex.StatusCode
+                : HttpStatusCode.BadRequest;
+            var (title, detail) = ex.StatusCode == StatusCodes.Status413PayloadTooLarge
+                ? ("Payload Too Large", "Request payload exceeds the maximum allowed size.")
+                : ("Bad Request", "The request is malformed or invalid.");
+            await HandleExceptionAsync(context, statusCode, title, detail);
+        }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
             _logger.LogInformation("Request was cancelled by the client.");
@@ -80,7 +102,7 @@ public sealed class ExceptionHandlingMiddleware
 
         context.Response.Clear();
         context.Response.StatusCode = (int)statusCode;
-        SecurityHeadersMiddleware.ApplySecurityHeaders(context.Response);
+        SecurityHeadersMiddleware.ApplySecurityHeaders(context.Response, _securityHeadersOptions);
 
         if (context.User.Identity?.IsAuthenticated == true ||
             context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
@@ -89,7 +111,7 @@ public sealed class ExceptionHandlingMiddleware
             context.Response.Headers.Pragma = "no-cache";
         }
 
-        if ((int)statusCode >= 500 && !(_environment?.IsDevelopment() ?? false))
+        if (statusCode == HttpStatusCode.InternalServerError && !(_environment?.IsDevelopment() ?? false))
         {
             detail = "An unexpected error occurred.";
         }

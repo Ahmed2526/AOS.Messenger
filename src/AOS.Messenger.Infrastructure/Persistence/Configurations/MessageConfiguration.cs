@@ -18,7 +18,7 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
     {
         builder.ToTable("Messages", t => t.HasCheckConstraint(
             "CK_Messages_Content_Tombstone",
-            "([IsDeletedForEveryone] = 1 AND [Content] IS NULL) OR ([IsDeletedForEveryone] = 0 AND [Content] IS NOT NULL)"));
+            "([IsDeletedForEveryone] = 1 AND [Content] IS NULL) OR ([IsDeletedForEveryone] = 0 AND ([Content] IS NOT NULL OR [HasAttachments] = 1))"));
 
         builder.HasKey(m => m.Id).IsClustered();
 
@@ -55,6 +55,10 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
             .IsRequired();
 
         builder.Property(m => m.DeletedForEveryoneAtUtc);
+
+        builder.Property(m => m.HasAttachments)
+            .HasDefaultValue(false)
+            .IsRequired();
 
         builder.Property(m => m.RowVersion)
             .IsRowVersion();

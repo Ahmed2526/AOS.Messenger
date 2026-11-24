@@ -11,6 +11,8 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="AWSSDK.S3" Version="4.1.2" />
+    <PackageReference Include="Magick.NET-Q8-AnyCPU" Version="15.1.0" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.*" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.*" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.*" />
@@ -19,6 +21,10 @@
   <ItemGroup>
     <ProjectReference Include="..\AOS.Messenger.Application\AOS.Messenger.Application.csproj" />
     <ProjectReference Include="..\AOS.Messenger.Domain\AOS.Messenger.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="AOS.Messenger.Tests" />
   </ItemGroup>
 
 </Project>

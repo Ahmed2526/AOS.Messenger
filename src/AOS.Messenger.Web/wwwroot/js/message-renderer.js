@@ -18,6 +18,294 @@ import { formatLastSeen } from './presence.js';
 import { closeChatActionsMenu } from './chat-actions.js';
 import { updateSidebarLastMessage as updateSidebarLastMessageInList } from './conversation-list.js';
 import { getMessageContentClassName, truncateGraphemes } from './emoji-utils.js';
+import { buildMediaInlineUrl, getMediaDownloadUrl } from './api-client.js';
+import { isSafeMediaUrl, triggerSafeDownloadAnchor } from './media-lightbox.js';
+
+const MEDIA_URL_CACHE_TTL_MS = 8 * 60 * 1000;
+const MEDIA_URL_SAFETY_MARGIN_MS = 60 * 1000;
+const VIDEO_RETRY_COOLDOWN_MS = 15 * 1000;
+const mediaUrlCache = new Map();
+const activeMediaObservers = new Set();
+
+export function disconnectActiveMediaObservers() {
+    for (const obs of activeMediaObservers) {
+        try {
+            if (obs && typeof obs.disconnect === 'function') {
+                obs.disconnect();
+            }
+        } catch {}
+    }
+    activeMediaObservers.clear();
+}
+
+/**
+ * Clears all cached signed media download URLs (called on logout / session expiry).
+ */
+export function clearMediaUrlCache() {
+    mediaUrlCache.clear();
+}
+
+/**
+ * Evicts cached signed media download URLs for a specific message ID (called when a message is deleted).
+ * @param {string|number|null|undefined} msgId
+ */
+export function evictMediaUrlCacheForMessage(msgId) {
+    if (msgId === null || msgId === undefined || msgId === '') return;
+    const target = String(msgId);
+    for (const key of Array.from(mediaUrlCache.keys())) {
+        const parts = String(key).split(':');
+        if (parts[1] === target) {
+            mediaUrlCache.delete(key);
+        }
+    }
+}
+
+function teardownRowVideos(rootEl) {
+    if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
+    const videos = rootEl.querySelectorAll('video');
+    for (const video of videos) {
+        if (!video) continue;
+        try {
+            if (typeof video.pause === 'function') video.pause();
+            if (typeof video.removeAttribute === 'function') video.removeAttribute('src');
+            video.src = '';
+            if (typeof video.load === 'function') video.load();
+        } catch {}
+    }
+}
+
+function hasVisibleMessageText(value) {
+    if (value === null || value === undefined) return false;
+    const stripped = String(value).replace(/[\s\p{Cf}\p{Cc}\p{Zs}\p{Zl}\p{Zp}]/gu, '');
+    return stripped.length > 0;
+}
+
+function formatAttachmentBytes(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1).replace(/\.0$/, '')} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MB`;
+    return `${(n / (1024 * 1024 * 1024)).toFixed(2).replace(/\.00$/, '')} GB`;
+}
+
+/**
+ * Builds human-friendly preview text for text, media, and captioned media messages.
+ * Mirrors server-side MediaPreviewFormatter.FormatPreview.
+ * @param {object|null|undefined} message
+ * @param {number} [maxGraphemes]
+ * @returns {string}
+ */
+export function formatMessagePreview(message, maxGraphemes = 100) {
+    if (!message || typeof message !== 'object') return '';
+    if (message.isDeletedForEveryone ?? message.IsDeletedForEveryone) {
+        return 'This message was deleted';
+    }
+
+    const rawContent = message.content !== undefined ? message.content : message.Content;
+    const normalizedCaption = hasVisibleMessageText(rawContent) ? String(rawContent).trim() : null;
+    const rawAttachments = message.attachments ?? message.Attachments ?? [];
+    if (!Array.isArray(rawAttachments) || rawAttachments.length === 0) {
+        return normalizedCaption ? truncateGraphemes(normalizedCaption, maxGraphemes) : '';
+    }
+
+    const kinds = rawAttachments.map(a => String(a?.kind ?? a?.Kind ?? 'document').toLowerCase());
+    const firstKind = kinds[0];
+    const allSame = kinds.every(k => k === firstKind);
+
+    const iconFor = (k) => {
+        if (k === 'image') return '📷';
+        if (k === 'video') return '🎬';
+        if (k === 'voice') return '🎤';
+        return '📎';
+    };
+
+    const icon = allSame ? iconFor(firstKind) : '📎';
+    if (normalizedCaption) {
+        return truncateGraphemes(`${icon} ${normalizedCaption}`, maxGraphemes);
+    }
+
+    if (rawAttachments.length === 1) {
+        if (firstKind === 'image') return '📷 Photo';
+        if (firstKind === 'video') return '🎬 Video';
+        if (firstKind === 'voice') return '🎤 Voice message';
+        const fileName = String(rawAttachments[0]?.fileName ?? rawAttachments[0]?.FileName ?? '').trim() || 'Attachment';
+        return truncateGraphemes(`📎 ${fileName}`, maxGraphemes);
+    }
+
+    if (allSame) {
+        if (firstKind === 'image') return `📷 ${rawAttachments.length} photos`;
+        if (firstKind === 'video') return `🎬 ${rawAttachments.length} videos`;
+        if (firstKind === 'voice') return `🎤 ${rawAttachments.length} voice messages`;
+        return `📎 ${rawAttachments.length} files`;
+    }
+
+    return `📎 ${rawAttachments.length} attachments`;
+}
+
+/**
+ * Resolves and caches a signed download URL JSON payload (~8-min in-memory TTL).
+ */
+export async function resolveCachedMediaUrl(
+    conversationId,
+    messageId,
+    mediaId,
+    { download = false, bypassCache = false, getMediaUrlFn = getMediaDownloadUrl, nowFn = () => Date.now() } = {}
+) {
+    if (!conversationId || !messageId || !mediaId) return null;
+
+    const cacheKey = `${conversationId}:${messageId}:${mediaId}:${download ? 'dl' : 'inline'}`;
+    const now = nowFn();
+    if (!bypassCache && mediaUrlCache.has(cacheKey)) {
+        const entry = mediaUrlCache.get(cacheKey);
+        if (entry && entry.expiresAtMs > now && isSafeMediaUrl(entry.url)) {
+            return entry.url;
+        }
+        mediaUrlCache.delete(cacheKey);
+    }
+
+    const dto = await getMediaUrlFn(conversationId, messageId, mediaId, { download });
+    const url = dto?.url ?? dto?.Url ?? '';
+    if (!isSafeMediaUrl(url)) {
+        return null;
+    }
+
+    const rawExpiry = dto?.expiresAtUtc ?? dto?.ExpiresAtUtc ?? null;
+    const parsedExpiryMs = rawExpiry ? Date.parse(rawExpiry) : NaN;
+    const defaultExpiryMs = now + MEDIA_URL_CACHE_TTL_MS;
+    const expiresAtMs = Number.isFinite(parsedExpiryMs)
+        ? Math.min(parsedExpiryMs - MEDIA_URL_SAFETY_MARGIN_MS, defaultExpiryMs)
+        : defaultExpiryMs;
+
+    if (expiresAtMs > now) {
+        mediaUrlCache.set(cacheKey, {
+            url,
+            expiresAtMs
+        });
+    }
+    return url;
+}
+
+/**
+ * Hydrates rendered <video> elements (lazy /url loading + recoverable error retry) and document download buttons.
+ * @param {HTMLElement|Document|null} rootEl
+ * @param {{ getMediaUrlFn?: Function, nowFn?: Function }} [options]
+ */
+export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadUrl, nowFn = () => Date.now() } = {}) {
+    if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
+
+    const videos = rootEl.querySelectorAll('video[data-media-video="true"]');
+    for (const video of videos) {
+        if (!video || video.getAttribute('data-video-bound') === 'true') continue;
+        video.setAttribute('data-video-bound', 'true');
+
+        const convId = video.getAttribute('data-conversation-id') || '';
+        const msgId = video.getAttribute('data-message-id') || '';
+        const mediaId = video.getAttribute('data-media-id') || '';
+        if (!convId || !msgId || !mediaId) continue;
+
+        const loadVideoSource = async (bypassCache = false) => {
+            try {
+                const url = await resolveCachedMediaUrl(convId, msgId, mediaId, {
+                    download: false,
+                    bypassCache,
+                    getMediaUrlFn,
+                    nowFn
+                });
+                if (url) {
+                    video.src = url;
+                    return true;
+                }
+            } catch {}
+            return false;
+        };
+
+        const showFallback = () => {
+            video.classList.add('hidden');
+            const wrapper = typeof video.closest === 'function' ? video.closest('[data-video-container="true"]') : null;
+            const fallback = wrapper ? wrapper.querySelector('.media-video-fallback') : null;
+            if (fallback) fallback.classList.remove('hidden');
+        };
+
+        if (typeof video.addEventListener === 'function') {
+            const resetRetry = () => {
+                if (typeof video.removeAttribute === 'function') {
+                    video.removeAttribute('data-video-retried');
+                }
+            };
+            video.addEventListener('loadeddata', resetRetry);
+            video.addEventListener('playing', resetRetry);
+
+            video.addEventListener('error', async () => {
+                const now = nowFn();
+                const lastRetryMs = Number(video.getAttribute('data-video-last-retry-ms') || '0');
+                if (video.getAttribute('data-video-retried') === 'true' || (lastRetryMs > 0 && now - lastRetryMs < VIDEO_RETRY_COOLDOWN_MS)) {
+                    showFallback();
+                    return;
+                }
+                video.setAttribute('data-video-retried', 'true');
+                video.setAttribute('data-video-last-retry-ms', String(now));
+                const savedTime = Number(video.currentTime) || 0;
+                const ok = await loadVideoSource(true);
+                if (!ok) {
+                    showFallback();
+                    return;
+                }
+                if (savedTime > 0) {
+                    video.addEventListener('loadedmetadata', () => {
+                        try {
+                            video.currentTime = savedTime;
+                        } catch {}
+                    }, { once: true });
+                }
+            });
+        }
+
+        if (typeof IntersectionObserver === 'function') {
+            const obs = new IntersectionObserver((entries) => {
+                if (entries.some(e => e.isIntersecting)) {
+                    obs.disconnect();
+                    activeMediaObservers.delete(obs);
+                    loadVideoSource(false);
+                }
+            });
+            activeMediaObservers.add(obs);
+            obs.observe(video);
+        } else {
+            loadVideoSource(false);
+        }
+    }
+
+    const docButtons = rootEl.querySelectorAll('button[data-media-download="true"]');
+    for (const btn of docButtons) {
+        if (!btn || btn.getAttribute('data-download-bound') === 'true') continue;
+        btn.setAttribute('data-download-bound', 'true');
+
+        if (typeof btn.addEventListener === 'function') {
+            btn.addEventListener('click', async (e) => {
+                if (e && typeof e.preventDefault === 'function') e.preventDefault();
+                const convId = btn.getAttribute('data-conversation-id') || '';
+                const msgId = btn.getAttribute('data-message-id') || '';
+                const mediaId = btn.getAttribute('data-media-id') || '';
+                const fileName = btn.getAttribute('data-file-name') || '';
+                if (!convId || !msgId || !mediaId) return;
+
+                try {
+                    const url = await resolveCachedMediaUrl(convId, msgId, mediaId, {
+                        download: true,
+                        bypassCache: true,
+                        getMediaUrlFn,
+                        nowFn
+                    });
+                    if (url) {
+                        triggerSafeDownloadAnchor(url, fileName);
+                    }
+                } catch {
+                    // Refresh via /url when user retries
+                }
+            });
+        }
+    }
+}
 
 /**
  * Sanitizes user-supplied text to prevent Cross-Site Scripting (XSS).
@@ -198,17 +486,28 @@ export function scrubReplyParentBanners(parentMessageId) {
 /**
  * Applies an authoritative edit update to a rendered message row and its child reply banners.
  * @param {string|number} msgId
- * @param {string} newContent
+ * @param {string|null} newContent
  * @param {string|null|undefined} editedAtUtc
+ * @param {string|null} [previewText]
  */
-export function applyMessageEditedToRow(msgId, newContent, editedAtUtc) {
+export function applyMessageEditedToRow(msgId, newContent, editedAtUtc, previewText = null) {
     if (!msgId || typeof document === 'undefined') return;
+    const normalized = newContent === null || newContent === undefined ? '' : String(newContent);
+    const hasVisible = normalized.length > 0;
     const row = typeof document.getElementById === 'function' ? document.getElementById(`msg-${msgId}`) : null;
+    const hasAttachments = row ? row.getAttribute('data-has-attachments') === 'true' : false;
+    const resolvedPreview = previewText !== null && previewText !== undefined && previewText !== ''
+        ? String(previewText)
+        : (hasAttachments && row?.getAttribute('data-message-preview')
+            ? row.getAttribute('data-message-preview')
+            : normalized);
+
     if (row) {
+        row.setAttribute('data-message-preview', resolvedPreview);
         const contentEl = row.querySelector('.message-text-content');
         if (contentEl && row.getAttribute('data-deleted') !== 'true') {
-            contentEl.textContent = newContent || '';
-            contentEl.className = getMessageContentClassName(newContent || '');
+            contentEl.textContent = normalized;
+            contentEl.className = `${getMessageContentClassName(normalized)}${hasVisible ? '' : ' hidden'}`;
         }
         const editedLabel = row.querySelector('.edited-label');
         if (editedLabel && editedAtUtc) {
@@ -216,10 +515,10 @@ export function applyMessageEditedToRow(msgId, newContent, editedAtUtc) {
         }
         const replyBtn = row.querySelector('.reply-action-btn');
         if (replyBtn) {
-            replyBtn.setAttribute('data-preview', newContent || '');
+            replyBtn.setAttribute('data-preview', resolvedPreview);
         }
     }
-    updateReplyParentBanners(msgId, newContent || '');
+    updateReplyParentBanners(msgId, resolvedPreview);
 }
 
 /**
@@ -230,6 +529,16 @@ export function applyMessageEditedToRow(msgId, newContent, editedAtUtc) {
 export function applyMessageDeletedForEveryone(row, msgId) {
     if (row && typeof document !== 'undefined') {
         row.setAttribute('data-deleted', 'true');
+        row.setAttribute('data-has-attachments', 'false');
+        row.setAttribute('data-message-preview', 'This message was deleted');
+
+        if (typeof row.querySelectorAll === 'function') {
+            teardownRowVideos(row);
+            row.querySelectorAll('.message-media-container').forEach((mediaEl) => {
+                if (typeof mediaEl.remove === 'function') mediaEl.remove();
+            });
+        }
+
         const isOutgoing = row.getAttribute('data-is-outgoing') === 'true' || row.classList.contains('justify-end');
         const contentEl = row.querySelector('.message-text-content');
         if (contentEl) {
@@ -259,6 +568,7 @@ export function applyMessageDeletedForEveryone(row, msgId) {
     }
 
     if (msgId) {
+        evictMediaUrlCacheForMessage(msgId);
         scrubReplyParentBanners(msgId);
     }
 }
@@ -272,11 +582,17 @@ export function applyMessageDeletedForEveryone(row, msgId) {
  * @param {boolean} isActiveConv
  */
 export function applyMessageDeletedForMe(msgId, convId, newLastMessageId, newLastMessagePreview, isActiveConv) {
+    if (msgId) {
+        evictMediaUrlCacheForMessage(msgId);
+    }
     if (typeof document === 'undefined') return;
     if (isActiveConv && msgId) {
         const row = typeof document.getElementById === 'function' ? document.getElementById(`msg-${msgId}`) : null;
-        if (row && typeof row.remove === 'function') {
-            row.remove();
+        if (row) {
+            teardownRowVideos(row);
+            if (typeof row.remove === 'function') {
+                row.remove();
+            }
         }
 
         if (typeof document.querySelectorAll === 'function') {
@@ -381,6 +697,10 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     const senderName = message.senderName || 'Unknown';
     const timeStr = formatTime(message.createdAtUtc);
     const convId = message.conversationId ? (typeof message.conversationId === 'object' && message.conversationId.value ? message.conversationId.value : String(message.conversationId)) : '';
+    const rawAttachments = message.attachments ?? message.Attachments ?? [];
+    const attachments = !message.isDeletedForEveryone && Array.isArray(rawAttachments) ? rawAttachments : [];
+    const hasAttachments = attachments.length > 0;
+    const formattedPreview = formatMessagePreview(message);
 
     // Root row container
     const row = document.createElement('div');
@@ -389,6 +709,8 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         row.setAttribute('data-message-id', id);
     }
     row.setAttribute('data-deleted', message.isDeletedForEveryone ? 'true' : 'false');
+    row.setAttribute('data-has-attachments', hasAttachments ? 'true' : 'false');
+    row.setAttribute('data-message-preview', formattedPreview);
     if (message.createdAtUtc) {
         row.setAttribute('data-created-at', message.createdAtUtc);
     }
@@ -474,9 +796,148 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
 
         bubble.appendChild(delDiv);
     } else {
+        if (hasAttachments) {
+            const mediaContainer = document.createElement('div');
+            mediaContainer.className = 'message-media-container mb-1.5 space-y-1.5';
+
+            const images = attachments.filter(a => String(a?.kind ?? a?.Kind ?? '').toLowerCase() === 'image');
+            const others = attachments.filter(a => String(a?.kind ?? a?.Kind ?? '').toLowerCase() !== 'image');
+
+            const buildImageButton = (att, isGrid) => {
+                const mediaId = normalizeIdValue(att.id ?? att.Id);
+                const fileName = att.fileName ?? att.FileName ?? 'image';
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.setAttribute('data-lightbox-trigger', 'true');
+                btn.setAttribute('data-conversation-id', convId);
+                if (id) btn.setAttribute('data-message-id', id);
+                btn.setAttribute('data-media-id', mediaId);
+                btn.setAttribute('data-file-name', fileName);
+                btn.className = isGrid
+                    ? (isOutgoing
+                        ? 'block aspect-square overflow-hidden rounded-lg bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer'
+                        : 'block aspect-square overflow-hidden rounded-lg bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer')
+                    : (isOutgoing
+                        ? 'block w-full overflow-hidden rounded-xl bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer'
+                        : 'block w-full overflow-hidden rounded-xl bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer');
+
+                const img = document.createElement('img');
+                img.src = buildMediaInlineUrl(convId, id || '', mediaId);
+                img.alt = fileName;
+                const w = att.width ?? att.Width;
+                const h = att.height ?? att.Height;
+                if (w) img.setAttribute('width', String(w));
+                if (h) img.setAttribute('height', String(h));
+                img.loading = 'lazy';
+                img.decoding = 'async';
+                img.setAttribute('data-media-img', 'true');
+                img.className = isGrid
+                    ? 'w-full h-full aspect-square object-cover'
+                    : 'w-full h-auto max-h-80 object-contain rounded-xl';
+                btn.appendChild(img);
+                return btn;
+            };
+
+            if (images.length === 1) {
+                mediaContainer.appendChild(buildImageButton(images[0], false));
+            } else if (images.length > 1) {
+                const grid = document.createElement('div');
+                grid.className = 'grid grid-cols-2 gap-1.5';
+                for (const imgAtt of images) {
+                    grid.appendChild(buildImageButton(imgAtt, true));
+                }
+                mediaContainer.appendChild(grid);
+            }
+
+            for (const att of others) {
+                const kind = String(att?.kind ?? att?.Kind ?? 'document').toLowerCase();
+                const mediaId = normalizeIdValue(att.id ?? att.Id);
+                const fileName = att.fileName ?? att.FileName ?? 'Attachment';
+                const sizeBytes = Number(att.sizeBytes ?? att.SizeBytes ?? 0);
+
+                if (kind === 'video') {
+                    const wrap = document.createElement('div');
+                    wrap.className = isOutgoing
+                        ? 'media-video-wrapper overflow-hidden rounded-xl bg-black/20'
+                        : 'media-video-wrapper overflow-hidden rounded-xl bg-black/10 dark:bg-black/25';
+                    wrap.setAttribute('data-video-container', 'true');
+
+                    const video = document.createElement('video');
+                    video.controls = true;
+                    video.preload = 'metadata';
+                    video.playsInline = true;
+                    video.setAttribute('playsinline', '');
+                    video.className = 'w-full max-h-80 rounded-xl bg-black';
+                    video.setAttribute('data-media-video', 'true');
+                    video.setAttribute('data-conversation-id', convId);
+                    if (id) video.setAttribute('data-message-id', id);
+                    video.setAttribute('data-media-id', mediaId);
+                    video.setAttribute('data-file-name', fileName);
+                    wrap.appendChild(video);
+
+                    const fallback = document.createElement('div');
+                    fallback.className = isOutgoing
+                        ? 'media-video-fallback hidden px-3 py-2 text-xs opacity-80'
+                        : 'media-video-fallback hidden px-3 py-2 text-xs text-[#6E6560] dark:text-[#C9C0B9]';
+                    fallback.textContent = 'Media unavailable';
+                    wrap.appendChild(fallback);
+
+                    mediaContainer.appendChild(wrap);
+                } else {
+                    const docBtn = document.createElement('button');
+                    docBtn.type = 'button';
+                    docBtn.setAttribute('data-media-download', 'true');
+                    docBtn.setAttribute('data-conversation-id', convId);
+                    if (id) docBtn.setAttribute('data-message-id', id);
+                    docBtn.setAttribute('data-media-id', mediaId);
+                    docBtn.setAttribute('data-file-name', fileName);
+                    docBtn.className = isOutgoing
+                        ? 'w-full max-w-xs min-w-0 flex items-center gap-2.5 px-3 py-2 rounded-xl bg-black/15 hover:bg-black/25 text-left transition-colors cursor-pointer'
+                        : 'w-full max-w-xs min-w-0 flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] text-left transition-colors cursor-pointer';
+
+                    const docIcon = document.createElement('span');
+                    docIcon.className = isOutgoing
+                        ? 'material-symbols-outlined text-[20px] shrink-0'
+                        : 'material-symbols-outlined text-[20px] text-[#735761] dark:text-[#E1BDC9] shrink-0';
+                    docIcon.textContent = 'description';
+                    docBtn.appendChild(docIcon);
+
+                    const textCol = document.createElement('span');
+                    textCol.className = 'flex-1 min-w-0';
+                    const nameSpan = document.createElement('span');
+                    nameSpan.className = isOutgoing
+                        ? 'block text-xs font-semibold truncate'
+                        : 'block text-xs font-semibold truncate text-[#2B2725] dark:text-[#F0E9E2]';
+                    nameSpan.textContent = fileName;
+                    textCol.appendChild(nameSpan);
+
+                    const sizeSpan = document.createElement('span');
+                    sizeSpan.className = isOutgoing
+                        ? 'block text-[10px] opacity-80'
+                        : 'block text-[10px] text-[#6E6560] dark:text-[#C9C0B9]';
+                    sizeSpan.textContent = formatAttachmentBytes(sizeBytes);
+                    textCol.appendChild(sizeSpan);
+                    docBtn.appendChild(textCol);
+
+                    const dlIcon = document.createElement('span');
+                    dlIcon.className = isOutgoing
+                        ? 'material-symbols-outlined text-[18px] shrink-0 opacity-90'
+                        : 'material-symbols-outlined text-[18px] text-[#6E6560] dark:text-[#C9C0B9] shrink-0';
+                    dlIcon.textContent = 'download';
+                    docBtn.appendChild(dlIcon);
+
+                    mediaContainer.appendChild(docBtn);
+                }
+            }
+
+            bubble.appendChild(mediaContainer);
+        }
+
+        const msgText = message.content || '';
+        const hasCaption = msgText.length > 0;
         const contentDiv = document.createElement('div');
-        contentDiv.className = getMessageContentClassName(message.content || '');
-        contentDiv.textContent = message.content || '';
+        contentDiv.className = `${getMessageContentClassName(msgText)}${hasCaption ? '' : ' hidden'}`;
+        contentDiv.textContent = msgText;
         bubble.appendChild(contentDiv);
     }
 
@@ -555,7 +1016,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         replyBtn.setAttribute('aria-label', 'Reply to message');
         if (id) replyBtn.setAttribute('data-id', id);
         replyBtn.setAttribute('data-sender', senderName);
-        replyBtn.setAttribute('data-preview', message.content || '');
+        replyBtn.setAttribute('data-preview', formattedPreview);
 
         const replyIcon = document.createElement('span');
         replyIcon.className = 'material-symbols-outlined text-[16px]';
@@ -598,6 +1059,10 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         } else {
             row.appendChild(actionsBar);
         }
+    }
+
+    if (hasAttachments) {
+        hydrateMediaElements(row);
     }
 
     return row;
@@ -1157,6 +1622,7 @@ export function renderConversationHeader(meta) {
  * Clears active message pane DOM elements without destroying shell structure.
  */
 export function clearPane() {
+    disconnectActiveMediaObservers();
     if (typeof document === 'undefined') return;
     const containerEl = document.getElementById('messages-container');
     clearElementChildren(containerEl);
@@ -1227,6 +1693,7 @@ export function showSafeError(message) {
 export function wipeSensitiveDom() {
     if (typeof document === 'undefined') return;
 
+    clearMediaUrlCache();
     clearPane();
     lockAndClearHeaderActions();
 
@@ -1266,6 +1733,8 @@ export function wipeSensitiveDom() {
     }
     const sendBtn = document.getElementById('send-message-btn');
     if (sendBtn) sendBtn.disabled = true;
+    const attachBtn = document.getElementById('composer-attach-btn');
+    if (attachBtn) attachBtn.disabled = true;
 
     const replyBanner = document.getElementById('composer-reply-banner');
     if (replyBanner) replyBanner.classList.add('hidden');
@@ -1274,15 +1743,38 @@ export function wipeSensitiveDom() {
     const replyPreview = document.getElementById('reply-banner-preview');
     if (replyPreview) replyPreview.textContent = '';
 
-    for (const id of ['chat-policy-notice', 'chat-action-error', 'edit-message-modal', 'delete-message-modal', 'reaction-picker-popover']) {
+    for (const id of ['chat-policy-notice', 'chat-action-error', 'edit-message-modal', 'delete-message-modal', 'reaction-picker-popover', 'composer-attachments-tray', 'composer-attach-menu', 'chat-dropzone-overlay', 'media-lightbox-modal']) {
         const el = document.getElementById(id);
         if (el) {
             el.classList.add('hidden');
             if (id === 'chat-policy-notice' || id === 'chat-action-error') {
                 el.textContent = '';
             }
+            if (id === 'composer-attachments-tray') {
+                clearElementChildren(el);
+            }
         }
     }
+
+    const pendingContainer = document.getElementById('pending-uploads-container');
+    if (pendingContainer) {
+        clearElementChildren(pendingContainer);
+    }
+
+    const lightboxImg = document.getElementById('media-lightbox-img');
+    if (lightboxImg) {
+        if (typeof lightboxImg.removeAttribute === 'function') lightboxImg.removeAttribute('src');
+        lightboxImg.alt = '';
+    }
+    const lightboxTitle = document.getElementById('media-lightbox-title');
+    if (lightboxTitle) lightboxTitle.textContent = '';
+    const lightboxCounter = document.getElementById('media-lightbox-counter');
+    if (lightboxCounter) {
+        lightboxCounter.textContent = '';
+        lightboxCounter.classList.add('hidden');
+    }
+    const lightboxErr = document.getElementById('media-lightbox-error');
+    if (lightboxErr) lightboxErr.classList.add('hidden');
 
     const editInput = document.getElementById('edit-message-input');
     if (editInput) editInput.value = '';

@@ -28,7 +28,7 @@ public sealed class WebSecurityHardeningTests
         Assert.Equal("DENY", context.Response.Headers["X-Frame-Options"]);
         Assert.Equal("strict-origin-when-cross-origin", context.Response.Headers["Referrer-Policy"]);
         Assert.Equal(
-            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
             context.Response.Headers["Content-Security-Policy"]);
         Assert.Equal(
             "camera=(), microphone=(self), geolocation=(), payment=(), usb=()",
@@ -178,5 +178,38 @@ public sealed class WebSecurityHardeningTests
         var limiter11 = partition11.Factory($"{clientIp}:user11@example.com");
         using var lease11 = limiter11.AttemptAcquire(1);
         Assert.False(lease11.IsAcquired, "11th attempt from same IP must be throttled regardless of different target email.");
+    }
+
+    [Fact]
+    public async Task SecurityHeadersOptions_AndMiddleware_DeriveAndEmitStrictR2CspOrigin()
+    {
+        Assert.Same(SecurityHeadersOptions.Default, SecurityHeadersOptions.FromServiceUrl(null));
+        Assert.Same(SecurityHeadersOptions.Default, SecurityHeadersOptions.FromServiceUrl("   "));
+        Assert.Null(SecurityHeadersOptions.Default.R2Origin);
+
+        var opts = SecurityHeadersOptions.FromServiceUrl("https://acct123.r2.cloudflarestorage.com:443/");
+        Assert.Equal("https://acct123.r2.cloudflarestorage.com", opts.R2Origin);
+        Assert.Equal(
+            "default-src 'self'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' blob: https://acct123.r2.cloudflarestorage.com; media-src 'self' blob: https://acct123.r2.cloudflarestorage.com; connect-src 'self' https://acct123.r2.cloudflarestorage.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            opts.ContentSecurityPolicy);
+
+        foreach (var badUrl in new[]
+        {
+            "http://acct123.r2.cloudflarestorage.com",
+            "https://*.r2.cloudflarestorage.com",
+            "https://acct123.r2.cloudflarestorage.com/bucket",
+            "https://acct123.r2.cloudflarestorage.com?foo=bar",
+            "https://user:pass@acct123.r2.cloudflarestorage.com",
+            "https://acct123.r2.cloudflarestorage.com;evil"
+        })
+        {
+            Assert.Throws<InvalidOperationException>(() => SecurityHeadersOptions.FromServiceUrl(badUrl));
+        }
+
+        var context = new DefaultHttpContext();
+        var middleware = new SecurityHeadersMiddleware(_ => Task.CompletedTask, opts);
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal(opts.ContentSecurityPolicy, context.Response.Headers["Content-Security-Policy"]);
     }
 }

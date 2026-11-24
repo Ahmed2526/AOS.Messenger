@@ -115,3 +115,45 @@ public sealed class ConversationIdJsonConverter : JsonConverter<ConversationId>
         writer.WriteStringValue(value.Value);
     }
 }
+
+public sealed class MediaIdJsonConverter : JsonConverter<MediaId>
+{
+    public override MediaId? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+        {
+            return null;
+        }
+
+        if (reader.TokenType == JsonTokenType.String)
+        {
+            var str = reader.GetString();
+            if (!MediaId.TryParse(str, out var mediaId))
+            {
+                throw new JsonException("Invalid MediaId value.");
+            }
+
+            return mediaId;
+        }
+
+        if (reader.TokenType == JsonTokenType.StartObject)
+        {
+            using var doc = JsonDocument.ParseValue(ref reader);
+            if (doc.RootElement.TryGetProperty("value", out var valProp)
+                && valProp.ValueKind == JsonValueKind.String
+                && MediaId.TryParse(valProp.GetString(), out var mediaId))
+            {
+                return mediaId;
+            }
+
+            throw new JsonException("Invalid MediaId object value.");
+        }
+
+        throw new JsonException($"Cannot convert token of type {reader.TokenType} to MediaId.");
+    }
+
+    public override void Write(Utf8JsonWriter writer, MediaId value, JsonSerializerOptions options)
+    {
+        writer.WriteStringValue(value.Value);
+    }
+}

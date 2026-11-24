@@ -1,0 +1,758 @@
+using System.Diagnostics;
+using System.Text;
+using Xunit;
+
+namespace AOS.Messenger.Tests;
+
+public sealed class Phase9MediaFrontendTests
+{
+    private static string FindSolutionRoot()
+    {
+        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        while (current != null &&
+               !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.slnx")) &&
+               !File.Exists(Path.Combine(current.FullName, "AOS.Messenger.sln")) &&
+               !Directory.Exists(Path.Combine(current.FullName, "src", "AOS.Messenger.Web")))
+        {
+            current = current.Parent;
+        }
+
+        return current?.FullName ?? throw new InvalidOperationException("Could not locate solution root.");
+    }
+
+    private static string JsUrl(string fileName)
+    {
+        var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
+        Assert.True(File.Exists(path), $"JS module not found: {path}");
+        return new Uri(path).AbsoluteUri;
+    }
+
+    private static (int ExitCode, string Output, string Error) RunNodeModuleScript(string script)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "node",
+            Arguments = "--input-type=module -",
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi)
+            ?? throw new InvalidOperationException("Failed to start node process for ES module verification.");
+
+        var outputBuilder = new StringBuilder();
+        var errorBuilder = new StringBuilder();
+        process.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) outputBuilder.AppendLine(e.Data);
+        };
+        process.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) errorBuilder.AppendLine(e.Data);
+        };
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.StandardInput.Write(script);
+        process.StandardInput.Close();
+
+        if (!process.WaitForExit(15000))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new TimeoutException("Node ES module verification timed out.");
+        }
+
+        process.WaitForExit();
+        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
+    }
+
+    private const string MockDomPrelude = """
+        function createClassList(el) {
+            const getSet = () => new Set((el.className || '').split(/\s+/).filter(Boolean));
+            const writeSet = (set) => { el.className = [...set].join(' '); };
+            return {
+                add(...tokens) { const s = getSet(); tokens.forEach(t => s.add(t)); writeSet(s); },
+                remove(...tokens) { const s = getSet(); tokens.forEach(t => s.delete(t)); writeSet(s); },
+                toggle(token, force) {
+                    const s = getSet();
+                    const shouldAdd = force !== undefined ? !!force : !s.has(token);
+                    if (shouldAdd) s.add(token); else s.delete(token);
+                    writeSet(s);
+                    return shouldAdd;
+                },
+                contains(token) { return getSet().has(token); }
+            };
+        }
+
+        function matchesSingle(node, part) {
+            if (!node || node.nodeType !== 1) return false;
+            if (part.startsWith('#')) return node.id === part.slice(1);
+            const attrMatch = /^([a-z0-9_.-]+)?((?:\[[^\]]+\])+)$/i.exec(part);
+            if (attrMatch) {
+                const base = attrMatch[1] || '';
+                if (base) {
+                    if (base.startsWith('.')) {
+                        if (!node.classList.contains(base.slice(1))) return false;
+                    } else if (node.tagName.toLowerCase() !== base.toLowerCase()) {
+                        return false;
+                    }
+                }
+                const attrs = [...attrMatch[2].matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)];
+                return attrs.every((m) => {
+                    const val = node.getAttribute(m[1]);
+                    return m[2] === undefined ? val !== null : val === m[2];
+                });
+            }
+            if (part.startsWith('.')) return node.classList.contains(part.slice(1));
+            return node.tagName.toLowerCase() === part.toLowerCase();
+        }
+
+        function matchesSelector(el, selector) {
+            const parts = selector.trim().split(/\s+/);
+            return matchesSingle(el, parts[parts.length - 1]);
+        }
+
+        function walk(root, predicate, acc = []) {
+            for (const child of root.children || []) {
+                if (predicate(child)) acc.push(child);
+                walk(child, predicate, acc);
+            }
+            return acc;
+        }
+
+        function createEl(tag, id = '') {
+            const attrs = new Map();
+            const listeners = new Map();
+            const el = {
+                nodeType: 1,
+                tagName: tag.toUpperCase(),
+                id,
+                className: '',
+                children: [],
+                parentNode: null,
+                disabled: false,
+                value: '',
+                src: '',
+                alt: '',
+                href: '',
+                controls: false,
+                preload: '',
+                playsInline: false,
+                max: 100,
+                files: [],
+                style: {},
+                _textContent: '',
+                get textContent() {
+                    if (this.children.length === 0) return this._textContent;
+                    return this._textContent + this.children.map(c => c.textContent).join('');
+                },
+                set textContent(v) {
+                    this.children = [];
+                    this._textContent = v === null || v === undefined ? '' : String(v);
+                },
+                get firstChild() { return this.children[0] || null; },
+                appendChild(child) {
+                    if (!child) return child;
+                    if (child.nodeType === 11) {
+                        for (const sub of [...child.children]) this.appendChild(sub);
+                        return child;
+                    }
+                    child.parentNode = this;
+                    this.children.push(child);
+                    return child;
+                },
+                insertBefore(newNode, refNode) {
+                    if (!refNode) return this.appendChild(newNode);
+                    const idx = this.children.indexOf(refNode);
+                    if (idx < 0) return this.appendChild(newNode);
+                    newNode.parentNode = this;
+                    this.children.splice(idx, 0, newNode);
+                    return newNode;
+                },
+                removeChild(child) {
+                    const idx = this.children.indexOf(child);
+                    if (idx >= 0) {
+                        this.children.splice(idx, 1);
+                        child.parentNode = null;
+                    }
+                    return child;
+                },
+                remove() {
+                    if (this.parentNode) this.parentNode.removeChild(this);
+                },
+                setAttribute(k, v) {
+                    attrs.set(k, String(v));
+                    if (k === 'id') this.id = String(v);
+                    if (k === 'src') this.src = String(v);
+                },
+                getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+                removeAttribute(k) {
+                    attrs.delete(k);
+                    if (k === 'src') this.src = '';
+                },
+                hasAttribute(k) { return attrs.has(k); },
+                addEventListener(type, fn) {
+                    if (!listeners.has(type)) listeners.set(type, new Set());
+                    listeners.get(type).add(fn);
+                },
+                removeEventListener(type, fn) {
+                    listeners.get(type)?.delete(fn);
+                },
+                dispatchEvent(evt) {
+                    evt.target = evt.target || this;
+                    for (const fn of listeners.get(evt.type) || []) fn(evt);
+                },
+                click() { this._clicked = true; },
+                focus() { if (globalThis.document) globalThis.document.activeElement = this; },
+                contains(target) {
+                    let cur = target;
+                    while (cur) {
+                        if (cur === this) return true;
+                        cur = cur.parentNode;
+                    }
+                    return false;
+                },
+                closest(sel) {
+                    let cur = this;
+                    while (cur) {
+                        if (matchesSelector(cur, sel)) return cur;
+                        cur = cur.parentNode;
+                    }
+                    return null;
+                },
+                querySelector(sel) { return walk(this, n => matchesSelector(n, sel))[0] || null; },
+                querySelectorAll(sel) { return walk(this, n => matchesSelector(n, sel)); }
+            };
+            el.classList = createClassList(el);
+            if (id) el.setAttribute('id', id);
+            return el;
+        }
+
+        const docListeners = new Map();
+        const rootBody = createEl('body');
+        globalThis.document = {
+            body: rootBody,
+            activeElement: null,
+            visibilityState: 'visible',
+            hasFocus: () => true,
+            title: 'Test',
+            createElement: (tag) => createEl(tag),
+            createTextNode: (txt) => ({ nodeType: 3, textContent: String(txt), parentNode: null }),
+            createDocumentFragment: () => ({ nodeType: 11, children: [], appendChild(c) { this.children.push(c); return c; } }),
+            getElementById: (id) => walk(rootBody, n => n.id === id)[0] || null,
+            querySelector: (sel) => rootBody.querySelector(sel),
+            querySelectorAll: (sel) => rootBody.querySelectorAll(sel),
+            addEventListener(type, fn) {
+                if (!docListeners.has(type)) docListeners.set(type, new Set());
+                docListeners.get(type).add(fn);
+            },
+            removeEventListener(type, fn) {
+                docListeners.get(type)?.delete(fn);
+            },
+            dispatchEvent(evt) {
+                for (const fn of docListeners.get(evt.type) || []) fn(evt);
+            }
+        };
+        globalThis.window = {
+            addEventListener: () => {},
+            removeEventListener: () => {}
+        };
+        """;
+
+    [Fact]
+    public void MessageRenderer_MediaFormattingEditingTombstoneAndWipe_BehaveAccuratelyInNode()
+    {
+        var rendererUrl = JsUrl("message-renderer.js");
+        var lightboxUrl = JsUrl("media-lightbox.js");
+
+        var script = MockDomPrelude + $$"""
+            import assert from 'node:assert/strict';
+            import * as renderer from '{{rendererUrl}}';
+            import { isSafeMediaUrl } from '{{lightboxUrl}}';
+
+            // 1. Safe URL validation
+            assert.equal(isSafeMediaUrl('https://cdn.example.com/media/123'), true);
+            assert.equal(isSafeMediaUrl('/dev-media/download?token=abc'), true);
+            assert.equal(isSafeMediaUrl('//evil.example.com/x.jpg'), false);
+            assert.equal(isSafeMediaUrl('javascript:alert(1)'), false);
+            assert.equal(isSafeMediaUrl('data:text/html,<script>'), false);
+            assert.equal(isSafeMediaUrl('http://insecure.example.com/a.jpg'), false);
+
+            // 2. formatMessagePreview parity
+            assert.equal(renderer.formatMessagePreview({ content: '\u200B  ', attachments: [{ kind: 'image', fileName: 'a.png' }] }), '📷 Photo');
+            assert.equal(renderer.formatMessagePreview({ content: 'Trip', attachments: [{ kind: 'image' }, { kind: 'image' }] }), '📷 Trip');
+            assert.equal(renderer.formatMessagePreview({ content: '', attachments: [{ kind: 'image' }, { kind: 'image' }] }), '📷 2 photos');
+            assert.equal(renderer.formatMessagePreview({ content: '', attachments: [{ kind: 'image' }, { kind: 'document', fileName: 'x.pdf' }] }), '📎 2 attachments');
+            assert.equal(renderer.formatMessagePreview({ content: '', attachments: [{ kind: 'document', fileName: 'spec.pdf' }] }), '📎 spec.pdf');
+            assert.equal(renderer.formatMessagePreview({ isDeletedForEveryone: true, attachments: [{ kind: 'image' }] }), 'This message was deleted');
+
+            // 3. Render bubble with media -> edit caption cleared -> delete for everyone scrubs .message-media-container
+            const messagesContainer = document.createElement('div');
+            messagesContainer.id = 'messages-container';
+            const pendingContainer = document.createElement('div');
+            pendingContainer.id = 'pending-uploads-container';
+            const tray = document.createElement('div');
+            tray.id = 'composer-attachments-tray';
+            const attachMenu = document.createElement('div');
+            attachMenu.id = 'composer-attach-menu';
+            const dropzone = document.createElement('div');
+            dropzone.id = 'chat-dropzone-overlay';
+            const attachBtn = document.createElement('button');
+            attachBtn.id = 'composer-attach-btn';
+            const lightboxModal = document.createElement('div');
+            lightboxModal.id = 'media-lightbox-modal';
+            const lightboxImg = document.createElement('img');
+            lightboxImg.id = 'media-lightbox-img';
+            lightboxImg.setAttribute('src', '/api/conversations/c1/messages/1/media/m1');
+            lightboxModal.appendChild(lightboxImg);
+
+            for (const node of [messagesContainer, pendingContainer, tray, attachMenu, dropzone, attachBtn, lightboxModal]) {
+                document.body.appendChild(node);
+            }
+
+            const convId = '11111111-1111-1111-1111-111111111111';
+            const mediaId = '22222222-2222-2222-2222-222222222222';
+            const msg = {
+                id: 501,
+                conversationId: convId,
+                senderId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+                senderName: 'Alice',
+                senderHandle: 'alice',
+                content: 'Original caption',
+                createdAtUtc: '2026-11-24T12:00:00Z',
+                isDeletedForEveryone: false,
+                isOutgoing: true,
+                attachments: [{ id: mediaId, kind: 'image', fileName: 'photo.jpg', contentType: 'image/jpeg', sizeBytes: 1234, width: 100, height: 80, displayOrder: 0 }]
+            };
+
+            const row = renderer.createMessageBubbleElement(msg, msg.senderId);
+            messagesContainer.appendChild(row);
+            assert.equal(row.getAttribute('data-has-attachments'), 'true');
+            assert.equal(row.getAttribute('data-message-preview'), '📷 Original caption');
+            assert.ok(row.querySelector('.message-media-container'));
+            assert.equal(row.querySelector('img').getAttribute('width'), '100');
+            assert.equal(row.querySelector('img').getAttribute('height'), '80');
+
+            // Edit to clear caption -> toggles .hidden on .message-text-content & keeps preview
+            renderer.applyMessageEditedToRow(501, '', '2026-11-24T12:01:00Z', '📷 Photo');
+            const textEl = row.querySelector('.message-text-content');
+            assert.equal(textEl.classList.contains('hidden'), true);
+            assert.equal(row.getAttribute('data-message-preview'), '📷 Photo');
+
+            // Delete for everyone -> removes .message-media-container
+            renderer.applyMessageDeletedForEveryone(row, 501);
+            assert.equal(row.querySelector('.message-media-container'), null);
+            assert.equal(row.getAttribute('data-has-attachments'), 'false');
+            assert.equal(row.getAttribute('data-message-preview'), 'This message was deleted');
+
+            // wipeSensitiveDom -> clears media cache, tray, lightbox img, dropzone, pending container & disables attach btn
+            renderer.wipeSensitiveDom();
+            assert.equal(attachBtn.disabled, true);
+            assert.equal(lightboxModal.classList.contains('hidden'), true);
+            assert.equal(lightboxImg.hasAttribute('src'), false);
+            assert.equal(lightboxImg.src, '');
+            assert.equal(tray.classList.contains('hidden'), true);
+            assert.equal(pendingContainer.children.length, 0);
+
+            // 4. [W6] resolveCachedMediaUrl respects short expiresAtUtc (5 min -> expires at 4 min with 60s safety margin)
+            let urlNow = 1_700_000_000_000;
+            let urlFetches = 0;
+            const getShortTtlUrl = async () => {
+                urlFetches++;
+                return {
+                    url: `https://cdn.example.com/media/video-${urlFetches}.mp4`,
+                    expiresAtUtc: new Date(urlNow + 5 * 60 * 1000).toISOString()
+                };
+            };
+            const firstResolved = await renderer.resolveCachedMediaUrl(convId, 777, mediaId, {
+                getMediaUrlFn: getShortTtlUrl,
+                nowFn: () => urlNow
+            });
+            assert.equal(urlFetches, 1);
+            // Still valid at +3 min
+            urlNow += 3 * 60 * 1000;
+            const cachedResolved = await renderer.resolveCachedMediaUrl(convId, 777, mediaId, {
+                getMediaUrlFn: getShortTtlUrl,
+                nowFn: () => urlNow
+            });
+            assert.equal(cachedResolved, firstResolved);
+            assert.equal(urlFetches, 1);
+            // Expired at +4m01s (inside 60s margin before 5m expiry) -> re-fetches!
+            urlNow += 61 * 1000;
+            const refreshedResolved = await renderer.resolveCachedMediaUrl(convId, 777, mediaId, {
+                getMediaUrlFn: getShortTtlUrl,
+                nowFn: () => urlNow
+            });
+            assert.notEqual(refreshedResolved, firstResolved);
+            assert.equal(urlFetches, 2);
+
+            // 5. [W6] <video> retry resets on loadeddata and recovers again after cooldown
+            const videoWrapper = document.createElement('div');
+            videoWrapper.setAttribute('data-video-container', 'true');
+            const videoEl = document.createElement('video');
+            videoEl.setAttribute('data-media-video', 'true');
+            videoEl.setAttribute('data-conversation-id', convId);
+            videoEl.setAttribute('data-message-id', '778');
+            videoEl.setAttribute('data-media-id', mediaId);
+            const videoFallback = document.createElement('div');
+            videoFallback.classList.add('media-video-fallback', 'hidden');
+            videoWrapper.appendChild(videoEl);
+            videoWrapper.appendChild(videoFallback);
+            document.body.appendChild(videoWrapper);
+
+            let vidCalls = 0;
+            renderer.hydrateMediaElements(videoWrapper, {
+                getMediaUrlFn: async () => ({
+                    url: `https://cdn.example.com/v/${++vidCalls}.mp4`,
+                    expiresAtUtc: new Date(urlNow + 10 * 60 * 1000).toISOString()
+                }),
+                nowFn: () => urlNow
+            });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(vidCalls, 1);
+
+            // First error triggers retry
+            videoEl.dispatchEvent({ type: 'error' });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(vidCalls, 2);
+            // Playback recovers -> clears data-video-retried
+            videoEl.dispatchEvent({ type: 'loadeddata' });
+            assert.equal(videoEl.getAttribute('data-video-retried'), null);
+            // Advance past 15s cooldown -> second expiry error retries cleanly
+            urlNow += 20_000;
+            videoEl.dispatchEvent({ type: 'error' });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(vidCalls, 3);
+            assert.equal(videoFallback.classList.contains('hidden'), true);
+
+            // 6. [W3] DeleteForEveryone and DeleteForMe evict cached URLs and pause/unload detached <video> elements
+            let delUrlFetches = 0;
+            const fetchDelUrl = async () => ({
+                url: `https://cdn.example.com/del/${++delUrlFetches}.mp4`,
+                expiresAtUtc: new Date(urlNow + 10 * 60 * 1000).toISOString()
+            });
+            await renderer.resolveCachedMediaUrl(convId, 888, mediaId, { getMediaUrlFn: fetchDelUrl, nowFn: () => urlNow });
+            await renderer.resolveCachedMediaUrl(convId, 888, mediaId, { getMediaUrlFn: fetchDelUrl, nowFn: () => urlNow });
+            assert.equal(delUrlFetches, 1);
+
+            const delRow = document.createElement('div');
+            delRow.id = 'msg-888';
+            const delContainer = document.createElement('div');
+            delContainer.classList.add('message-media-container');
+            const delVid = document.createElement('video');
+            delVid.src = 'https://cdn.example.com/del/1.mp4';
+            let vidPaused = false;
+            let vidLoaded = false;
+            delVid.pause = () => { vidPaused = true; };
+            delVid.load = () => { vidLoaded = true; };
+            delContainer.appendChild(delVid);
+            delRow.appendChild(delContainer);
+            messagesContainer.appendChild(delRow);
+
+            renderer.applyMessageDeletedForEveryone(delRow, 888);
+            assert.equal(vidPaused, true);
+            assert.equal(vidLoaded, true);
+            assert.equal(delVid.src, '');
+            await renderer.resolveCachedMediaUrl(convId, 888, mediaId, { getMediaUrlFn: fetchDelUrl, nowFn: () => urlNow });
+            assert.equal(delUrlFetches, 2);
+
+            await renderer.resolveCachedMediaUrl(convId, 889, mediaId, { getMediaUrlFn: fetchDelUrl, nowFn: () => urlNow });
+            assert.equal(delUrlFetches, 3);
+            const delMeRow = document.createElement('div');
+            delMeRow.id = 'msg-889';
+            const delMeVid = document.createElement('video');
+            delMeVid.src = 'https://cdn.example.com/del/3.mp4';
+            let meVidPaused = false;
+            delMeVid.pause = () => { meVidPaused = true; };
+            delMeVid.load = () => {};
+            delMeRow.appendChild(delMeVid);
+            messagesContainer.appendChild(delMeRow);
+
+            renderer.applyMessageDeletedForMe(889, convId, null, null, true);
+            assert.equal(meVidPaused, true);
+            await renderer.resolveCachedMediaUrl(convId, 889, mediaId, { getMediaUrlFn: fetchDelUrl, nowFn: () => urlNow });
+            assert.equal(delUrlFetches, 4);
+
+            console.log('OK_RENDERER');
+            """;
+
+        var (exitCode, output, error) = RunNodeModuleScript(script);
+        Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
+        Assert.Contains("OK_RENDERER", output);
+    }
+
+    [Fact]
+    public void MediaUploader_And_MediaLightbox_EnforceConcurrencyRetryExpiryDedupAndNavigationInNode()
+    {
+        var uploaderUrl = JsUrl("media-uploader.js");
+        var lightboxUrl = JsUrl("media-lightbox.js");
+
+        var script = MockDomPrelude + $$"""
+            import assert from 'node:assert/strict';
+            import { createMediaUploader, validateSelectedFile } from '{{uploaderUrl}}';
+            import { createMediaLightbox } from '{{lightboxUrl}}';
+
+            // Blob URL tracking
+            const revokedUrls = [];
+            let blobCounter = 0;
+            globalThis.URL = class extends globalThis.URL {
+                static createObjectURL() { return `blob:mock/${++blobCounter}`; }
+                static revokeObjectURL(u) { revokedUrls.push(u); }
+            };
+
+            // Setup required DOM nodes
+            const tray = document.createElement('div'); tray.id = 'composer-attachments-tray';
+            const pending = document.createElement('div'); pending.id = 'pending-uploads-container';
+            const attachBtn = document.createElement('button'); attachBtn.id = 'composer-attach-btn';
+            const attachMenu = document.createElement('div'); attachMenu.id = 'composer-attach-menu';
+            const dropzone = document.createElement('div'); dropzone.id = 'chat-dropzone-overlay';
+            const inputEl = document.createElement('textarea'); inputEl.id = 'message-content-input';
+            const activePane = document.createElement('div'); activePane.id = 'chat-active-pane';
+
+            const lbModal = document.createElement('div'); lbModal.id = 'media-lightbox-modal'; lbModal.classList.add('hidden');
+            const lbTitle = document.createElement('h3'); lbTitle.id = 'media-lightbox-title';
+            const lbCounter = document.createElement('span'); lbCounter.id = 'media-lightbox-counter';
+            const lbImg = document.createElement('img'); lbImg.id = 'media-lightbox-img';
+            const lbErr = document.createElement('div'); lbErr.id = 'media-lightbox-error'; lbErr.classList.add('hidden');
+            const lbPrev = document.createElement('button'); lbPrev.id = 'media-lightbox-prev-btn';
+            const lbNext = document.createElement('button'); lbNext.id = 'media-lightbox-next-btn';
+            const lbClose = document.createElement('button'); lbClose.id = 'media-lightbox-close-btn';
+            const lbDl = document.createElement('button'); lbDl.id = 'media-lightbox-download-btn';
+            for (const c of [lbTitle, lbCounter, lbImg, lbErr, lbPrev, lbNext, lbClose, lbDl]) lbModal.appendChild(c);
+
+            for (const n of [tray, pending, attachBtn, attachMenu, dropzone, inputEl, activePane, lbModal]) {
+                document.body.appendChild(n);
+            }
+
+            // 1. Clipboard extension fallback & size/MIME rejections (including Office MIME fallback parity)
+            assert.equal(validateSelectedFile({ name: 'image', type: 'image/png', size: 100 }).fileName, 'image.png');
+            assert.equal(
+                validateSelectedFile({
+                    name: 'report',
+                    type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                    size: 100
+                }).fileName,
+                'report.docx');
+            assert.equal(validateSelectedFile({ name: 'bad.svg', type: 'image/svg+xml', size: 100 }).ok, false);
+            assert.equal(validateSelectedFile({ name: 'empty.jpg', type: 'image/jpeg', size: 0 }).ok, false);
+            assert.equal(validateSelectedFile({ name: 'big.jpg', type: 'image/jpeg', size: 20 * 1024 * 1024 }).ok, false);
+
+            // 2. Partial-failure retry + 90-min expiry + max 2 concurrent XHR + withCredentials=false
+            let nowMs = 1_700_000_000_000;
+            const convId = '11111111-1111-1111-1111-111111111111';
+            const state = { activeConversationId: convId, pendingConversationId: null };
+
+            let inFlightXhr = 0;
+            let maxObservedConcurrentXhr = 0;
+            let failUploadPutForFile2Once = true;
+            let initSeq = 0;
+            const sentPayloads = [];
+            const cancelledIds = [];
+
+            const fakeApi = {
+                async initiateMediaUpload(_cId, dto) {
+                    const id = `00000000-0000-0000-0000-00000000000${++initSeq}`;
+                    return { mediaId: id, uploadUrl: `https://r2.example.com/upload/${id}`, requiredContentType: dto.contentType };
+                },
+                async completeMediaUpload(_cId, mediaId) {
+                    return { id: mediaId, kind: 'image' };
+                },
+                async cancelMediaUpload(_cId, mediaId) {
+                    cancelledIds.push(mediaId);
+                },
+                async sendMessage(_cId, payload) {
+                    sentPayloads.push(payload);
+                    if (payload.mediaIds.includes('CONFLICT_TRIGGER')) {
+                        const e = new Error('Conflict'); e.status = 409; throw e;
+                    }
+                    return { id: 900, conversationId: convId, attachments: payload.mediaIds.map(id => ({ id, kind: 'image' })) };
+                }
+            };
+
+            const createFakeXhr = () => {
+                const headers = {};
+                const xhr = {
+                    withCredentials: true,
+                    status: 200,
+                    upload: {},
+                    open() {},
+                    setRequestHeader(k, v) { headers[k] = v; },
+                    abort() { this.onabort?.(); },
+                    send(file) {
+                        assert.equal(this.withCredentials, false);
+                        assert.ok(headers['Content-Type']);
+                        inFlightXhr++;
+                        maxObservedConcurrentXhr = Math.max(maxObservedConcurrentXhr, inFlightXhr);
+                        setTimeout(() => {
+                            inFlightXhr--;
+                            this.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 });
+                            if (file.name === 'two.png' && failUploadPutForFile2Once) {
+                                failUploadPutForFile2Once = false;
+                                this.status = 500;
+                                this.onload?.();
+                            } else {
+                                this.status = 200;
+                                this.onload?.();
+                            }
+                        }, 10);
+                    }
+                };
+                return xhr;
+            };
+
+            const uploader = createMediaUploader({
+                state,
+                api: fakeApi,
+                createXhr: createFakeXhr,
+                nowFn: () => nowMs
+            });
+            uploader.init();
+            uploader.setLocked(false);
+
+            // Paste skips image when text/plain is non-empty
+            let prevented = false;
+            document.dispatchEvent({
+                type: 'paste',
+                target: inputEl,
+                preventDefault() { prevented = true; },
+                clipboardData: {
+                    getData: (t) => t === 'text/plain' ? 'Hello' : '',
+                    files: [{ name: 'pasted.png', type: 'image/png', size: 100 }]
+                }
+            });
+            assert.equal(prevented, false);
+            assert.equal(uploader.hasPendingFiles(), false);
+
+            // Add 3 files -> start job -> file 2 fails, files 1 & 3 succeed -> retry reuses 1 & 3 under 90 min!
+            uploader.addFiles([
+                { name: 'one.png', type: 'image/png', size: 100 },
+                { name: 'two.png', type: 'image/png', size: 100 },
+                { name: 'three.png', type: 'image/png', size: 100 }
+            ]);
+            const job = uploader.startUploadJob({ conversationId: convId, caption: 'Batch' });
+            await job.promise;
+
+            assert.ok(maxObservedConcurrentXhr <= 2);
+            assert.equal(job.status, 'failed');
+            assert.equal(job.retryable, true);
+            assert.equal(job.items[0].status, 'verified');
+            assert.equal(job.items[1].status, 'failed');
+            assert.equal(job.items[2].status, 'verified');
+
+            const firstKey = job.idempotencyKey;
+            // Still under 90 mins: retry reuses verified items[0] and items[2], keeps same IdempotencyKey!
+            nowMs += 30 * 60 * 1000;
+            uploader.retryJob(job.id);
+            await job.promise;
+
+            assert.equal(sentPayloads.length, 1);
+            assert.equal(sentPayloads[0].idempotencyKey, firstKey);
+            assert.equal(sentPayloads[0].mediaIds.length, 3);
+            assert.ok(revokedUrls.length >= 3);
+
+            // Dedup on ReceiveMessage removes matching pending job cleanly
+            uploader.addFiles([{ name: 'dedup.png', type: 'image/png', size: 100 }]);
+            const job2 = uploader.startUploadJob({ conversationId: convId });
+            // Assign mediaId to simulate initiated/completed upload racing with ReceiveMessage
+            job2.items[0].mediaId = 'dedup-media-id';
+            const removed = uploader.reconcileIncomingMessage(convId, { attachments: [{ id: 'dedup-media-id', kind: 'image' }] });
+            assert.equal(removed, true);
+            assert.equal(uploader.getJobsForConversation(convId).length, 0);
+
+            // 3. Lightbox navigation, image-only triggers, closeIfMessage, focus management & 1-shot retry -> Media unavailable
+            let lbUrlCalls = 0;
+            const lightbox = createMediaLightbox({
+                getMediaUrlFn: async () => {
+                    lbUrlCalls++;
+                    throw new Error('gone');
+                }
+            });
+            const openerTrigger = document.createElement('button');
+            openerTrigger.setAttribute('data-lightbox-trigger', 'true');
+            document.body.appendChild(openerTrigger);
+            openerTrigger.focus();
+
+            lightbox.open([
+                { conversationId: convId, messageId: '10', mediaId: 'img1', fileName: 'a.jpg' },
+                { conversationId: convId, messageId: '10', mediaId: 'img2', fileName: 'b.jpg' }
+            ], 0);
+            assert.equal(lightbox.isOpen(), true);
+            assert.equal(document.activeElement, lbClose);
+            assert.equal(lbCounter.textContent, '1 / 2');
+
+            // Tab wraps cleanly at both ends of visible lightbox controls [lbDl, lbClose, lbPrev, lbNext]
+            lbDl.focus();
+            document.dispatchEvent({ type: 'keydown', key: 'Tab', shiftKey: true, preventDefault() {} });
+            assert.equal(document.activeElement, lbNext);
+            document.dispatchEvent({ type: 'keydown', key: 'Tab', shiftKey: false, preventDefault() {} });
+            assert.equal(document.activeElement, lbDl);
+
+            // Enter while focus leaked outside modal is intercepted and pulled back to lbClose
+            openerTrigger.focus();
+            let leakedEnterPrevented = false;
+            document.dispatchEvent({ type: 'keydown', key: 'Enter', preventDefault() { leakedEnterPrevented = true; } });
+            assert.equal(leakedEnterPrevented, true);
+            assert.equal(document.activeElement, lbClose);
+
+            document.dispatchEvent({ type: 'keydown', key: 'ArrowRight', preventDefault() {} });
+            assert.equal(lbCounter.textContent, '2 / 2');
+
+            // 1st error calls getMediaUrlFn -> fails -> falls back to 'Media unavailable'
+            lbImg.dispatchEvent({ type: 'error' });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(lbUrlCalls, 1);
+            assert.equal(lbErr.classList.contains('hidden'), false);
+            assert.equal(lbErr.textContent, 'Media unavailable');
+
+            lightbox.closeIfMessage('10');
+            assert.equal(lightbox.isOpen(), false);
+            assert.equal(lbImg.hasAttribute('src'), false);
+            assert.equal(document.activeElement, openerTrigger);
+
+            // [S3] Cancel while initiateMediaUpload is in flight still issues server-side cancel
+            let resolveInflightInit = null;
+            const delayedInitApi = {
+                ...fakeApi,
+                initiateMediaUpload() {
+                    return new Promise((resolve) => { resolveInflightInit = resolve; });
+                }
+            };
+            const uploaderCancelRace = createMediaUploader({
+                state,
+                api: delayedInitApi,
+                createXhr: createFakeXhr,
+                nowFn: () => nowMs
+            });
+            uploaderCancelRace.init();
+            uploaderCancelRace.setLocked(false);
+            uploaderCancelRace.addFiles([{ name: 'inflight.png', type: 'image/png', size: 100 }]);
+            const cancelRaceJob = uploaderCancelRace.startUploadJob({ conversationId: convId });
+            await new Promise(r => setTimeout(r, 5));
+            uploaderCancelRace.cancelJob(cancelRaceJob.id);
+            resolveInflightInit({
+                mediaId: '00000000-0000-0000-0000-000000000099',
+                uploadUrl: 'https://r2.example.com/upload/99',
+                requiredContentType: 'image/png'
+            });
+            await cancelRaceJob.promise;
+            await new Promise(r => setTimeout(r, 10));
+            assert.ok(cancelledIds.includes('00000000-0000-0000-0000-000000000099'));
+            uploaderCancelRace.destroy();
+
+            uploader.destroy();
+            lightbox.destroy();
+
+            console.log('OK_UPLOADER_AND_LIGHTBOX');
+            """;
+
+        var (exitCode, output, error) = RunNodeModuleScript(script);
+        Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
+        Assert.Contains("OK_UPLOADER_AND_LIGHTBOX", output);
+    }
+}

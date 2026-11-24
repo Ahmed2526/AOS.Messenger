@@ -11,6 +11,7 @@
 import { getConversationBundle } from './api-client.js';
 import {
     compareMessages,
+    formatMessagePreview,
     getMessageId,
     getUserId,
     isMessageRendered,
@@ -113,6 +114,8 @@ export function createSignalRClient({
     onTypingIndicator = null,
     onPresenceChanged = null,
     onRefreshPresence = null,
+    onIncomingMessage = null,
+    onMessageDeleted = null,
     signalRLib = null
 }) {
     const lib = signalRLib || (typeof signalR !== 'undefined' ? signalR : null);
@@ -381,16 +384,20 @@ export function createSignalRClient({
                         if (row && row.getAttribute('data-deleted') !== 'true') {
                             applyMessageDeletedForEveryone(row, msgId);
                         }
+                        if (typeof onMessageDeleted === 'function') {
+                            onMessageDeleted(msgId);
+                        }
                         if (isLatestRenderedMessage(containerEl, msgId)) {
                             updateSidebarLastMessage(convId, 'This message was deleted', msgId, true);
                         }
                     } else {
+                        const formattedPreview = formatMessagePreview(msg);
                         if (row) {
                             const contentEl = row.querySelector('.message-text-content');
                             const editedLabel = row.querySelector('.edited-label');
                             const wasEditedHidden = editedLabel ? editedLabel.classList.contains('hidden') : true;
                             if ((contentEl && contentEl.textContent !== (newContent || '')) || (Boolean(editedAtUtc) && wasEditedHidden)) {
-                                applyMessageEditedToRow(msgId, newContent, editedAtUtc);
+                                applyMessageEditedToRow(msgId, newContent, editedAtUtc, formattedPreview);
                             }
                             if (Array.isArray(rawReactions)) {
                                 let pillsContainer = row.querySelector('.reaction-pills-container');
@@ -408,7 +415,7 @@ export function createSignalRClient({
                             }
                         }
                         if (isLatestRenderedMessage(containerEl, msgId)) {
-                            updateSidebarLastMessage(convId, newContent || '', msgId, true);
+                            updateSidebarLastMessage(convId, formattedPreview, msgId, true);
                         }
                     }
 
@@ -450,9 +457,7 @@ export function createSignalRClient({
 
             if (lastInserted) {
                 scrollToBottom(true);
-                const lastPreview = (lastInserted.isDeletedForEveryone ?? lastInserted.IsDeletedForEveryone)
-                    ? 'This message was deleted'
-                    : (lastInserted.content ?? lastInserted.Content ?? '');
+                const lastPreview = formatMessagePreview(lastInserted);
                 updateSidebarLastMessage(convId, lastPreview, getMessageId(lastInserted), false, false, true);
             }
         } catch (err) {
@@ -506,7 +511,11 @@ export function createSignalRClient({
         const isOutgoing = state.currentUserId
             ? senderId.toLowerCase() === String(state.currentUserId).toLowerCase()
             : !!message.isOutgoing;
-        const previewText = message.isDeletedForEveryone ? 'This message was deleted' : (message.content ?? '');
+        const previewText = formatMessagePreview(message);
+
+        if (typeof onIncomingMessage === 'function') {
+            onIncomingMessage(eventConvId, message);
+        }
 
         if (!isReplay && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message })) {
             const foundDuringSwitch = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
@@ -574,20 +583,24 @@ export function createSignalRClient({
         const eventConvId = normalizeId(message.conversationId !== undefined ? message.conversationId : message.ConversationId);
         const newContent = message.content !== undefined ? message.content : (message.Content || '');
         const editedAtUtc = message.editedAtUtc !== undefined ? message.editedAtUtc : message.EditedAtUtc;
+        const rawPreview = message.previewText !== undefined ? message.previewText : message.PreviewText;
+        const effectivePreview = (rawPreview !== undefined && rawPreview !== null && rawPreview !== '')
+            ? String(rawPreview)
+            : newContent;
 
         if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageEdited', payload: message })) {
-            updateSidebarLastMessage(eventConvId, newContent, msgId, true);
+            updateSidebarLastMessage(eventConvId, effectivePreview, msgId, true);
             return;
         }
 
         if (!sameId(eventConvId, state.activeConversationId)) {
             if (eventConvId) {
-                updateSidebarLastMessage(eventConvId, newContent, msgId, true);
+                updateSidebarLastMessage(eventConvId, effectivePreview, msgId, true);
             }
             return;
         }
 
-        applyMessageEditedToRow(msgId, newContent, editedAtUtc);
+        applyMessageEditedToRow(msgId, newContent, editedAtUtc, rawPreview ?? null);
 
         if (state.messagesById && state.messagesById.has(String(msgId))) {
             const cached = state.messagesById.get(String(msgId));
@@ -604,7 +617,7 @@ export function createSignalRClient({
             ? document.getElementById(`msg-${msgId}`)
             : null;
         if (!row || isLatestRenderedMessage(containerEl, msgId)) {
-            updateSidebarLastMessage(eventConvId, newContent, msgId, true);
+            updateSidebarLastMessage(eventConvId, effectivePreview, msgId, true);
         }
     }
 
@@ -631,6 +644,9 @@ export function createSignalRClient({
             ? document.getElementById(`msg-${msgId}`)
             : null;
         applyMessageDeletedForEveryone(row, msgId);
+        if (typeof onMessageDeleted === 'function') {
+            onMessageDeleted(msgId);
+        }
 
         if (state.messagesById && state.messagesById.has(String(msgId))) {
             const cached = state.messagesById.get(String(msgId));
@@ -663,6 +679,9 @@ export function createSignalRClient({
 
         const isActive = sameId(eventConvId, state.activeConversationId);
         applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, isActive);
+        if (isActive && typeof onMessageDeleted === 'function') {
+            onMessageDeleted(msgId);
+        }
 
         if (isActive && state.messagesById) {
             state.messagesById.delete(String(msgId));

@@ -380,6 +380,7 @@ export function createStickerPicker(options = {}) {
 
     // Sticker Info Modal state
     let activeInfoSticker = null;
+    let infoImageGeneration = 0;
     let activeInfoContext = null;
     let infoModalListenersBound = false;
 
@@ -1385,14 +1386,32 @@ export function createStickerPicker(options = {}) {
         const authorEl = document.getElementById('sticker-info-pack-author');
         const animBadge = document.getElementById('sticker-info-anim-badge');
 
+        const generation = ++infoImageGeneration;
         if (img) {
+            const isCurrent = () => infoImageGeneration === generation && activeInfoSticker?.id === normalized.id;
+            const alt = normalized.emojiTags || normalized.packName || 'Sticker';
+            let retried = false;
+            img.alt = alt;
+            img.removeAttribute('src');
+            img.onload = () => {
+                if (isCurrent()) img.alt = alt;
+            };
+            img.onerror = async () => {
+                if (!isCurrent() || normalized.staticUrl || retried) return;
+                const failedSrc = img.getAttribute('src');
+                if (!failedSrc) return;
+                retried = true;
+                evictExpiredStickerUrl(normalized.id, failedSrc);
+                const url = await resolveCachedStickerUrl(normalized.id, { getUrlFn });
+                if (url && isCurrent()) img.src = url;
+            };
+
             applyInitialStickerSrc(img, normalized);
-            img.alt = normalized.emojiTags || normalized.packName || 'Sticker';
-            img.setAttribute('data-sticker-img', 'true');
-            img.setAttribute('data-sticker-id', normalized.id);
-            img.setAttribute('data-sticker-static', normalized.staticUrl ? 'true' : 'false');
-            img.removeAttribute('data-sticker-bound');
-            img.removeAttribute('data-sticker-retried');
+            if (!normalized.staticUrl && !img.getAttribute('src')) {
+                void resolveCachedStickerUrl(normalized.id, { getUrlFn }).then((url) => {
+                    if (url && isCurrent()) img.src = url;
+                });
+            }
         }
         if (packNameEl) packNameEl.textContent = normalized.packName || 'Stickers';
         if (authorEl) authorEl.textContent = normalized.packAuthor || 'Community Sticker';
@@ -1403,16 +1422,18 @@ export function createStickerPicker(options = {}) {
 
         syncInfoModalStarButton(isFav);
         modal.classList.remove('hidden');
-        hydrateStickerImages(modal, { getUrlFn });
     }
 
     function closeStickerInfoModal() {
+        infoImageGeneration++;
         activeInfoSticker = null;
         activeInfoContext = null;
         if (typeof document === 'undefined') return;
         const modal = document.getElementById('sticker-info-modal');
         const img = document.getElementById('sticker-info-img');
         if (img && typeof img.removeAttribute === 'function') {
+            img.onload = null;
+            img.onerror = null;
             img.removeAttribute('src');
         }
         if (modal && modal.classList) {

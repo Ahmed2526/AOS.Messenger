@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -281,12 +280,21 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             Assert.Equal(HttpStatusCode.OK, putResp.StatusCode);
         }
 
+        var statusUrl = $"/api/profile/avatar/{uploadId}/status";
+        using var pendingStatus = await client.GetAsync(statusUrl);
+        Assert.Equal(HttpStatusCode.NoContent, pendingStatus.StatusCode);
+
         using var compReq = CreateCsrfRequest(HttpMethod.Post, $"/api/profile/avatar/{uploadId}/complete", csrfToken);
         var compResp = await client.SendAsync(compReq);
         Assert.Equal(HttpStatusCode.OK, compResp.StatusCode);
 
         var body = await compResp.Content.ReadAsStringAsync();
         using var compDoc = JsonDocument.Parse(body);
+        using var completedStatus = await client.GetAsync(statusUrl);
+        Assert.Equal(HttpStatusCode.OK, completedStatus.StatusCode);
+        var status = await completedStatus.Content.ReadFromJsonAsync<AvatarUpdatedResponseDto>();
+        Assert.Equal(compDoc.RootElement.GetProperty("avatarVersion").GetString(), status?.AvatarVersion);
+
         return new AvatarUpdatedResponseDto(
             compDoc.RootElement.GetProperty("avatarVersion").GetString(),
             compDoc.RootElement.GetProperty("updatedAtUtc").GetDateTimeOffset());
@@ -502,6 +510,9 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             putReq.Content.Headers.ContentType = new MediaTypeHeaderValue("image/webp");
             Assert.Equal(HttpStatusCode.OK, (await aliceClient.SendAsync(putReq)).StatusCode);
         }
+
+        using var bobStatus = await bobClient.GetAsync($"/api/profile/avatar/{animId}/status");
+        Assert.Equal(HttpStatusCode.NotFound, bobStatus.StatusCode);
 
         // Bob tries to complete Alice's upload -> 403 Forbidden
         using var bobComp = CreateCsrfRequest(HttpMethod.Post, $"/api/profile/avatar/{animId}/complete", bobCsrf);
@@ -843,7 +854,7 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
     // =========================================================================
 
     [Fact]
-    public void FrontendModules_AvatarLoaderCropperLightboxAndThumbnails_BehaveAccuratelyInNode()
+    public async Task FrontendModules_AvatarLoaderCropperLightboxAndThumbnails_BehaveAccuratelyInNode()
     {
         var root = FindSolutionRoot();
         string JsUrl(string name) => new Uri(Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", name)).AbsoluteUri;
@@ -1007,7 +1018,7 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             assert.equal(isSafeMediaUrl('\\\\evil\\share'), false);
 
             // [S5] Bounded LRU Map helper caps signed URL cache maps cleanly
-            const { setBoundedMapEntry } = await import('{{JsUrl("memory-image-cache.js")}}');
+            const { setBoundedMapEntry, createCachedImageLoader } = await import('{{JsUrl("memory-image-cache.js")}}');
             const boundedMap = new Map();
             setBoundedMapEntry(boundedMap, 'k1', 1, 2);
             setBoundedMapEntry(boundedMap, 'k2', 2, 2);
@@ -1325,6 +1336,39 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             assert.equal(nameUpdateCalls, 2, 'Version change should reload open avatar lightbox');
             avatarLoader.closeAvatarLightbox();
 
+            const staleUser = 'a0a0a0a0-b1b1-c2c2-d3d3-e4e4e4e4e4e4';
+            let resolveStaleAvatar;
+            const staleRequest = avatarLoader.resolveAvatarUrl(staleUser, 'v-stale', {
+                getAvatarUrlFn: () => new Promise(resolve => { resolveStaleAvatar = resolve; })
+            });
+            avatarLoader.evictUserAvatarCache(staleUser);
+            resolveStaleAvatar({ url: 'https://r2.example.com/stale-avatar' });
+            assert.equal(await staleRequest, null);
+            assert.equal(await avatarLoader.resolveAvatarUrl(staleUser, 'v-stale', {
+                getAvatarUrlFn: async () => ({ url: 'https://r2.example.com/fresh-avatar' })
+            }), 'https://r2.example.com/fresh-avatar');
+
+            const imageLoader = createCachedImageLoader();
+            let resolveImage;
+            let imageLookups = 0;
+            const imageOptions = {
+                cacheKey: 'retry-after-missing',
+                getSignedUrlFn: () => {
+                    imageLookups++;
+                    return new Promise(resolve => { resolveImage = resolve; });
+                }
+            };
+            const missingImage = imageLoader.load(imageOptions);
+            const joinedImage = imageLoader.load(imageOptions);
+            assert.equal(imageLookups, 1);
+            resolveImage(null);
+            assert.equal((await missingImage).reason, 'missing-url');
+            assert.equal((await joinedImage).reason, 'missing-url');
+            const nextImage = imageLoader.load(imageOptions);
+            assert.equal(imageLookups, 2);
+            resolveImage(null);
+            await nextImage;
+
             // [W15] avatar-cropper.js decode-vs-close, AbortController upload cancellation & listener cleanup
             const { createAvatarCropper } = await import('{{JsUrl("avatar-cropper.js")}}');
             const origCreateElement = document.createElement;
@@ -1358,6 +1402,8 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             let uploadedCallbacks = 0;
             let cropperErrors = [];
             let resolveInitiate;
+            let rejectCompletion;
+            let statusLookups = 0;
             const initialKeydownCount = docListeners.get('keydown')?.size || 0;
 
             const cropper = createAvatarCropper({
@@ -1368,11 +1414,16 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
                         initSignals.push(signal);
                         return new Promise((res) => { resolveInitiate = res; });
                     },
-                    completeAvatarUpload: async () => ({ avatarVersion: 'v-new' })
+                    completeAvatarUpload: () => new Promise((_resolve, reject) => { rejectCompletion = reject; }),
+                    getAvatarUploadStatus: async (id) => {
+                        assert.equal(id, 'up-2');
+                        statusLookups++;
+                        return { avatarVersion: 'v-new' };
+                    }
                 },
                 createXhr: () => {
                     xhrCreatedCount++;
-                    return { upload: {}, open() {}, setRequestHeader() {}, send() {}, abort() {} };
+                    return { upload: {}, status: 200, open() {}, setRequestHeader() {}, send() { this.onload(); }, abort() {} };
                 }
             });
 
@@ -1402,6 +1453,26 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             assert.equal(xhrCreatedCount, 0, 'Cancelled cropper upload must not proceed to XHR PUT');
             assert.equal(uploadedCallbacks, 0);
             assert.deepEqual(cropperErrors, []);
+
+            assert.equal(await cropper.open(validFile), true);
+            document.getElementById('avatar-cropper-save-btn').dispatchEvent({ type: 'click' });
+            await new Promise(r => setTimeout(r, 10));
+            resolveInitiate({ uploadId: 'up-2', uploadUrl: 'https://r2.example.com/up-2' });
+            await new Promise(r => setTimeout(r, 10));
+            const cancelCropper = document.getElementById('avatar-cropper-cancel-btn');
+            const closeCropper = document.getElementById('avatar-cropper-close-btn');
+            assert.equal(cancelCropper.disabled, true);
+            assert.equal(closeCropper.disabled, true);
+            cancelCropper.dispatchEvent({ type: 'click' });
+            closeCropper.dispatchEvent({ type: 'click' });
+            document.dispatchEvent({ type: 'keydown', key: 'Escape', preventDefault() {} });
+            assert.equal(cropper.isOpen(), true);
+            assert.equal(initSignals[1].aborted, false);
+            rejectCompletion(new TypeError('Connection lost after commit'));
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(statusLookups, 1);
+            assert.equal(uploadedCallbacks, 1);
+            assert.equal(cropper.isOpen(), false);
 
             cropper.destroy();
             assert.equal(docListeners.get('keydown')?.size || 0, initialKeydownCount, 'destroy() must remove document keydown listeners');
@@ -1574,27 +1645,8 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             console.log('OK_MILESTONE_B_FRONTEND');
             """;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var proc = Process.Start(psi)!;
-        proc.StandardInput.Write(script);
-        proc.StandardInput.Close();
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        Assert.True(proc.WaitForExit(15000), "Node test timed out.");
-        Assert.True(proc.ExitCode == 0, $"Node exited {proc.ExitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node exited {exitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
         Assert.Contains("OK_MILESTONE_B_FRONTEND", stdout);
     }
 

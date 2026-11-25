@@ -43,6 +43,10 @@ public interface IAvatarPersistence
 
     Task UpdatePendingAsync(PendingAvatarUpload upload, CancellationToken ct = default);
 
+    /// <remarks>
+    /// NotFoundException and ConflictException indicate rejection before commit was attempted.
+    /// Other exceptions may leave the outcome unknown; callers must retain the new objects.
+    /// </remarks>
     Task<AvatarCommitResult> CommitUserAvatarAsync(
         PendingAvatarUpload upload,
         string fullObjectKey,

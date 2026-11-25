@@ -629,13 +629,12 @@ export function createCachedImageLoader({
                     scopeEpoch: startScopeEpoch,
                     scopeKey: normScope
                 };
-            } finally {
-                const current = inFlight.get(cacheKey);
-                if (current && current.promise === promise) {
-                    inFlight.delete(cacheKey);
-                }
             }
-        })();
+        })().finally(() => {
+            if (inFlight.get(cacheKey)?.promise === promise) {
+                inFlight.delete(cacheKey);
+            }
+        });
 
         inFlight.set(cacheKey, {
             promise,

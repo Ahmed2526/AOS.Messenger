@@ -1,11 +1,9 @@
-using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.RateLimiting;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace AOS.Messenger.Web.RateLimiting;
 
@@ -13,9 +11,8 @@ namespace AOS.Messenger.Web.RateLimiting;
 /// Rate limiter policy that enforces dual rate limiting:
 /// 1. Per-client-IP limit (prevents flooding from a single IP address).
 /// 2. Per-normalized-target-email limit (prevents email bombing a specific address across IPs).
-/// Enforces bounded memory via MemoryCache with SizeLimit = 50,000, 15-minute sliding expiration,
-/// non-disposable bucket state (immune to post-eviction ObjectDisposedException), and active
-/// <see cref="RateLimiter.IdleDuration"/> reporting so <see cref="PartitionedRateLimiter"/>
+/// Retains each counter for its full window and rejects new identities at capacity.
+/// Reports <see cref="RateLimiter.IdleDuration"/> so <see cref="PartitionedRateLimiter"/>
 /// reclaims idle partition entries.
 /// </summary>
 public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>, IDisposable
@@ -25,7 +22,6 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
     public const int EmailPermitLimitPerMinute = 5;
     private const int MaxPartitionEmailLength = 254;
     private static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
-    private static readonly TimeSpan CacheSlidingExpiration = TimeSpan.FromMinutes(15);
 
     public static readonly string[] RegisteredPolicyNames =
     [
@@ -47,10 +43,11 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
         MemoryBufferThreshold = 16 * 1024
     };
 
-    private readonly MemoryCache _ipCache;
-    private readonly MemoryCache _emailCache;
-    private readonly object _ipLock = new();
-    private readonly object _emailLock = new();
+    private readonly object _gate = new();
+    private readonly Dictionary<string, int> _ipCounts = new();
+    private readonly Dictionary<string, int> _emailCounts = new();
+    private readonly int _maxEntries;
+    private long _currentWindowId = -1;
     private readonly TimeProvider _timeProvider;
     private int _disposed;
 
@@ -63,8 +60,7 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxCacheEntries);
 
-        _ipCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = maxCacheEntries });
-        _emailCache = new MemoryCache(new MemoryCacheOptions { SizeLimit = maxCacheEntries });
+        _maxEntries = maxCacheEntries;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -91,9 +87,18 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
         }
 
         var ip = ResolveClientIp(httpContext);
-        return _ipCache.TryGetValue(ip, out FixedWindowBucket? ipBucket)
-            && ipBucket is not null
-            && ipBucket.IsExhaustedInCurrentWindow(out _);
+        return IsIpExhausted(ip, out _);
+    }
+
+    private bool IsIpExhausted(string ip, out long windowId)
+    {
+        lock (_gate)
+        {
+            windowId = ResetWindowIfNeeded(_timeProvider.GetUtcNow().UtcTicks);
+            return _ipCounts.TryGetValue(ip, out var used)
+                ? used >= IpPermitLimitPerMinute
+                : _ipCounts.Count >= _maxEntries;
+        }
     }
 
     public RateLimitPartition<string> GetPartition(HttpContext httpContext)
@@ -105,9 +110,7 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
 
         // If the client IP is already exhausted in the current fixed window, route all emails from
         // this IP to a single per-IP/per-window partition key instead of allocating unbounded ip:email keys.
-        if (_ipCache.TryGetValue(ip, out FixedWindowBucket? ipBucket)
-            && ipBucket is not null
-            && ipBucket.IsExhaustedInCurrentWindow(out var exhaustedWindowId))
+        if (IsIpExhausted(ip, out var exhaustedWindowId))
         {
             var exhaustedKey = $"ip-exhausted:{ip}:{exhaustedWindowId}";
             return RateLimitPartition.Get(
@@ -123,38 +126,57 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
             _ => new DualRateLimiter(this, ip, email, _timeProvider, exhaustedWindowId: null));
     }
 
-    private FixedWindowBucket GetOrCreateIpBucket(string ip) =>
-        GetOrCreateBucket(_ipCache, _ipLock, ip, IpPermitLimitPerMinute);
-
-    private FixedWindowBucket GetOrCreateEmailBucket(string email) =>
-        GetOrCreateBucket(_emailCache, _emailLock, email, EmailPermitLimitPerMinute);
-
-    private FixedWindowBucket GetOrCreateBucket(MemoryCache cache, object gate, string key, int permitLimit)
+    private bool TryAcquire(string ip, string email, int permitCount, out TimeSpan retryAfter)
     {
-        ObjectDisposedException.ThrowIf(IsDisposed, this);
-
-        if (cache.TryGetValue(key, out FixedWindowBucket? bucket) && bucket is not null)
-        {
-            return bucket;
-        }
-
-        lock (gate)
+        lock (_gate)
         {
             ObjectDisposedException.ThrowIf(IsDisposed, this);
+            var nowTicks = _timeProvider.GetUtcNow().UtcTicks;
+            var windowId = ResetWindowIfNeeded(nowTicks);
 
-            if (cache.TryGetValue(key, out bucket) && bucket is not null)
+            if (TryConsume(_ipCounts, ip, IpPermitLimitPerMinute, permitCount)
+                && TryConsume(_emailCounts, email, EmailPermitLimitPerMinute, permitCount))
             {
-                return bucket;
+                retryAfter = TimeSpan.Zero;
+                return true;
             }
 
-            bucket = new FixedWindowBucket(permitLimit, Window, _timeProvider);
-            cache.Set(key, bucket, new MemoryCacheEntryOptions
-            {
-                Size = 1,
-                SlidingExpiration = CacheSlidingExpiration
-            });
-            return bucket;
+            retryAfter = TimeSpan.FromTicks((windowId + 1) * Window.Ticks - nowTicks);
+            return false;
         }
+    }
+
+    private long ResetWindowIfNeeded(long nowTicks)
+    {
+        var windowId = nowTicks / Window.Ticks;
+        if (_currentWindowId != windowId)
+        {
+            _ipCounts.Clear();
+            _emailCounts.Clear();
+            _currentWindowId = windowId;
+        }
+
+        return windowId;
+    }
+
+    private bool TryConsume(Dictionary<string, int> counts, string key, int permitLimit, int permitCount)
+    {
+        if (!counts.TryGetValue(key, out var used) && counts.Count >= _maxEntries)
+        {
+            return false;
+        }
+
+        if (used >= permitLimit || permitCount > permitLimit - used)
+        {
+            return false;
+        }
+
+        if (permitCount > 0)
+        {
+            counts[key] = used + permitCount;
+        }
+
+        return true;
     }
 
     private static string ResolveClientIp(HttpContext context) =>
@@ -198,74 +220,12 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        lock (_gate)
         {
-            _ipCache.Dispose();
-            _emailCache.Dispose();
-        }
-    }
-
-    private sealed class FixedWindowBucket
-    {
-        private readonly object _gate = new();
-        private readonly int _permitLimit;
-        private readonly long _windowTicks;
-        private readonly TimeProvider _timeProvider;
-        private long _currentWindowId = -1;
-        private int _usedPermits;
-
-        public FixedWindowBucket(int permitLimit, TimeSpan window, TimeProvider timeProvider)
-        {
-            _permitLimit = permitLimit;
-            _windowTicks = window.Ticks;
-            _timeProvider = timeProvider;
-        }
-
-        public bool IsExhaustedInCurrentWindow(out long windowId)
-        {
-            var nowTicks = _timeProvider.GetUtcNow().UtcTicks;
-            windowId = nowTicks / _windowTicks;
-
-            lock (_gate)
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
             {
-                return _currentWindowId == windowId && _usedPermits >= _permitLimit;
-            }
-        }
-
-        public bool TryAcquire(int permitCount, out TimeSpan retryAfter)
-        {
-            if (permitCount < 0)
-            {
-                throw new ArgumentOutOfRangeException(nameof(permitCount));
-            }
-
-            var nowTicks = _timeProvider.GetUtcNow().UtcTicks;
-            var windowId = nowTicks / _windowTicks;
-
-            lock (_gate)
-            {
-                if (_currentWindowId != windowId)
-                {
-                    _currentWindowId = windowId;
-                    _usedPermits = 0;
-                }
-
-                if (permitCount == 0)
-                {
-                    retryAfter = TimeSpan.Zero;
-                    return _usedPermits < _permitLimit;
-                }
-
-                if (permitCount <= _permitLimit - _usedPermits)
-                {
-                    _usedPermits += permitCount;
-                    retryAfter = TimeSpan.Zero;
-                    return true;
-                }
-
-                var windowEndTicks = (windowId + 1) * _windowTicks;
-                retryAfter = TimeSpan.FromTicks(Math.Max(1, windowEndTicks - nowTicks));
-                return false;
+                _ipCounts.Clear();
+                _emailCounts.Clear();
             }
         }
     }
@@ -316,29 +276,15 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
             {
                 var windowTicks = Window.Ticks;
                 var currentWindowId = nowTicks / windowTicks;
-                if (currentWindowId == _exhaustedWindowId.Value)
-                {
-                    var windowEndTicks = (currentWindowId + 1) * windowTicks;
-                    return new FixedWindowLease(isAcquired: false, TimeSpan.FromTicks(Math.Max(1, windowEndTicks - nowTicks)));
-                }
+                TimeSpan? retryAfter = currentWindowId == _exhaustedWindowId.Value
+                    ? TimeSpan.FromTicks((currentWindowId + 1) * windowTicks - nowTicks)
+                    : null;
+                return new FixedWindowLease(isAcquired: false, retryAfter);
             }
 
-            var ipBucket = _policy.GetOrCreateIpBucket(_ip);
-            if (!ipBucket.TryAcquire(permitCount, out var ipRetryAfter))
-            {
-                return new FixedWindowLease(isAcquired: false, ipRetryAfter);
-            }
-
-            if (_email.Length > 0)
-            {
-                var emailBucket = _policy.GetOrCreateEmailBucket(_email);
-                if (!emailBucket.TryAcquire(permitCount, out var emailRetryAfter))
-                {
-                    return new FixedWindowLease(isAcquired: false, emailRetryAfter);
-                }
-            }
-
-            return FixedWindowLease.AcquiredLease;
+            return _policy.TryAcquire(_ip, _email, permitCount, out var retryAfterForRequest)
+                ? FixedWindowLease.AcquiredLease
+                : new FixedWindowLease(isAcquired: false, retryAfterForRequest);
         }
 
         protected override ValueTask<RateLimitLease> AcquireAsyncCore(int permitCount, CancellationToken cancellationToken)

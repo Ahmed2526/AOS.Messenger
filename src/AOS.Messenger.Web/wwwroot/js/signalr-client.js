@@ -411,6 +411,7 @@ export function createSignalRClient({
                 const oldestIdBig = parseBigIntSafe(oldestBundleId);
                 if (oldestBundleTime > newestRendered.time ||
                     (oldestBundleTime === newestRendered.time && oldestIdBig > newestRendered.id)) {
+                    state.paginationAbortController?.abort();
                     renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true });
                     if (state.messagesById && typeof state.messagesById.clear === 'function') {
                         state.messagesById.clear();
@@ -1039,7 +1040,7 @@ export function createSignalRClient({
                 if (startInFlight === runStart) {
                     startInFlight = null;
                 }
-                if (shouldScheduleRetry) {
+                if (!isTerminated && (shouldScheduleRetry || !isConnected())) {
                     scheduleReconnect();
                 }
             }

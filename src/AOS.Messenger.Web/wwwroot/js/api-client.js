@@ -380,6 +380,11 @@ export function completeAvatarUpload(uploadId, { signal } = {}) {
     return apiFetch(url, { method: 'POST', signal });
 }
 
+export function getAvatarUploadStatus(uploadId) {
+    const url = `/api/profile/avatar/${encodeURIComponent(uploadId)}/status`;
+    return apiFetch(url);
+}
+
 /**
  * Removes the current user's profile photo from R2 storage and SQL Server.
  */

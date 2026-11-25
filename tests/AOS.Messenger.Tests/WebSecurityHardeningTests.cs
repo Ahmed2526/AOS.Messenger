@@ -182,7 +182,7 @@ public sealed class WebSecurityHardeningTests
     }
 
     [Fact]
-    public void DualIpAndEmailRateLimiterPolicy_AfterCacheEviction_RecreatesBucketsWithoutObjectDisposedException()
+    public void DualIpAndEmailRateLimiterPolicy_AtCapacity_RetainsActiveCountersAndRejectsNewIdentities()
     {
         var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero));
         using var policy = new DualIpAndEmailRateLimiterPolicy(maxCacheEntries: 4, clock);
@@ -197,12 +197,12 @@ public sealed class WebSecurityHardeningTests
 
         var firstPartition = policy.GetPartition(firstCtx);
         using var retainedLimiter = firstPartition.Factory(firstPartition.PartitionKey);
-        using (var firstLease = retainedLimiter.AttemptAcquire(1))
+        using (var firstLease = retainedLimiter.AttemptAcquire(DualIpAndEmailRateLimiterPolicy.EmailPermitLimitPerMinute - 1))
         {
             Assert.True(firstLease.IsAcquired);
         }
 
-        // Force cache eviction beyond maxCacheEntries = 4 for both IPs and emails.
+        // Fill both stores and verify identities beyond capacity are rejected.
         for (int i = 0; i < 12; i++)
         {
             var churnCtx = new DefaultHttpContext();
@@ -216,17 +216,15 @@ public sealed class WebSecurityHardeningTests
             var part = policy.GetPartition(churnCtx);
             using var churnLimiter = part.Factory(part.PartitionKey);
             using var churnLease = churnLimiter.AttemptAcquire(1);
-            Assert.True(churnLease.IsAcquired);
+            Assert.Equal(i < 3, churnLease.IsAcquired);
         }
 
-        // Re-acquiring on the retained DualRateLimiter must NOT throw ObjectDisposedException.
-        using (var postEvictionLease = retainedLimiter.AttemptAcquire(1))
-        {
-            Assert.True(postEvictionLease.IsAcquired);
-        }
+        using var remainingLease = retainedLimiter.AttemptAcquire(1);
+        Assert.True(remainingLease.IsAcquired);
+        using var exhaustedLease = retainedLimiter.AttemptAcquire(1);
+        Assert.False(exhaustedLease.IsAcquired);
 
-        // Advancing beyond 15-minute sliding expiration + 1-minute window also recreates safely.
-        clock.Advance(TimeSpan.FromMinutes(16));
+        clock.Advance(TimeSpan.FromMinutes(1));
         using (var afterExpiryLease = retainedLimiter.AttemptAcquire(1))
         {
             Assert.True(afterExpiryLease.IsAcquired);
@@ -283,6 +281,14 @@ public sealed class WebSecurityHardeningTests
         using var rejectedLease = rejectedLimiter.AttemptAcquire(1);
         Assert.False(rejectedLease.IsAcquired);
         Assert.True(rejectedLease.TryGetMetadata(MetadataName.RetryAfter.Name, out _));
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        using var stalePartitionLease = rejectedLimiter.AttemptAcquire(1);
+        Assert.False(stalePartitionLease.IsAcquired);
+        var newPartition = policy.GetPartition(spamCtx1);
+        using var newLimiter = newPartition.Factory(newPartition.PartitionKey);
+        using var freshLease = newLimiter.AttemptAcquire(1);
+        Assert.True(freshLease.IsAcquired);
     }
 
     private sealed class TestTimeProvider : TimeProvider

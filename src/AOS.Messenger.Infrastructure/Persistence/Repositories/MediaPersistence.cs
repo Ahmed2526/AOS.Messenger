@@ -90,7 +90,9 @@ public sealed class MediaPersistence : IMediaPersistence
                 .Where(s => s.UploaderId == media.UploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
                 .SumAsync(s => s.State == StickerState.Failed
                     ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
+                    : s.State == StickerState.Ready || s.State == StickerState.Archived
+                        ? (long?)s.DeclaredSizeBytes
+                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
 
             var usedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
 

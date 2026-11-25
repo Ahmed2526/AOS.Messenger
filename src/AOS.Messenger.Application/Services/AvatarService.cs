@@ -110,6 +110,39 @@ public sealed class AvatarService : IAvatarService
             created.DeclaredSizeBytes);
     }
 
+    public async Task<AvatarUpdatedResponseDto?> GetUploadStatusAsync(
+        UserId callerId,
+        AvatarUploadId uploadId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        ArgumentNullException.ThrowIfNull(uploadId);
+
+        var upload = await _avatarPersistence.GetPendingByIdNoTrackingAsync(uploadId, ct);
+        if (upload is null || upload.UserId != callerId)
+        {
+            throw new NotFoundException("AvatarUpload", uploadId.Value);
+        }
+
+        if (upload.State == MediaState.Failed)
+        {
+            throw new DomainException(upload.FailureReason ?? "Profile photo verification failed.");
+        }
+
+        if (upload.State == MediaState.Deleted)
+        {
+            throw new ConflictException("Avatar upload was already cancelled.");
+        }
+
+        if (upload.State != MediaState.Uploaded)
+        {
+            return null;
+        }
+
+        var profile = await _userReader.GetByIdAsync(callerId, ct);
+        return new AvatarUpdatedResponseDto(profile?.AvatarVersion, upload.CompletedAtUtc ?? _timeProvider.GetUtcNow());
+    }
+
     public async Task<AvatarUpdatedResponseDto> CompleteUploadAsync(
         UserId callerId,
         AvatarUploadId uploadId,
@@ -267,13 +300,8 @@ public sealed class AvatarService : IAvatarService
                 await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
             }
         }
-        catch (Exception)
-        {
-            await BestEffortDeleteStorageAsync(fullKey, CancellationToken.None);
-            await BestEffortDeleteStorageAsync(thumbKey, CancellationToken.None);
-            await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
-            throw;
-        }
+        // Other persistence errors can leave the commit outcome unknown. Keep staging for retry
+        // and let the orphan sweep remove any permanent objects that are not referenced.
 
         await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
 

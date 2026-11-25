@@ -396,7 +396,14 @@ export function createStickerCreator(options = {}) {
 
     async function handleFileSelected(file) {
         setError('');
-        if (!file || !isOpenState) return;
+        if (!file || !isOpenState || isSubmitting) return;
+
+        selectedFile = null;
+        releaseMediaResources();
+        const ui = els();
+        if (ui.submitBtn) ui.submitBtn.disabled = true;
+        if (ui.previewArea) ui.previewArea.classList.add('hidden');
+        if (ui.dropzone) ui.dropzone.classList.remove('hidden');
 
         const myGen = openGeneration;
         const myFileToken = ++fileSelectionToken;
@@ -423,8 +430,6 @@ export function createStickerCreator(options = {}) {
             return;
         }
 
-        releaseMediaResources();
-        selectedFile = file;
         isAnimatedFile = animated;
         shapeMode = 'square';
         zoom = 1;
@@ -463,7 +468,20 @@ export function createStickerCreator(options = {}) {
             }
             if (dropzone) dropzone.classList.add('hidden');
             if (previewArea) previewArea.classList.remove('hidden');
-            if (submitBtn) submitBtn.disabled = false;
+            try {
+                if (!animPreviewObjectUrl) throw new Error('Image preview is unavailable.');
+                if (typeof animImg?.decode === 'function') await animImg.decode();
+                if (isStale()) return;
+                selectedFile = file;
+                if (submitBtn) submitBtn.disabled = false;
+            } catch (err) {
+                if (!isStale()) {
+                    releaseMediaResources();
+                    if (previewArea) previewArea.classList.add('hidden');
+                    if (dropzone) dropzone.classList.remove('hidden');
+                    setError(err?.message || 'Could not decode the selected image.');
+                }
+            }
             return;
         }
 
@@ -499,9 +517,9 @@ export function createStickerCreator(options = {}) {
             if (staticControls) staticControls.classList.remove('hidden');
             if (dropzone) dropzone.classList.add('hidden');
             if (previewArea) previewArea.classList.remove('hidden');
-            if (submitBtn) submitBtn.disabled = false;
-
             drawStaticPreview();
+            selectedFile = file;
+            if (submitBtn) submitBtn.disabled = false;
         } catch (err) {
             if (!isStale()) {
                 selectedFile = null;

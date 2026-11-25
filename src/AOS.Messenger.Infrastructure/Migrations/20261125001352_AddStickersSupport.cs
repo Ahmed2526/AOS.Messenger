@@ -251,6 +251,12 @@ namespace AOS.Messenger.Infrastructure.Migrations
                 name: "CK_Messages_Content_Tombstone",
                 table: "Messages");
 
+            migrationBuilder.Sql("""
+                UPDATE [Messages]
+                SET [Content] = N'[Sticker]'
+                WHERE [IsDeletedForEveryone] = 0 AND [StickerId] IS NOT NULL AND [Content] IS NULL;
+                """);
+
             migrationBuilder.DropColumn(
                 name: "StickerId",
                 table: "Messages");

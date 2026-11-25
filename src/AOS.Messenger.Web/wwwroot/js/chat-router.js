@@ -343,7 +343,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
             return { loaded: loadedCount, hasMore: state.hasMore, error: null };
         } catch (err) {
-            if (err?.name === 'AbortError' || epoch !== state.switchEpoch) {
+            if (controller.signal.aborted || err?.name === 'AbortError' || epoch !== state.switchEpoch) {
                 return { loaded: 0, hasMore: !!state.hasMore, error: 'ABORTED' };
             }
             if (err?.code === 'UNAUTHORIZED') {

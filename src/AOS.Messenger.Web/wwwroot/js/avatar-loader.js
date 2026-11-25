@@ -225,6 +225,8 @@ export async function resolveAvatarUrl(
                 ? Math.min(parsedExpiryMs - AVATAR_URL_SAFETY_MARGIN_MS, defaultExpiryMs)
                 : defaultExpiryMs;
 
+            if (inFlightRequests.get(cacheKey) !== promise) return null;
+
             if (expiresAtMs > currentNow) {
                 setBoundedMapEntry(avatarUrlCache, cacheKey, {
                     url: resolvedUrl,
@@ -235,12 +237,12 @@ export async function resolveAvatarUrl(
             return resolvedUrl;
         } catch {
             return null;
-        } finally {
-            if (inFlightRequests.get(cacheKey) === promise) {
-                inFlightRequests.delete(cacheKey);
-            }
         }
-    })();
+    })().finally(() => {
+        if (inFlightRequests.get(cacheKey) === promise) {
+            inFlightRequests.delete(cacheKey);
+        }
+    });
 
     inFlightRequests.set(cacheKey, promise);
     return promise;

@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -977,7 +976,7 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
     // =========================================================================
 
     [Fact]
-    public void FrontendModules_StickerPickerCreatorFramelessBubbleAndContrast_WorkAccuratelyInNode()
+    public async Task FrontendModules_StickerPickerCreatorFramelessBubbleAndContrast_WorkAccuratelyInNode()
     {
         var root = FindSolutionRoot();
         string JsUrl(string name) => new Uri(Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", name)).AbsoluteUri;
@@ -1566,6 +1565,27 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             document.dispatchEvent({ type: 'pointermove', target: scCanvas, clientX: 40, clientY: 40, pointerId: 7 });
             assert.equal(canvasDrawCalls.length, drawsAfterLoad, 'pointercancel must stop active canvas drag');
 
+            let finishOldDecode;
+            let finishReplacementDecode;
+            globalThis.createImageBitmap = (file) => new Promise(resolve => {
+                if (file === pngFile) finishOldDecode = resolve;
+                else finishReplacementDecode = resolve;
+            });
+            document.dispatchEvent({ type: 'change', target: scFileInput });
+            await Promise.resolve();
+            scFileInput.files = [{ ...pngFile, name: 'replacement.png' }];
+            document.dispatchEvent({ type: 'change', target: scFileInput });
+            await Promise.resolve();
+            assert.equal(scSubmitBtn.disabled, true);
+            finishOldDecode({ width: 256, height: 256, close() {} });
+            await Promise.resolve();
+            document.dispatchEvent({ type: 'click', target: scSubmitBtn, preventDefault() {} });
+            assert.equal(scInitSignals.length, 0);
+            assert.equal(scSubmitBtn.disabled, true);
+            finishReplacementDecode({ width: 256, height: 256, close() {} });
+            await Promise.resolve();
+            assert.equal(scSubmitBtn.disabled, false);
+
             document.dispatchEvent({ type: 'click', target: scSubmitBtn, preventDefault() {} });
             await new Promise(r => setTimeout(r, 10));
             assert.equal(scInitSignals.length, 1);
@@ -1614,6 +1634,37 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             for (const sImg of stickyImgs) {
                 assert.equal(sImg.src, 'https://r2.test/fresh-sticker');
             }
+
+            const infoModal = createEl('div'); infoModal.id = 'sticker-info-modal';
+            const infoImage = createEl('img'); infoImage.id = 'sticker-info-img';
+            infoModal.appendChild(infoImage);
+            body.appendChild(infoModal);
+            const infoLookups = new Map();
+            const infoPicker = createStickerPicker({
+                getUrlFn: (id) => new Promise(resolve => infoLookups.set(id, resolve))
+            });
+            const infoA = { id: '11111111-2222-3333-4444-555555555555', packName: 'Old' };
+            const infoB = { id: '22222222-3333-4444-5555-666666666666', packName: 'Current' };
+            infoPicker.openStickerInfoModal(infoA);
+            const oldLoad = infoImage.onload;
+            await Promise.resolve();
+            infoPicker.openStickerInfoModal(infoB);
+            await Promise.resolve();
+            infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b' });
+            await new Promise(resolve => setTimeout(resolve, 0));
+            infoLookups.get(infoA.id)({ url: 'https://r2.test/info-a' });
+            oldLoad();
+            await new Promise(resolve => setTimeout(resolve, 0));
+            assert.equal(infoImage.alt, 'Current');
+            assert.equal(infoImage.src, 'https://r2.test/info-b');
+
+            const pendingRetry = infoImage.onerror();
+            await Promise.resolve();
+            infoPicker.closeStickerInfoModal();
+            infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b-retried' });
+            await pendingRetry;
+            assert.equal(infoImage.src, '');
+            infoPicker.destroy();
 
             // [S3] Proactive coalesced /url resolution for cold custom stickers (no eager /image 302 src)
             const coldStickerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -1664,32 +1715,13 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             console.log('OK_MILESTONE_C_FRONTEND');
             """;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var proc = Process.Start(psi)!;
-        proc.StandardInput.Write(script);
-        proc.StandardInput.Close();
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        Assert.True(proc.WaitForExit(15000), "Node test timed out.");
-        Assert.True(proc.ExitCode == 0, $"Node exited {proc.ExitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node exited {exitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
         Assert.Contains("OK_MILESTONE_C_FRONTEND", stdout);
     }
 
     [Fact]
-    public void StickerCreatorModal_IsolatesDragAndDropEventsFromChatUploader_InNode()
+    public async Task StickerCreatorModal_IsolatesDragAndDropEventsFromChatUploader_InNode()
     {
         var root = FindSolutionRoot();
         string JsUrl(string name) => new Uri(Path.Combine(root, "src", "AOS.Messenger.Web", "wwwroot", "js", name)).AbsoluteUri;
@@ -1999,32 +2031,13 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             console.log('OK_STICKER_DND_ISOLATION');
             """;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var proc = Process.Start(psi)!;
-        proc.StandardInput.Write(script);
-        proc.StandardInput.Close();
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        Assert.True(proc.WaitForExit(15000), "Node test timed out.");
-        Assert.True(proc.ExitCode == 0, $"Node exited {proc.ExitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node exited {exitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
         Assert.Contains("OK_STICKER_DND_ISOLATION", stdout);
     }
 
     [Fact]
-    public void StickerPicker_CustomConfirmationModal_ReplacesNativeDialogsForPackAndStickerDeletion_InNode()
+    public async Task StickerPicker_CustomConfirmationModal_ReplacesNativeDialogsForPackAndStickerDeletion_InNode()
     {
         var root = FindSolutionRoot();
         var modalsHtml = File.ReadAllText(Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Chat", "_ChatModals.cshtml"));
@@ -2301,32 +2314,13 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             console.log('OK_STICKER_CONFIRM_MODAL');
             """;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var proc = Process.Start(psi)!;
-        proc.StandardInput.Write(script);
-        proc.StandardInput.Close();
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        Assert.True(proc.WaitForExit(15000), "Node test timed out.");
-        Assert.True(proc.ExitCode == 0, $"Node exited {proc.ExitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node exited {exitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
         Assert.Contains("OK_STICKER_CONFIRM_MODAL", stdout);
     }
 
     [Fact]
-    public void MobileWhatsAppActionSheet_HidesInlineBarOnMobile_AndOpensOnLongPressOrContextMenu()
+    public async Task MobileWhatsAppActionSheet_HidesInlineBarOnMobile_AndOpensOnLongPressOrContextMenu()
     {
         var root = FindSolutionRoot();
         var conversationHtml = File.ReadAllText(Path.Combine(root, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml"));
@@ -2602,27 +2596,8 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             console.log('OK_MOBILE_WHATSAPP_SHEET');
             """;
 
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var proc = Process.Start(psi)!;
-        proc.StandardInput.Write(script);
-        proc.StandardInput.Close();
-        var stdout = proc.StandardOutput.ReadToEnd();
-        var stderr = proc.StandardError.ReadToEnd();
-        Assert.True(proc.WaitForExit(15000), "Node test timed out.");
-        Assert.True(proc.ExitCode == 0, $"Node exited {proc.ExitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node exited {exitCode}:\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
         Assert.Contains("OK_MOBILE_WHATSAPP_SHEET", stdout);
     }
 

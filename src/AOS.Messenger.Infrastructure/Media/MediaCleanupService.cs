@@ -276,7 +276,7 @@ public sealed class MediaCleanupService : BackgroundService
             if (deletedIds.Count > 0)
             {
                 var purgeTime = _timeProvider.GetUtcNow();
-                foreach (var (mediaId, stagedBytes) in measuredStagedSizes)
+                foreach (var (mediaId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
                 {
                     var updatedMeasured = await db.Media
                         .Where(m => m.Id == mediaId
@@ -383,7 +383,7 @@ public sealed class MediaCleanupService : BackgroundService
             if (deletedIds.Count > 0)
             {
                 var purgeTime = _timeProvider.GetUtcNow();
-                foreach (var (uploadId, stagedBytes) in measuredStagedSizes)
+                foreach (var (uploadId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
                 {
                     totalPurged += await db.PendingAvatarUploads
                         .Where(p => p.Id == uploadId && p.State == MediaState.Failed && p.PurgedAtUtc == null)
@@ -489,7 +489,7 @@ public sealed class MediaCleanupService : BackgroundService
             if (deletedIds.Count > 0)
             {
                 var purgeTime = _timeProvider.GetUtcNow();
-                foreach (var (stickerId, stagedBytes) in measuredStagedSizes)
+                foreach (var (stickerId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
                 {
                     totalPurged += await db.Stickers
                         .Where(s => s.Id == stickerId && s.State == StickerState.Failed && s.PurgedAtUtc == null)
@@ -573,7 +573,7 @@ public sealed class MediaCleanupService : BackgroundService
                 .ToListAsync(ct);
             var activeAvatars = await db.PendingAvatarUploads
                 .AsNoTracking()
-                .Where(p => chunkKeys.Contains(p.ObjectKey) && p.PurgedAtUtc == null)
+                .Where(p => chunkKeys.Contains(p.ObjectKey) && p.PurgedAtUtc == null && p.State != MediaState.Uploaded)
                 .Select(p => p.ObjectKey)
                 .ToListAsync(ct);
             var activeStickers = await db.Stickers

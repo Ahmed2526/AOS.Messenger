@@ -409,22 +409,37 @@ public sealed class StickerService : IStickerService
         {
             await _stickerPersistence.UpdateStickerAsync(sticker, ct);
         }
-        catch (Exception ex) when (ex is NotFoundException or ConflictException)
+        catch (Exception ex)
         {
-            try
-            {
-                return await HandleConcurrentConflictAsync(stickerId, callerId, ex.Message, ct);
-            }
-            finally
+            // Read persisted state rather than the locally modified Ready entity.
+            var persisted = await _stickerPersistence.GetStickerWithPackAsync(stickerId, CancellationToken.None);
+            var current = persisted?.Sticker;
+            if (current?.ObjectKey != permanentObjectKey)
             {
                 await BestEffortDeleteStorageAsync(permanentObjectKey, CancellationToken.None);
+            }
+
+            if (current?.State != StickerState.Pending)
+            {
                 await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
             }
-        }
-        catch (Exception)
-        {
-            await BestEffortDeleteStorageAsync(permanentObjectKey, CancellationToken.None);
-            await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
+
+            if (persisted is not null && current?.State == StickerState.Ready)
+            {
+                var isFav = await _stickerPersistence.IsStickerFavoritedByUserAsync(callerId, stickerId, CancellationToken.None);
+                return ToStickerDto(current, persisted.Pack, callerId, isFav);
+            }
+
+            if (current?.State == StickerState.Failed)
+            {
+                throw new DomainException(current.FailureReason ?? "Sticker verification failed.");
+            }
+
+            if (ex is NotFoundException)
+            {
+                throw new ConflictException(ex.Message, ex);
+            }
+
             throw;
         }
 

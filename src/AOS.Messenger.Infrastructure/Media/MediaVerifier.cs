@@ -52,29 +52,13 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-    private static readonly Lock ResourceLimitsLock = new();
-
     private readonly IMediaStorage _storage;
     private readonly MediaOptions _options;
     private readonly ILogger<MediaVerifier> _logger;
-    private readonly ImageProcessingGate? _sharedGate;
+    private readonly ImageProcessingGate _imageGate;
+    private readonly bool _ownsImageGate;
     private readonly SemaphoreSlim _imageSemaphore;
     private readonly long _maxEncodedImageBytes;
-
-    static MediaVerifier()
-    {
-        lock (ResourceLimitsLock)
-        {
-            ResourceLimits.Width = (ulong)MediaConstraints.MaxImageWidth;
-            ResourceLimits.Height = (ulong)MediaConstraints.MaxImageHeight;
-            ResourceLimits.Area = 256UL * 1024 * 1024;
-            ResourceLimits.Memory = 512UL * 1024 * 1024;
-            ResourceLimits.Disk = 1024UL * 1024 * 1024;
-            ResourceLimits.MaxMemoryRequest = 256UL * 1024 * 1024;
-            ResourceLimits.Thread = 1UL;
-            ResourceLimits.Time = 15UL;
-        }
-    }
 
     [ActivatorUtilitiesConstructor]
     public MediaVerifier(
@@ -102,24 +86,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         _options = options.Value;
         _logger = logger;
         _maxEncodedImageBytes = maxEncodedImageBytes;
-        _sharedGate = sharedGate;
-
-        if (sharedGate is not null)
-        {
-            _imageSemaphore = sharedGate.Semaphore;
-        }
-        else
-        {
-            var concurrency = Math.Max(1, _options.MaxImageProcessingConcurrency);
-            _imageSemaphore = new SemaphoreSlim(concurrency, concurrency);
-            if (_options.ImageProcessingTimeoutSeconds is >= 1 and <= 60)
-            {
-                lock (ResourceLimitsLock)
-                {
-                    ResourceLimits.Time = (ulong)_options.ImageProcessingTimeoutSeconds;
-                }
-            }
-        }
+        _ownsImageGate = sharedGate is null;
+        _imageGate = sharedGate ?? new ImageProcessingGate(options);
+        _imageSemaphore = _imageGate.Semaphore;
     }
 
     public async Task<VerifiedMediaResult> VerifyAndSanitizeAsync(
@@ -155,9 +124,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
     public void Dispose()
     {
-        if (_sharedGate is null)
+        if (_ownsImageGate)
         {
-            _imageSemaphore.Dispose();
+            _imageGate.Dispose();
         }
     }
 
@@ -198,7 +167,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             _ => new AnimationScanResult(1, 0, 0, 0)
         };
 
-        var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.ImageProcessingTimeoutSeconds));
+        var timeout = _imageGate.Timeout;
         var acquired = await _imageSemaphore.WaitAsync(timeout, ct);
         if (!acquired)
         {

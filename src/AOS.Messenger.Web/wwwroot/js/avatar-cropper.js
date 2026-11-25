@@ -11,7 +11,7 @@
  * - Lazily mounts single-instance #avatar-cropper-modal (prevents duplicate DOM IDs).
  */
 
-import { initiateAvatarUpload, completeAvatarUpload } from './api-client.js';
+import { initiateAvatarUpload, completeAvatarUpload, getAvatarUploadStatus } from './api-client.js';
 
 export const MAX_LOCAL_AVATAR_SOURCE_BYTES = 15 * 1024 * 1024;
 export const MAX_RAW_AVATAR_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -229,7 +229,7 @@ function ensureAvatarCropperModal() {
  * }} [options]
  */
 export function createAvatarCropper({ onUploaded = null, onError = null, api = null, createXhr = null } = {}) {
-    const resolvedApi = api || { initiateAvatarUpload, completeAvatarUpload };
+    const resolvedApi = api || { initiateAvatarUpload, completeAvatarUpload, getAvatarUploadStatus };
     const xhrFactory = createXhr || (() => new XMLHttpRequest());
 
     let activeBitmap = null;
@@ -246,6 +246,7 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     let dragBasePanX = 0;
     let dragBasePanY = 0;
     let isUploading = false;
+    let isCompleting = false;
     let isOpenState = false;
     let openGeneration = 0;
     let activeXhr = null;
@@ -342,9 +343,10 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
 
     function setUploadingUi(uploading, percent = 0, labelText = 'Uploading...') {
         isUploading = uploading;
-        const { saveBtn, cancelBtn, zoomSlider, progressWrap, progressBar, progressLabel } = getCropperElements();
+        const { saveBtn, cancelBtn, closeBtn, zoomSlider, progressWrap, progressBar, progressLabel } = getCropperElements();
         if (saveBtn) saveBtn.disabled = uploading;
-        if (cancelBtn) cancelBtn.disabled = false;
+        if (cancelBtn) cancelBtn.disabled = isCompleting;
+        if (closeBtn) closeBtn.disabled = isCompleting;
         if (zoomSlider) zoomSlider.disabled = uploading;
         if (progressWrap && progressWrap.classList) {
             progressWrap.classList.toggle('hidden', !uploading);
@@ -356,6 +358,7 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     }
 
     function close() {
+        if (isCompleting) return;
         openGeneration++;
         isOpenState = false;
         if (uploadAbortController && typeof uploadAbortController.abort === 'function') {
@@ -546,6 +549,34 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
         });
     }
 
+    function isUncertainResponse(error) {
+        return !error?.status || error.status >= 500 || error.status === 408 || error.code === 'INVALID_RESPONSE';
+    }
+
+    async function completeAndReconcile(uploadId) {
+        try {
+            const result = await resolvedApi.completeAvatarUpload(uploadId);
+            if (result) return result;
+        } catch (err) {
+            if (!isUncertainResponse(err) || typeof resolvedApi.getAvatarUploadStatus !== 'function') throw err;
+        }
+
+        if (typeof resolvedApi.getAvatarUploadStatus === 'function') {
+            // Processing can continue after the connection to the completion request is lost.
+            for (const delay of [0, 500, 1000, 2000, 4000, 8000]) {
+                if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+                try {
+                    const status = await resolvedApi.getAvatarUploadStatus(uploadId);
+                    if (status) return status;
+                } catch (err) {
+                    if (!isUncertainResponse(err) && err.status !== 429) throw err;
+                }
+            }
+        }
+
+        throw new Error('Could not confirm whether your profile photo was updated.');
+    }
+
     async function handleSave() {
         if (isUploading || !isOpenState) return;
         const myGen = openGeneration;
@@ -582,16 +613,22 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
             await uploadBlobToPresignedUrl(uploadUrl, blob, requiredMime, signal);
             if (isCancelled()) return;
 
+            isCompleting = true;
+            uploadAbortController = null;
             setUploadingUi(true, 95, 'Processing photo...');
-            const result = await resolvedApi.completeAvatarUpload(uploadId, { signal });
-            if (isCancelled()) return;
+            let result;
+            try {
+                result = await completeAndReconcile(uploadId);
+            } finally {
+                isCompleting = false;
+            }
 
             close();
             if (typeof onUploaded === 'function') {
                 await onUploaded(result);
             }
         } catch (err) {
-            if ((err && (err.name === 'AbortError' || err.message === 'Upload cancelled.')) || isCancelled()) {
+            if (isCancelled()) {
                 return;
             }
             setUploadingUi(false, 0);
@@ -701,6 +738,7 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     }
 
     async function open(file) {
+        if (isCompleting) return false;
         const validation = validateAvatarSourceFile(file);
         if (!validation.ok) {
             if (typeof onError === 'function') onError(validation.error);

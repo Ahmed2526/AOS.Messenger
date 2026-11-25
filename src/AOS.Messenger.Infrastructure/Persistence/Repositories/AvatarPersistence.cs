@@ -91,7 +91,9 @@ public sealed class AvatarPersistence : IAvatarPersistence
                 .Where(s => s.UploaderId == upload.UserId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
                 .SumAsync(s => s.State == StickerState.Failed
                     ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
+                    : s.State == StickerState.Ready || s.State == StickerState.Archived
+                        ? (long?)s.DeclaredSizeBytes
+                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
 
             var totalUsedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
             if (upload.DeclaredSizeBytes > dailyQuotaBytes - totalUsedBytes)
@@ -179,7 +181,20 @@ public sealed class AvatarPersistence : IAvatarPersistence
 
         AvatarCommitResult? result = null;
         var strategy = _db.Database.CreateExecutionStrategy();
-        await strategy.ExecuteAsync(async () =>
+        var commitAttempted = false;
+        try
+        {
+            await strategy.ExecuteAsync(CommitAsync);
+        }
+        catch (Exception ex) when (commitAttempted && (ex is NotFoundException or ConflictException))
+        {
+            // A retry can observe a completed upload after the original commit response was lost.
+            throw new InvalidOperationException("The avatar commit outcome could not be confirmed.", ex);
+        }
+
+        return result!;
+
+        async Task CommitAsync()
         {
             _db.ChangeTracker.Clear();
 
@@ -222,6 +237,7 @@ public sealed class AvatarPersistence : IAvatarPersistence
                         ex);
                 }
 
+                commitAttempted = true;
                 await tx.CommitAsync(ct);
 
                 result = new AvatarCommitResult(
@@ -256,6 +272,7 @@ public sealed class AvatarPersistence : IAvatarPersistence
                     ex);
             }
 
+            commitAttempted = true;
             await tx.CommitAsync(ct);
 
             result = new AvatarCommitResult(
@@ -264,9 +281,7 @@ public sealed class AvatarPersistence : IAvatarPersistence
                 CurrentAvatarVersion: user.AvatarVersion,
                 PreviousFullObjectKey: prevFull,
                 PreviousThumbObjectKey: prevThumb);
-        });
-
-        return result!;
+        }
     }
 
     public async Task<AvatarRemoveResult> RemoveUserAvatarAsync(

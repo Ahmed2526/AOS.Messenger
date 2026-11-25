@@ -20,6 +20,11 @@ public interface IAvatarService
         AvatarUploadId uploadId,
         CancellationToken ct = default);
 
+    Task<AvatarUpdatedResponseDto?> GetUploadStatusAsync(
+        UserId callerId,
+        AvatarUploadId uploadId,
+        CancellationToken ct = default);
+
     Task RemoveAvatarAsync(
         UserId callerId,
         CancellationToken ct = default);

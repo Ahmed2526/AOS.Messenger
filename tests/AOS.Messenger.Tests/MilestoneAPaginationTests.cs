@@ -713,14 +713,16 @@ public sealed class MilestoneAPaginationTests
             });
 
             let onReconnectedCb = null;
+            let onClosedCb = null;
+            let startCalls = 0;
             const fakeConnection = {
                 state: 'Connected',
                 on: () => {},
                 off: () => {},
-                onclose: () => {},
+                onclose: (cb) => { onClosedCb = cb; },
                 onreconnecting: () => {},
                 onreconnected: (cb) => { onReconnectedCb = cb; },
-                start: async () => {},
+                start: async () => { startCalls++; fakeConnection.state = 'Connected'; },
                 stop: async () => {},
                 invoke: async () => {}
             };
@@ -744,13 +746,24 @@ public sealed class MilestoneAPaginationTests
             syncPaginationAttributes(els.container, 'cursor-9', true);
 
             let windowReplacedCount = 0;
+            let closeOnRefresh = false;
             const client = createSignalRClient({
                 state,
                 onSessionExpired: () => {},
                 onReconciledWindowReplaced: () => { windowReplacedCount++; },
-                signalRLib
+                signalRLib,
+                retryDelaysMs: [0],
+                onRefreshPresence: () => {
+                    if (!closeOnRefresh) return;
+                    closeOnRefresh = false;
+                    fakeConnection.state = 'Disconnected';
+                    onClosedCb();
+                }
             });
             await client.start();
+
+            const pendingPagination = new AbortController();
+            state.paginationAbortController = pendingPagination;
 
             // Case 1: Small gap (bundle still includes id 11) preserves paginated id 10 & cursor-9
             nextBundle = {
@@ -765,6 +778,7 @@ public sealed class MilestoneAPaginationTests
             };
             await onReconnectedCb();
             assert.equal(windowReplacedCount, 0);
+            assert.equal(pendingPagination.signal.aborted, false);
             assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['10', '11', '12']);
             assert.equal(state.nextCursor, 'cursor-9');
 
@@ -781,11 +795,17 @@ public sealed class MilestoneAPaginationTests
             };
             await onReconnectedCb();
             assert.equal(windowReplacedCount, 1);
+            assert.equal(pendingPagination.signal.aborted, true);
             assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['40', '59']);
             assert.equal(state.nextCursor, 'cursor-39');
             assert.equal(state.hasMore, true);
             assert.equal(els.container.getAttribute('data-next-cursor'), 'cursor-39');
             assert.equal(els.container.getAttribute('data-has-more'), 'true');
+            const startsBeforeClose = startCalls;
+            closeOnRefresh = true;
+            await client.start();
+            await new Promise(resolve => setTimeout(resolve, 30));
+            assert.equal(startCalls, startsBeforeClose + 2, 'Closing during startup must schedule exactly one retry');
             client.destroy();
             console.log('OK');
             """;

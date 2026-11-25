@@ -68,6 +68,20 @@ public sealed class ProfileAvatarController : ControllerBase
         return Ok(result);
     }
 
+    [HttpGet("{uploadId:guid}/status")]
+    [EnableRateLimiting("media-upload")]
+    public async Task<IActionResult> GetUploadStatus(Guid uploadId, CancellationToken ct = default)
+    {
+        SetResourcePolicy();
+        if (_currentUser.Id is null)
+        {
+            return Unauthorized();
+        }
+
+        var result = await _avatarService.GetUploadStatusAsync(_currentUser.Id, new AvatarUploadId(uploadId), ct);
+        return result is null ? NoContent() : Ok(result);
+    }
+
     [HttpDelete("")]
     [EnableRateLimiting("media-upload")]
     public async Task<IActionResult> RemoveAvatar(CancellationToken ct = default)

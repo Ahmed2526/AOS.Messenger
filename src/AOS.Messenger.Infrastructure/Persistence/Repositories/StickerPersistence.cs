@@ -323,7 +323,9 @@ public sealed class StickerPersistence : IStickerPersistence
                 .Where(s => s.UploaderId == uploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
                 .SumAsync(s => s.State == StickerState.Failed
                     ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
+                    : s.State == StickerState.Ready || s.State == StickerState.Archived
+                        ? (long?)s.DeclaredSizeBytes
+                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
 
             var totalUsedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
             if (sticker.DeclaredSizeBytes > dailyQuotaBytes - totalUsedBytes)

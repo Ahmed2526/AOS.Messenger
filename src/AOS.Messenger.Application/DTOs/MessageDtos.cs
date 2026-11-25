@@ -6,7 +6,8 @@ public sealed record SendMessageRequestDto(
     string? Content,
     string IdempotencyKey,
     MessageId? ReplyToMessageId = null,
-    IReadOnlyList<MediaId>? MediaIds = null);
+    IReadOnlyList<MediaId>? MediaIds = null,
+    StickerId? StickerId = null);
 
 public sealed record MessageReplyDto(
     MessageId Id,
@@ -73,7 +74,9 @@ public sealed record MessageDto(
     MessageReplyDto? ReplyTo,
     bool IsOutgoing,
     IReadOnlyList<ReactionSummaryDto>? Reactions = null,
-    IReadOnlyList<MediaAttachmentDto>? Attachments = null)
+    IReadOnlyList<MediaAttachmentDto>? Attachments = null,
+    string? SenderAvatarVersion = null,
+    StickerMessageDto? Sticker = null)
 {
     public IReadOnlyList<ReactionSummaryDto> Reactions { get; init; } = Reactions ?? [];
     public IReadOnlyList<MediaAttachmentDto> Attachments { get; init; } = Attachments ?? [];

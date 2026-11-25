@@ -13,5 +13,6 @@ public interface IUserReader
     Task<UserProfileDto?> GetByUserNameAsync(string userName, CancellationToken ct = default);
     Task<UserProfileDto?> GetByEmailAsync(string email, CancellationToken ct = default);
     Task<bool> ExistsAsync(UserId userId, CancellationToken ct = default);
+    Task<IReadOnlySet<UserId>> GetActiveUserIdsAsync(IEnumerable<UserId> userIds, CancellationToken ct = default);
     Task<IReadOnlyList<UserSearchResultDto>> SearchUsersAsync(UserId currentUserId, string query, IReadOnlySet<UserId> excludedUserIds, int limit, CancellationToken ct = default);
 }

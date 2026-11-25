@@ -667,10 +667,17 @@ public sealed class Phase9MediaFrontendTests
 
             // 3. Lightbox navigation, image-only triggers, closeIfMessage, focus management & 1-shot retry -> Media unavailable
             let lbUrlCalls = 0;
+            let lbFailUrls = false;
             const lightbox = createMediaLightbox({
-                getMediaUrlFn: async () => {
+                getMediaUrlFn: async (_cId, _mId, mediaId) => {
                     lbUrlCalls++;
-                    throw new Error('gone');
+                    if (lbFailUrls) {
+                        throw new Error('gone');
+                    }
+                    return { url: `https://cdn.example.com/media/${mediaId}.jpg` };
+                },
+                fetchFn: async () => {
+                    throw new TypeError('Failed to fetch');
                 }
             });
             const openerTrigger = document.createElement('button');
@@ -702,11 +709,15 @@ public sealed class Phase9MediaFrontendTests
 
             document.dispatchEvent({ type: 'keydown', key: 'ArrowRight', preventDefault() {} });
             assert.equal(lbCounter.textContent, '2 / 2');
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(lbImg.src, 'https://cdn.example.com/media/img2.jpg');
 
-            // 1st error calls getMediaUrlFn -> fails -> falls back to 'Media unavailable'
+            // 1st error performs 1-shot retry via getMediaUrlFn -> fails -> falls back to 'Media unavailable' (never loops)
+            lbFailUrls = true;
+            const callsBeforeError = lbUrlCalls;
             lbImg.dispatchEvent({ type: 'error' });
-            await new Promise(r => setTimeout(r, 10));
-            assert.equal(lbUrlCalls, 1);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(lbUrlCalls - callsBeforeError, 1);
             assert.equal(lbErr.classList.contains('hidden'), false);
             assert.equal(lbErr.textContent, 'Media unavailable');
 
@@ -754,5 +765,259 @@ public sealed class Phase9MediaFrontendTests
         var (exitCode, output, error) = RunNodeModuleScript(script);
         Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
         Assert.Contains("OK_UPLOADER_AND_LIGHTBOX", output);
+    }
+
+    [Fact]
+    public void MediaLightbox_And_MemoryCache_PreventRepeatFetches_AndEnforceBoundsAndEvictionInNode()
+    {
+        var lightboxUrl = JsUrl("media-lightbox.js");
+        var cacheUrl = JsUrl("memory-image-cache.js");
+
+        var script = MockDomPrelude + $$"""
+            import assert from 'node:assert/strict';
+            import { createMediaLightbox } from '{{lightboxUrl}}';
+            import { createMemoryImageCache } from '{{cacheUrl}}';
+
+            // Build lightbox DOM
+            const lbModal = document.createElement('div'); lbModal.id = 'media-lightbox-modal'; lbModal.classList.add('hidden');
+            const lbTitle = document.createElement('h3'); lbTitle.id = 'media-lightbox-title';
+            const lbCounter = document.createElement('span'); lbCounter.id = 'media-lightbox-counter';
+            const lbImg = document.createElement('img'); lbImg.id = 'media-lightbox-img';
+            const lbErr = document.createElement('div'); lbErr.id = 'media-lightbox-error'; lbErr.classList.add('hidden');
+            const lbPrev = document.createElement('button'); lbPrev.id = 'media-lightbox-prev-btn';
+            const lbNext = document.createElement('button'); lbNext.id = 'media-lightbox-next-btn';
+            const lbClose = document.createElement('button'); lbClose.id = 'media-lightbox-close-btn';
+            const lbDl = document.createElement('button'); lbDl.id = 'media-lightbox-download-btn';
+            for (const c of [lbTitle, lbCounter, lbImg, lbErr, lbPrev, lbNext, lbClose, lbDl]) lbModal.appendChild(c);
+            document.body.appendChild(lbModal);
+
+            const convId = '11111111-1111-1111-1111-111111111111';
+            let signedUrlCalls = 0;
+            let blobFetchCalls = 0;
+            let blobSeq = 0;
+            const revokedUrls = [];
+
+            const mockCreateObjectUrl = () => `blob:https://localhost/mock-${++blobSeq}`;
+            const mockRevokeObjectUrl = (u) => revokedUrls.push(u);
+
+            // 1. RAM Blob ObjectURL cache: 1st open fetches once; closing + re-opening does 0 fetches
+            const lightbox = createMediaLightbox({
+                maxCachedItems: 2,
+                maxCachedBytes: 2500,
+                getMediaUrlFn: async (_cId, _mId, mediaId) => {
+                    signedUrlCalls++;
+                    if (mediaId === 'unsafe') return { url: 'javascript:alert(1)' };
+                    return { url: `https://r2.example.com/photos/${mediaId}?variant=original` };
+                },
+                fetchFn: async (url) => {
+                    blobFetchCalls++;
+                    if (url.includes('svg-attack')) {
+                        return {
+                            ok: true,
+                            status: 200,
+                            headers: { get: () => 'image/svg+xml' },
+                            blob: async () => ({ size: 120, type: 'image/svg+xml' })
+                        };
+                    }
+                    if (url.includes('cors-blocked')) {
+                        throw new TypeError('Failed to fetch');
+                    }
+                    return {
+                        ok: true,
+                        status: 200,
+                        headers: { get: () => 'image/jpeg' },
+                        blob: async () => ({ size: 1000, type: 'image/jpeg' })
+                    };
+                },
+                createObjectUrlFn: mockCreateObjectUrl,
+                revokeObjectUrlFn: mockRevokeObjectUrl
+            });
+
+            // Open photo #1 -> fetches /url once + Blob once
+            lightbox.open([{ conversationId: convId, messageId: '101', mediaId: 'p1', fileName: 'p1.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(signedUrlCalls, 1);
+            assert.equal(blobFetchCalls, 1);
+            assert.equal(lbImg.src, 'blob:https://localhost/mock-1');
+            assert.equal(lightbox.getCacheStats().count, 1);
+            assert.equal(lightbox.getCacheStats().totalBytes, 1000);
+
+            // Close lightbox -> clears <img src>, keeps blob: in RAM cache
+            lightbox.close();
+            assert.equal(lbImg.hasAttribute('src'), false);
+            assert.equal(revokedUrls.length, 0);
+
+            // Re-open photo #1 -> 0 extra /url calls, 0 extra fetch calls, instant blob: URL reuse
+            lightbox.open([{ conversationId: convId, messageId: '101', mediaId: 'p1', fileName: 'p1.jpg' }], 0);
+            assert.equal(signedUrlCalls, 1);
+            assert.equal(blobFetchCalls, 1);
+            assert.equal(lbImg.src, 'blob:https://localhost/mock-1');
+            lightbox.close();
+
+            // 2. LRU eviction by item count (maxCachedItems=2): touch p1, open p2 & p3 -> evicts LRU p2, keeps p1 & p3
+            lightbox.open([{ conversationId: convId, messageId: '102', mediaId: 'p2', fileName: 'p2.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            lightbox.close();
+            // Touch p1 so p2 becomes oldest
+            lightbox.open([{ conversationId: convId, messageId: '101', mediaId: 'p1', fileName: 'p1.jpg' }], 0);
+            assert.equal(blobFetchCalls, 2); // still 2 (p1 cache hit!)
+            lightbox.close();
+
+            // Open p3 (1000 bytes, total would be 3000 > maxCachedBytes=2500 & count 3 > maxCachedItems=2) -> evicts p2 (mock-2)
+            lightbox.open([{ conversationId: convId, messageId: '103', mediaId: 'p3', fileName: 'p3.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(lightbox.getCacheStats().count, 2);
+            assert.equal(lightbox.getCacheStats().totalBytes, 2000);
+            assert.deepEqual(revokedUrls, ['blob:https://localhost/mock-2']);
+            lightbox.close();
+
+            // 3. Message deletion evicts & revokes even when lightbox is CLOSED
+            lightbox.closeIfMessage('103');
+            assert.equal(lightbox.getCacheStats().count, 1);
+            assert.deepEqual(revokedUrls, ['blob:https://localhost/mock-2', 'blob:https://localhost/mock-3']);
+
+            // 4. Switching conversations (resetForSwitch) wipes ALL remaining cached Blobs cleanly
+            lightbox.resetForSwitch();
+            assert.equal(lightbox.getCacheStats().count, 0);
+            assert.equal(lightbox.getCacheStats().totalBytes, 0);
+            assert.deepEqual(revokedUrls, [
+                'blob:https://localhost/mock-2',
+                'blob:https://localhost/mock-3',
+                'blob:https://localhost/mock-1'
+            ]);
+
+            // After switching back, re-opening p1 fetches cleanly again
+            lightbox.open([{ conversationId: convId, messageId: '101', mediaId: 'p1', fileName: 'p1.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(blobFetchCalls, 4);
+            assert.equal(lbImg.src, 'blob:https://localhost/mock-4');
+            lightbox.wipe();
+            assert.equal(lightbox.getCacheStats().count, 0);
+
+            // 5. Security: unsafe URL and SVG blob rejection
+            const callsBeforeUnsafe = blobFetchCalls;
+            lightbox.open([{ conversationId: convId, messageId: '104', mediaId: 'unsafe', fileName: 'x.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(blobFetchCalls, callsBeforeUnsafe);
+            assert.equal(lbErr.classList.contains('hidden'), false);
+            assert.equal(lbErr.textContent, 'Media unavailable');
+            lightbox.close();
+
+            const blobCountBeforeSvg = blobSeq;
+            lightbox.open([{ conversationId: convId, messageId: '105', mediaId: 'svg-attack', fileName: 'x.svg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(blobSeq, blobCountBeforeSvg);
+            assert.equal(lbErr.classList.contains('hidden'), false);
+            lightbox.close();
+
+            // 6. CORS fallback: when fetch throws TypeError, falls back to signed URL, parks loaded <img>, and reuses with 0 fetches
+            const fetchCallsBeforeCors = blobFetchCalls;
+            lightbox.open([{ conversationId: convId, messageId: '106', mediaId: 'cors-blocked', fileName: 'cors.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(blobFetchCalls, fetchCallsBeforeCors + 1);
+            assert.equal(document.getElementById('media-lightbox-img').src, 'https://r2.example.com/photos/cors-blocked?variant=original');
+
+            // Simulate browser finishing image load, then close -> parks loaded <img> safely while #media-lightbox-img resets src
+            document.getElementById('media-lightbox-img').dispatchEvent({ type: 'load' });
+            lightbox.close();
+            assert.equal(document.getElementById('media-lightbox-img').hasAttribute('src'), false);
+            assert.equal(lightbox.getCacheStats().count, 1);
+
+            // Re-open -> 0 extra /url or fetch calls!
+            const urlCallsBeforeReopen = signedUrlCalls;
+            const fetchCallsBeforeReopen = blobFetchCalls;
+            lightbox.open([{ conversationId: convId, messageId: '106', mediaId: 'cors-blocked', fileName: 'cors.jpg' }], 0);
+            assert.equal(signedUrlCalls, urlCallsBeforeReopen);
+            assert.equal(blobFetchCalls, fetchCallsBeforeReopen);
+
+            // resetForSwitch tears down parked <img> element cleanly
+            lightbox.resetForSwitch();
+            assert.equal(lightbox.getCacheStats().count, 0);
+
+            // 7. Standalone createMemoryImageCache refuses blobs larger than maxBytes
+            const revokes = [];
+            const smallCache = createMemoryImageCache({ maxItems: 5, maxBytes: 500, revokeObjectUrlFn: (u) => revokes.push(u) });
+            assert.equal(smallCache.setBlob('huge', 'blob:https://localhost/huge', 900, {}), false);
+            assert.equal(smallCache.stats().count, 0);
+
+            // 8. Coalesced in-flight transient (unstored) Blob stays alive on same-key re-open, revokes on permanent close
+            let releaseTinyUrl;
+            const tinyRevokes = [];
+            let tinyBlobSeq = 0;
+            const tinyLightbox = createMediaLightbox({
+                maxCachedItems: 2,
+                maxCachedBytes: 100,
+                getMediaUrlFn: async () => new Promise(resolve => {
+                    releaseTinyUrl = () => resolve({ url: 'https://r2.example.com/photos/huge-item?variant=original' });
+                }),
+                fetchFn: async () => ({
+                    ok: true,
+                    status: 200,
+                    headers: { get: () => 'image/jpeg' },
+                    blob: async () => ({ size: 500, type: 'image/jpeg' })
+                }),
+                createObjectUrlFn: () => `blob:https://localhost/tiny-${++tinyBlobSeq}`,
+                revokeObjectUrlFn: (u) => tinyRevokes.push(u)
+            });
+
+            const hugeItem = [{ conversationId: convId, messageId: '201', mediaId: 'huge-item', fileName: 'huge.jpg' }];
+            tinyLightbox.open(hugeItem, 0);
+            tinyLightbox.close();
+            tinyLightbox.open(hugeItem, 0);
+            releaseTinyUrl();
+            await new Promise(r => setTimeout(r, 20));
+            assert.deepEqual(tinyRevokes, []);
+            assert.equal(document.getElementById('media-lightbox-img').src, 'blob:https://localhost/tiny-1');
+            tinyLightbox.close();
+            assert.deepEqual(tinyRevokes, ['blob:https://localhost/tiny-1']);
+
+            // Permanent close before transient resolution must revoke stale unstored Blob
+            tinyLightbox.open(hugeItem, 0);
+            tinyLightbox.close();
+            releaseTinyUrl();
+            await new Promise(r => setTimeout(r, 20));
+            assert.deepEqual(tinyRevokes, ['blob:https://localhost/tiny-1', 'blob:https://localhost/tiny-2']);
+            tinyLightbox.destroy();
+
+            // 9. Parked CORS fallback <img> error hides element, retries /url, and shows Media unavailable on failure
+            let errUrlCalls = 0;
+            let returnEmptyUrl = false;
+            const fallbackErrLightbox = createMediaLightbox({
+                maxCachedItems: 2,
+                maxCachedBytes: 2500,
+                getMediaUrlFn: async () => {
+                    errUrlCalls++;
+                    return returnEmptyUrl ? { url: '' } : { url: 'https://r2.example.com/photos/cors-fail?variant=original' };
+                },
+                fetchFn: async () => {
+                    throw new TypeError('Failed to fetch');
+                }
+            });
+
+            fallbackErrLightbox.open([{ conversationId: convId, messageId: '202', mediaId: 'cors-fail', fileName: 'cors-fail.jpg' }], 0);
+            await new Promise(r => setTimeout(r, 20));
+            const parkedFallbackEl = document.getElementById('media-lightbox-img');
+            parkedFallbackEl.dispatchEvent({ type: 'load' });
+            fallbackErrLightbox.close();
+
+            fallbackErrLightbox.open([{ conversationId: convId, messageId: '202', mediaId: 'cors-fail', fileName: 'cors-fail.jpg' }], 0);
+            assert.equal(errUrlCalls, 1);
+            returnEmptyUrl = true;
+            parkedFallbackEl.dispatchEvent({ type: 'error' });
+            await new Promise(r => setTimeout(r, 20));
+            assert.equal(errUrlCalls, 2);
+            assert.equal(parkedFallbackEl.classList.contains('hidden'), true);
+            assert.equal(document.getElementById('media-lightbox-error').textContent, 'Media unavailable');
+            assert.equal(document.getElementById('media-lightbox-error').classList.contains('hidden'), false);
+            assert.equal(fallbackErrLightbox.getCacheStats().count, 0);
+            fallbackErrLightbox.destroy();
+
+            lightbox.destroy();
+            console.log('OK_MEDIA_LIGHTBOX_MEMORY_CACHE');
+            """;
+
+        var (exitCode, output, error) = RunNodeModuleScript(script);
+        Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
+        Assert.Contains("OK_MEDIA_LIGHTBOX_MEMORY_CACHE", output);
     }
 }

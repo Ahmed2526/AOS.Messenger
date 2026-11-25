@@ -5,7 +5,19 @@
  * mobile pane toggling, monotonic switchEpoch/AbortController cancellation, and keyset pagination.
  */
 
+import { DEFAULT_MESSAGE_PAGE_SIZE } from './api-client.js';
+
 const CHAT_PATH_REGEX = /^\/(?:chat|Chat\/Conversation|Conversation)\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i;
+
+function resolveRouterMessageId(msg) {
+    if (!msg) return null;
+    const raw = msg.id ?? msg.Id ?? msg.messageId ?? msg.MessageId ?? null;
+    if (raw === null || raw === undefined) return null;
+    if (typeof raw === 'object' && raw.value !== undefined) {
+        return String(raw.value);
+    }
+    return String(raw);
+}
 
 /**
  * Safely parses bootstrap metadata from <script id="chat-bootstrap" type="application/json">.
@@ -164,6 +176,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             if (typeof renderer.renderMessages === 'function') {
                 renderer.renderMessages(containerEl, messages, state.currentUserId, conversation, { scrollToEnd: true });
             }
+            if (typeof renderer.syncPaginationAttributes === 'function') {
+                renderer.syncPaginationAttributes(containerEl, nextCursor, hasMore);
+            }
 
             if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
                 history.pushState({ conversationId: String(nextId) }, '', `/chat/${encodeURIComponent(String(nextId))}`);
@@ -244,15 +259,22 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
     /**
      * Loads the previous keyset page of messages while guarding against mid-flight chat switches.
+     * @param {{ force?: boolean }} [options]
+     * @returns {Promise<{ loaded: number, hasMore: boolean, error: string|null }>}
      */
-    async function loadOlderMessages() {
+    async function loadOlderMessages({ force = false } = {}) {
         const convId = state.activeConversationId;
         if (!convId || state.isLoadingOlder || !state.hasMore || !state.nextCursor) {
-            return;
+            return { loaded: 0, hasMore: !!state.hasMore, error: null };
+        }
+
+        if (!force && state.paginationRetryAfterMs && Date.now() < state.paginationRetryAfterMs) {
+            return { loaded: 0, hasMore: true, error: 'COOLDOWN' };
         }
 
         const epoch = state.switchEpoch;
         state.isLoadingOlder = true;
+        state.paginationRetryAfterMs = 0;
 
         if (state.paginationAbortController) {
             state.paginationAbortController.abort();
@@ -260,42 +282,101 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         const controller = new AbortController();
         state.paginationAbortController = controller;
 
+        const containerEl = typeof document !== 'undefined' ? document.getElementById('messages-container') : null;
+        const streamEl = typeof document !== 'undefined' ? document.getElementById('message-stream') : null;
         const loadingTopEl = typeof document !== 'undefined' ? document.getElementById('messages-loading-top') : null;
-        if (loadingTopEl) loadingTopEl.classList.remove('hidden');
+
+        if (typeof renderer.syncPaginationUi === 'function') {
+            renderer.syncPaginationUi({
+                hasMore: state.hasMore,
+                hasMessages: Boolean(containerEl?.children?.length),
+                hasPaginatedOlder: state.hasPaginatedOlder,
+                isLoading: true,
+                errorMessage: null,
+                streamEl
+            });
+        } else if (loadingTopEl) {
+            loadingTopEl.classList.remove('hidden');
+        }
+
+        let paginationErrorMessage = null;
+        let loadedCount = 0;
 
         try {
             const page = await api.getMessagesPage(convId, {
                 cursor: state.nextCursor,
-                pageSize: 30,
+                pageSize: DEFAULT_MESSAGE_PAGE_SIZE,
                 signal: controller.signal
             });
 
             if (epoch !== state.switchEpoch || controller.signal.aborted) {
-                return;
+                return { loaded: 0, hasMore: !!state.hasMore, error: 'ABORTED' };
             }
 
             state.nextCursor = page?.nextCursor ?? page?.NextCursor ?? null;
             state.hasMore = !!(page?.hasMore ?? page?.HasMore);
+            state.hasPaginatedOlder = true;
 
             const messages = page?.messages ?? page?.Messages ?? [];
-            const containerEl = typeof document !== 'undefined' ? document.getElementById('messages-container') : null;
-            const streamEl = typeof document !== 'undefined' ? document.getElementById('message-stream') : null;
+            if (state.messagesById && typeof state.messagesById.set === 'function') {
+                for (const msg of messages) {
+                    const msgId = resolveRouterMessageId(msg);
+                    if (msgId) {
+                        state.messagesById.set(msgId, msg);
+                    }
+                }
+            }
 
             if (messages.length > 0 && typeof renderer.prependOlderMessages === 'function') {
-                renderer.prependOlderMessages(containerEl, streamEl, messages, state.currentUserId, state.activeMeta);
+                loadedCount = renderer.prependOlderMessages(
+                    containerEl,
+                    streamEl,
+                    messages,
+                    state.currentUserId,
+                    state.activeMeta
+                ) || 0;
             }
+
+            if (typeof renderer.syncPaginationAttributes === 'function') {
+                renderer.syncPaginationAttributes(containerEl, state.nextCursor, state.hasMore);
+            }
+
+            return { loaded: loadedCount, hasMore: state.hasMore, error: null };
         } catch (err) {
-            if (err?.name === 'AbortError' || epoch !== state.switchEpoch) {
-                return;
+            if (controller.signal.aborted || err?.name === 'AbortError' || epoch !== state.switchEpoch) {
+                return { loaded: 0, hasMore: !!state.hasMore, error: 'ABORTED' };
             }
-            if (err?.code === 'UNAUTHORIZED' && typeof hooks.onSessionExpired === 'function') {
-                hooks.onSessionExpired();
+            if (err?.code === 'UNAUTHORIZED') {
+                if (typeof hooks.onSessionExpired === 'function') {
+                    hooks.onSessionExpired();
+                }
+                return { loaded: 0, hasMore: !!state.hasMore, error: 'UNAUTHORIZED' };
             }
+
+            state.paginationRetryAfterMs = Date.now() + 3000;
+            paginationErrorMessage = err?.status === 429
+                ? 'Loading too fast. Wait a moment and retry.'
+                : 'Could not load older messages.';
+            return { loaded: 0, hasMore: !!state.hasMore, error: paginationErrorMessage };
         } finally {
             if (epoch === state.switchEpoch) {
                 state.isLoadingOlder = false;
                 state.paginationAbortController = null;
-                if (loadingTopEl) loadingTopEl.classList.add('hidden');
+                if (typeof renderer.syncPaginationUi === 'function') {
+                    renderer.syncPaginationUi({
+                        hasMore: state.hasMore,
+                        hasMessages: Boolean(containerEl?.children?.length),
+                        hasPaginatedOlder: state.hasPaginatedOlder,
+                        isLoading: false,
+                        errorMessage: paginationErrorMessage,
+                        streamEl
+                    });
+                } else if (loadingTopEl) {
+                    loadingTopEl.classList.add('hidden');
+                }
+                if (typeof hooks.onAfterLoadOlder === 'function') {
+                    hooks.onAfterLoadOlder();
+                }
             }
         }
     }

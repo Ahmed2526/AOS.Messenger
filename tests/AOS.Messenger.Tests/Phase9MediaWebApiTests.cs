@@ -80,7 +80,11 @@ public sealed class Phase9MediaWebApiTests : IClassFixture<SqlTestDatabaseFixtur
                     {
                         ["ConnectionStrings:DefaultConnection"] = _fixture.ConnectionString,
                         ["PublicBaseUrl"] = "https://localhost:7001",
-                        ["Media:LocalStoragePath"] = _mediaTempRoot
+                        ["Media:LocalStoragePath"] = _mediaTempRoot,
+                        ["R2:ServiceUrl"] = "",
+                        ["R2:BucketName"] = "",
+                        ["R2:AccessKeyId"] = "",
+                        ["R2:SecretAccessKey"] = ""
                     };
                     if (extraSettings is not null)
                     {

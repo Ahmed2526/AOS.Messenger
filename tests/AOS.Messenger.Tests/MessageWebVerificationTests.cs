@@ -194,9 +194,9 @@ public sealed class MessageWebVerificationTests
     }
 
     [Theory]
-    [InlineData(nameof(MessagesController.GetMessages), typeof(HttpGetAttribute))]
-    [InlineData(nameof(MessagesController.SendMessage), typeof(HttpPostAttribute))]
-    public void MessagesController_Endpoints_HaveRateLimitingPolicy_AndCorrectHttpVerbs(string actionName, Type httpVerbAttributeType)
+    [InlineData(nameof(MessagesController.GetMessages), typeof(HttpGetAttribute), "messages-read")]
+    [InlineData(nameof(MessagesController.SendMessage), typeof(HttpPostAttribute), "messages")]
+    public void MessagesController_Endpoints_HaveRateLimitingPolicy_AndCorrectHttpVerbs(string actionName, Type httpVerbAttributeType, string expectedPolicy)
     {
         var method = typeof(MessagesController).GetMethod(actionName);
         Assert.NotNull(method);
@@ -206,7 +206,7 @@ public sealed class MessageWebVerificationTests
 
         var rateLimitAttr = method.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimitAttr);
-        Assert.Equal("messages", rateLimitAttr.PolicyName);
+        Assert.Equal(expectedPolicy, rateLimitAttr.PolicyName);
     }
 
     [Fact]
@@ -323,7 +323,7 @@ public sealed class MessageWebVerificationTests
         var result = await controller.GetMessages(
             conversationId.Value,
             cursor: "cursor_token_prev",
-            pageSize: 30,
+            pageSize: 20,
             ct: cts.Token);
 
         var okResult = Assert.IsType<OkObjectResult>(result);
@@ -338,12 +338,12 @@ public sealed class MessageWebVerificationTests
         Assert.Equal(currentUserId, service.LastCallerId);
         Assert.Equal(conversationId, service.LastConversationId);
         Assert.Equal("cursor_token_prev", service.LastCursor);
-        Assert.Equal(30, service.LastPageSize);
+        Assert.Equal(20, service.LastPageSize);
         Assert.Equal(cts.Token, service.LastCancellationToken);
     }
 
     [Fact]
-    public async Task GetMessages_DefaultParameters_PassesDefaultPageSize30()
+    public async Task GetMessages_DefaultParameters_PassesDefaultPageSize20()
     {
         var currentUserId = UserId.New();
         var conversationId = ConversationId.New();
@@ -353,7 +353,7 @@ public sealed class MessageWebVerificationTests
 
         Assert.IsType<OkObjectResult>(result);
         Assert.Null(service.LastCursor);
-        Assert.Equal(30, service.LastPageSize);
+        Assert.Equal(20, service.LastPageSize);
     }
 
     [Fact]
@@ -624,11 +624,14 @@ public sealed class MessageWebVerificationTests
         Assert.True(File.Exists(programPath), $"Program.cs not found at: {programPath}");
         var content = File.ReadAllText(programPath);
 
-        // Verify "messages" rate limiter policy is registered
+        // Verify "messages", "receipts", and "presence" rate limiter policies are registered
         Assert.Contains("options.AddPolicy(\"messages\"", content);
+        Assert.Contains("options.AddPolicy(\"receipts\"", content);
+        Assert.Contains("options.AddPolicy(\"presence\"", content);
 
         // Verify rate limiting configuration
         Assert.Contains("PermitLimit = 60", content);
+        Assert.Contains("PermitLimit = 180", content);
         Assert.Contains("TimeSpan.FromMinutes(1)", content);
     }
 

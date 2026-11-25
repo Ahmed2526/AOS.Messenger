@@ -22,6 +22,9 @@ public static class MediaConstraints
     public const long MaxImagePixels = 33_000_000L;
     public const int MaxAnimationFrames = 300;
     public const long MaxTotalDecodedImagePixels = 40_000_000L;
+    public const int MaxChatImageThumbnailEdge = 480;
+    public const long MaxChatImageThumbnailBytes = 150L * 1024;
+    public const long ChatImageThumbnailThresholdBytes = 100L * 1024;
 
     public const int MaxSanitizedFileNameLength = 150;
     public const int MaxRawFileNameLength = 1024;
@@ -30,6 +33,9 @@ public static class MediaConstraints
 
     public const string PendingKeyPrefix = "pending/";
     public const string MediaKeyPrefix = "media/";
+    public const string ThumbnailKeyPrefix = "thumbs/";
+    public const string AvatarKeyPrefix = "avatars/";
+    public const string StickerKeyPrefix = "stickers/";
 
     private sealed record AllowedFormatSpec(
         MediaKind Kind,

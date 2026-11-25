@@ -30,29 +30,14 @@ public sealed class TypingService : ITypingService
     {
         ArgumentNullException.ThrowIfNull(senderId);
 
-        var conv = await _conversationPersistence.GetByIdAsync(new ConversationId(conversationId), ct);
-        if (conv is null)
+        if (conversationId == Guid.Empty)
         {
             return null;
         }
 
-        if (!conv.HasParticipant(senderId))
-        {
-            return null;
-        }
-
-        var peerId = conv.GetOtherParticipant(senderId);
-        if (await _blockPersistence.IsBlockedBidirectionalAsync(senderId, peerId, ct))
-        {
-            return null;
-        }
-
-        var peer = await _userReader.GetByIdAsync(peerId, ct);
-        if (peer is null || peer.IsDeleted || !await _userReader.ExistsAsync(peerId, ct))
-        {
-            return null;
-        }
-
-        return peerId;
+        return await _conversationPersistence.GetVerifiedTypingRecipientAsync(
+            senderId,
+            new ConversationId(conversationId),
+            ct);
     }
 }

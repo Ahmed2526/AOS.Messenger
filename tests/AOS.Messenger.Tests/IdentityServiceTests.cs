@@ -416,10 +416,15 @@ public sealed class IdentityServiceTests : IClassFixture<SqlTestDatabaseFixture>
     }
 
     [Fact]
-    public async Task ResetPasswordAsync_WhenUserIsSoftDeleted_ThrowsForbiddenException()
+    public async Task ResetPasswordAsync_WhenUserIsSoftDeleted_ReturnsUserNotFoundWithoutOracle_AndRunsDummyHash()
     {
-        var provider = BuildTestServiceProvider();
+        var services = _fixture.CreateServiceCollection();
+        var hasher = new TrackingPasswordHasher();
+        services.AddSingleton<IPasswordHasher<ApplicationUser>>(hasher);
+        var provider = services.BuildServiceProvider();
+
         var service = provider.GetRequiredService<IIdentityService>();
+        var userManager = provider.GetRequiredService<UserManager<ApplicationUser>>();
 
         var reg = await service.RegisterAsync(new RegisterUserDto("heidi_del", "heidi@example.com", "Heidi", "Password123!"));
         var userId = reg.UserId!;
@@ -429,9 +434,16 @@ public sealed class IdentityServiceTests : IClassFixture<SqlTestDatabaseFixture>
 
         await service.SoftDeleteAccountAsync(userId);
 
-        var ex = await Assert.ThrowsAsync<ForbiddenException>(() =>
-            service.ResetPasswordAsync(new ResetPasswordDto("heidi@example.com", token, "NewPassword456!")));
-        Assert.Equal("Account is deleted", ex.Message);
+        var verifyCountBefore = hasher.VerifyCount;
+        var (succeeded, errors) = await service.ResetPasswordAsync(new ResetPasswordDto("heidi@example.com", token, "NewPassword456!"));
+
+        Assert.False(succeeded);
+        Assert.Equal(["User not found."], errors);
+        Assert.True(hasher.VerifyCount > verifyCountBefore, "Dummy password verification must run when user is soft-deleted.");
+
+        var heidiAfter = await userManager.FindByIdAsync(userId.Value.ToString());
+        Assert.False(await userManager.CheckPasswordAsync(heidiAfter!, "NewPassword456!"));
+        Assert.True(await userManager.CheckPasswordAsync(heidiAfter!, "Password123!"));
     }
 
     [Fact]

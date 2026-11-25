@@ -17,6 +17,7 @@ public interface IConversationPersistence
     Task<IReadOnlyList<Conversation>> GetConversationsForUserAsync(UserId userId, CancellationToken ct = default);
     Task<IReadOnlyList<UserConversationState>> GetUserStatesForUserAsync(UserId userId, CancellationToken ct = default);
     Task<IReadOnlyList<UserConversationState>> GetUserStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, CancellationToken ct = default);
+    Task<IReadOnlyList<UserConversationState>> GetPeerStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, UserId callerId, CancellationToken ct = default);
     Task<Message?> GetLastMessageAsync(ConversationId conversationId, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default);
     Task<int> GetUnreadCountAsync(ConversationId conversationId, UserId userId, MessageId? lastReadMessageId = null, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default);
     Task<bool> HasMessagesAfterAsync(ConversationId conversationId, DateTimeOffset afterUtc, CancellationToken ct = default);
@@ -28,4 +29,5 @@ public interface IConversationPersistence
     Task<bool> AdvanceDeliveredWatermarkAsync(ConversationId conversationId, UserId userId, MessageId messageId, DateTimeOffset msgCreatedAtUtc, CancellationToken ct = default);
     Task<bool> AdvanceReadWatermarkAsync(ConversationId conversationId, UserId userId, MessageId messageId, DateTimeOffset msgCreatedAtUtc, CancellationToken ct = default);
     Task<IReadOnlyList<UserId>> GetPeerUserIdsWithExistingConversationAsync(UserId userId, CancellationToken ct = default);
+    Task<UserId?> GetVerifiedTypingRecipientAsync(UserId senderId, ConversationId conversationId, CancellationToken ct = default);
 }

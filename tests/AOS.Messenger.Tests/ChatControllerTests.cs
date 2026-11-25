@@ -93,11 +93,14 @@ public sealed class ChatControllerTests
                 DateTimeOffset.UtcNow));
         }
 
+        public int GetConversationListCallCount { get; private set; }
+
         public Task<IReadOnlyList<ConversationSummaryDto>> GetConversationListAsync(
             UserId currentUserId,
             bool includeArchived = false,
             CancellationToken ct = default)
         {
+            GetConversationListCallCount++;
             LastCurrentUserId = currentUserId;
             LastIncludeArchived = includeArchived;
             return Task.FromResult<IReadOnlyList<ConversationSummaryDto>>(SummariesToReturn);
@@ -727,5 +730,78 @@ public sealed class ChatControllerTests
         var rateLimitAttr = method.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimitAttr);
         Assert.Equal("messages", rateLimitAttr.PolicyName);
+    }
+
+    [Fact]
+    public async Task IndexAndConversation_ShareSidebarConversationsViaHttpContextItems_WithoutDuplicateQuery()
+    {
+        var currentUserId = UserId.New();
+        var (controller, service, _) = CreateController(currentUserId);
+        var httpContext = new DefaultHttpContext();
+        controller.ControllerContext = new ControllerContext { HttpContext = httpContext };
+
+        var convId = ConversationId.New();
+        service.SummariesToReturn.Add(new ConversationSummaryDto(
+            convId,
+            UserId.New(),
+            "Shared User",
+            "shared",
+            "Hi",
+            DateTimeOffset.UtcNow,
+            1,
+            false,
+            false,
+            false));
+
+        await controller.Index();
+        Assert.Equal(1, service.GetConversationListCallCount);
+
+        var viewComponent = new AOS.Messenger.Web.ViewComponents.ConversationSidebarViewComponent(
+            service,
+            new FakeCurrentUser { Id = currentUserId })
+        {
+            ViewComponentContext = new Microsoft.AspNetCore.Mvc.ViewComponents.ViewComponentContext
+            {
+                ViewContext = new Microsoft.AspNetCore.Mvc.Rendering.ViewContext
+                {
+                    HttpContext = httpContext
+                }
+            }
+        };
+
+        var sidebarResult = await viewComponent.InvokeAsync();
+        var sidebarView = Assert.IsType<Microsoft.AspNetCore.Mvc.ViewComponents.ViewViewComponentResult>(sidebarResult);
+        var sidebarModel = Assert.IsType<AOS.Messenger.Web.ViewComponents.ConversationSidebarViewModel>(sidebarView.ViewData?.Model);
+        Assert.Single(sidebarModel.Conversations);
+        Assert.Equal(convId, sidebarModel.Conversations[0].Id);
+        Assert.Equal(1, service.GetConversationListCallCount);
+
+        // Also verify ChatController.Conversation shares conversations via HttpContext.Items
+        var (convController, convService, _, _) = CreateControllerWithMessages(currentUserId);
+        var convHttpContext = new DefaultHttpContext();
+        convController.ControllerContext = new ControllerContext { HttpContext = convHttpContext };
+        convService.SummariesToReturn.Add(service.SummariesToReturn[0]);
+
+        await convController.Conversation(convId.Value);
+        Assert.Equal(1, convService.GetConversationListCallCount);
+
+        var convSidebar = new AOS.Messenger.Web.ViewComponents.ConversationSidebarViewComponent(
+            convService,
+            new FakeCurrentUser { Id = currentUserId })
+        {
+            ViewComponentContext = new Microsoft.AspNetCore.Mvc.ViewComponents.ViewComponentContext
+            {
+                ViewContext = new Microsoft.AspNetCore.Mvc.Rendering.ViewContext
+                {
+                    HttpContext = convHttpContext
+                }
+            }
+        };
+
+        var convSidebarResult = await convSidebar.InvokeAsync();
+        var convSidebarView = Assert.IsType<Microsoft.AspNetCore.Mvc.ViewComponents.ViewViewComponentResult>(convSidebarResult);
+        var convSidebarModel = Assert.IsType<AOS.Messenger.Web.ViewComponents.ConversationSidebarViewModel>(convSidebarView.ViewData?.Model);
+        Assert.Single(convSidebarModel.Conversations);
+        Assert.Equal(1, convService.GetConversationListCallCount);
     }
 }

@@ -19,6 +19,9 @@ public sealed class Media : Entity<MediaId>
     public MediaKind Kind { get; private set; }
     public MediaState State { get; private set; }
     public string ObjectKey { get; private set; } = null!;
+    public string? ThumbnailObjectKey { get; private set; }
+    public string? ThumbnailContentType { get; private set; }
+    public long? ThumbnailSizeBytes { get; private set; }
     public string SanitizedFileName { get; private set; } = null!;
     public string DeclaredContentType { get; private set; } = null!;
     public string? VerifiedContentType { get; private set; }
@@ -113,7 +116,10 @@ public sealed class Media : Entity<MediaId>
         int? width,
         int? height,
         int? durationMs,
-        DateTimeOffset nowUtc)
+        DateTimeOffset nowUtc,
+        string? thumbnailObjectKey = null,
+        string? thumbnailContentType = null,
+        long? thumbnailSizeBytes = null)
     {
         if (State != MediaState.Pending)
         {
@@ -164,8 +170,42 @@ public sealed class Media : Entity<MediaId>
             throw new DomainException("Media duration must be positive when specified.");
         }
 
+        string? validatedThumbKey = null;
+        string? validatedThumbMime = null;
+        long? validatedThumbSize = null;
+        if (!string.IsNullOrWhiteSpace(thumbnailObjectKey))
+        {
+            if (!thumbnailObjectKey.StartsWith(MediaConstraints.ThumbnailKeyPrefix, StringComparison.Ordinal))
+            {
+                throw new DomainException($"Thumbnail object key must start with '{MediaConstraints.ThumbnailKeyPrefix}'.");
+            }
+
+            var thumbSuffix = thumbnailObjectKey[MediaConstraints.ThumbnailKeyPrefix.Length..];
+            if (!MediaConstraints.IsValidStorageObjectId(thumbSuffix))
+            {
+                throw new DomainException("Thumbnail object key must have a valid 32-character lowercase hexadecimal identifier.");
+            }
+
+            if (string.IsNullOrWhiteSpace(thumbnailContentType) || thumbnailContentType.Trim().Length > 64)
+            {
+                throw new DomainException("Thumbnail content type must be between 1 and 64 characters.");
+            }
+
+            if (!thumbnailSizeBytes.HasValue || thumbnailSizeBytes.Value <= 0 || thumbnailSizeBytes.Value > MediaConstraints.MaxChatImageThumbnailBytes)
+            {
+                throw new DomainException($"Thumbnail size must be between 1 and {MediaConstraints.MaxChatImageThumbnailBytes} bytes.");
+            }
+
+            validatedThumbKey = thumbnailObjectKey;
+            validatedThumbMime = thumbnailContentType.Trim();
+            validatedThumbSize = thumbnailSizeBytes.Value;
+        }
+
         State = MediaState.Uploaded;
         ObjectKey = promotedObjectKey;
+        ThumbnailObjectKey = validatedThumbKey;
+        ThumbnailContentType = validatedThumbMime;
+        ThumbnailSizeBytes = validatedThumbSize;
         VerifiedContentType = trimmedMime;
         VerifiedSizeBytes = verifiedSizeBytes;
         Width = width;

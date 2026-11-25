@@ -448,7 +448,6 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var controller = new ReceiptsController(
             receiptService,
-            convService,
             capturingNotifier,
             currentUser,
             NullLogger<ReceiptsController>.Instance,
@@ -542,7 +541,6 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var controller = new ReceiptsController(
             receiptService,
-            convService,
             capturingNotifier,
             currentUser,
             NullLogger<ReceiptsController>.Instance,
@@ -575,7 +573,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var rateLimit = type.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimit);
-        Assert.Equal("messages", rateLimit.PolicyName);
+        Assert.Equal("receipts", rateLimit.PolicyName);
 
         var deliveredMethod = type.GetMethod(nameof(ReceiptsController.MarkDelivered));
         Assert.NotNull(deliveredMethod);
@@ -655,6 +653,32 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var recipient = await typingService.ValidateAndGetTypingRecipientAsync(senderId, conv.Id.Value);
         Assert.Null(recipient);
+    }
+
+    [Fact]
+    public async Task Typing_Dropped_WhenPeerIsSoftDeletedOrUnconfirmed()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var (provider, db) = CreateTestEnvironment();
+        var (userA, userB, conv) = await SeedParticipantsAndConversationAsync(db, now);
+
+        var typingService = new TypingService(
+            provider.GetRequiredService<IConversationPersistence>(),
+            provider.GetRequiredService<IBlockPersistence>(),
+            provider.GetRequiredService<IUserReader>());
+
+        Assert.NotNull(await typingService.ValidateAndGetTypingRecipientAsync(new UserId(userA.Id), conv.Id.Value));
+
+        // Unconfirmed peer must drop typing indicator
+        userB.EmailConfirmed = false;
+        await db.SaveChangesAsync();
+        Assert.Null(await typingService.ValidateAndGetTypingRecipientAsync(new UserId(userA.Id), conv.Id.Value));
+
+        // Soft-deleted peer must drop typing indicator even if email confirmed
+        userB.EmailConfirmed = true;
+        userB.IsDeleted = true;
+        await db.SaveChangesAsync();
+        Assert.Null(await typingService.ValidateAndGetTypingRecipientAsync(new UserId(userA.Id), conv.Id.Value));
     }
 
     [Fact]
@@ -832,6 +856,121 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
             Assert.NotNull(u.LastSeenAtUtc);
             Assert.Equal(disconnectTime2, u.LastSeenAtUtc.Value);
         }
+    }
+
+    [Fact]
+    public async Task TerminatingLastSession_RecordsLastSeen_AndBroadcastsOffline_WithoutDoubleEmittingOnDisconnected()
+    {
+        var start = new DateTimeOffset(2026, 6, 1, 12, 0, 0, TimeSpan.Zero);
+        var timeProvider = new TestTimeProvider(start);
+        var tracker = new InMemoryConnectionTracker();
+        var capturingNotifier = new CapturingReceiptNotifier();
+
+        var services = _fixture.CreateServiceCollection();
+        services.AddSingleton<TimeProvider>(timeProvider);
+        services.AddSingleton<IConnectionTracker>(tracker);
+        services.AddSingleton<IOnlinePresenceTracker>(tracker);
+        services.AddSingleton<IRealtimeNotifier>(capturingNotifier);
+        services.AddScoped<ICurrentUser>(_ => new TestCurrentUser());
+        await using var provider = services.BuildServiceProvider();
+
+        ApplicationUser userA;
+        ApplicationUser userB;
+        await using (var seedScope = provider.CreateAsyncScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            (userA, userB, _) = await SeedParticipantsAndConversationAsync(db, start);
+        }
+
+        var userId = new UserId(userA.Id);
+        var peerId = new UserId(userB.Id);
+        var sessionA = Guid.NewGuid();
+        var sessionB = Guid.NewGuid();
+
+        var terminator = new SignalRSessionConnectionTerminator(
+            tracker,
+            NullLogger<SignalRSessionConnectionTerminator>.Instance,
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            timeProvider);
+
+        await using var hubScope = provider.CreateAsyncScope();
+        var presenceService = hubScope.ServiceProvider.GetRequiredService<IPresenceService>();
+        var hub = new ChatHub(
+            hubScope.ServiceProvider.GetRequiredService<IConversationService>(),
+            tracker,
+            new TestCurrentUser { Id = userId },
+            NullLogger<ChatHub>.Instance,
+            presenceService,
+            hubScope.ServiceProvider.GetRequiredService<ITypingService>(),
+            capturingNotifier,
+            timeProvider);
+
+        // Connect two sessions for userA
+        var abortA = false;
+        hub.Context = new TestHubCallerContext("conn-abort-a", CreateClaimsPrincipal(userId, sessionA), () => abortA = true);
+        await hub.OnConnectedAsync();
+
+        var abortB = false;
+        hub.Context = new TestHubCallerContext("conn-abort-b", CreateClaimsPrincipal(userId, sessionB), () => abortB = true);
+        await hub.OnConnectedAsync();
+
+        capturingNotifier.PresenceChanges.Clear();
+
+        // Terminate only sessionA -> user stays online on sessionB
+        await terminator.DisconnectSessionAsync(sessionA);
+        Assert.True(abortA);
+        Assert.False(abortB);
+        Assert.True(tracker.IsUserOnline(userId));
+        Assert.Empty(capturingNotifier.PresenceChanges);
+
+        // Terminate remaining sessionB -> user goes offline, LastSeen recorded, offline broadcast sent once
+        var abortTime = start.AddMinutes(7);
+        timeProvider.SetUtcNow(abortTime);
+        await terminator.DisconnectSessionAsync(sessionB);
+
+        Assert.True(abortB);
+        Assert.False(tracker.IsUserOnline(userId));
+        var offlineBroadcast = Assert.Single(capturingNotifier.PresenceChanges);
+        Assert.Contains(peerId, offlineBroadcast.Recipients);
+        Assert.Equal(userId.Value, offlineBroadcast.Presence.UserId);
+        Assert.False(offlineBroadcast.Presence.IsOnline);
+        Assert.Equal(abortTime, offlineBroadcast.Presence.LastSeenAtUtc);
+
+        await using (var verifyDb = _fixture.CreateDbContext())
+        {
+            var u = await verifyDb.Users.FirstAsync(x => x.Id == userA.Id);
+            Assert.Equal(abortTime, u.LastSeenAtUtc);
+        }
+
+        // Subsequent OnDisconnectedAsync fired by aborted SignalR transport must NOT double-emit or alter LastSeen
+        timeProvider.SetUtcNow(abortTime.AddMinutes(5));
+        hub.Context = new TestHubCallerContext("conn-abort-b", CreateClaimsPrincipal(userId, sessionB));
+        await hub.OnDisconnectedAsync(null);
+        Assert.Single(capturingNotifier.PresenceChanges);
+        await using (var verifyDb2 = _fixture.CreateDbContext())
+        {
+            var u = await verifyDb2.Users.FirstAsync(x => x.Id == userA.Id);
+            Assert.Equal(abortTime, u.LastSeenAtUtc);
+        }
+
+        // Verify DisconnectUserSessionsAsync also records LastSeen & broadcasts offline once
+        var sessionC = Guid.NewGuid();
+        var abortC = false;
+        var reconnectTime = abortTime.AddMinutes(10);
+        timeProvider.SetUtcNow(reconnectTime);
+        hub.Context = new TestHubCallerContext("conn-abort-c", CreateClaimsPrincipal(userId, sessionC), () => abortC = true);
+        await hub.OnConnectedAsync();
+        capturingNotifier.PresenceChanges.Clear();
+
+        var fullAbortTime = reconnectTime.AddMinutes(3);
+        timeProvider.SetUtcNow(fullAbortTime);
+        await terminator.DisconnectUserSessionsAsync(userId);
+
+        Assert.True(abortC);
+        Assert.False(tracker.IsUserOnline(userId));
+        var userOfflineBroadcast = Assert.Single(capturingNotifier.PresenceChanges);
+        Assert.False(userOfflineBroadcast.Presence.IsOnline);
+        Assert.Equal(fullAbortTime, userOfflineBroadcast.Presence.LastSeenAtUtc);
     }
 
     [Fact]
@@ -1064,7 +1203,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var rateLimit = type.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimit);
-        Assert.Equal("messages", rateLimit.PolicyName);
+        Assert.Equal("presence", rateLimit.PolicyName);
 
         var getPresences = type.GetMethod(nameof(PresenceController.GetPresences));
         Assert.NotNull(getPresences);
@@ -1128,6 +1267,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class DummyHub : Hub

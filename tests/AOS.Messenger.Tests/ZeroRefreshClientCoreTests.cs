@@ -474,14 +474,26 @@ public sealed class ZeroRefreshClientCoreTests
             }
             assert.equal(sessionExpiredCount, 0);
 
-            // 6. 401, login redirect, and text/html DO trigger onSessionExpired
+            // 6. 401 and /Account/Login redirects trigger onSessionExpired; proxy/error HTML responses do NOT loop to login ([B7])
             nextResponse = makeResp({ status: 401, contentType: '' });
             await assert.rejects(() => getConversationBundle('conv-1'), (e) => e.code === 'UNAUTHORIZED');
             nextResponse = makeResp({ status: 200, redirected: true, url: 'https://localhost/Account/Login', contentType: 'text/html', body: '<html>login</html>' });
             await assert.rejects(() => getConversationBundle('conv-1'), (e) => e.code === 'UNAUTHORIZED');
+            assert.equal(sessionExpiredCount, 2);
+
+            for (const proxyStatus of [500, 502, 503, 504]) {
+                nextResponse = makeResp({ status: proxyStatus, contentType: 'text/html; charset=utf-8', body: `<html><body>${proxyStatus} Proxy Error</body></html>` });
+                await assert.rejects(
+                    () => apiFetch('/api/conversations'),
+                    (e) => e instanceof ApiError && e.status === proxyStatus && e.code === 'HTTP_ERROR'
+                );
+            }
             nextResponse = makeResp({ status: 200, contentType: 'text/html; charset=utf-8', body: '<html>unexpected</html>' });
-            await assert.rejects(() => apiFetch('/api/conversations'), (e) => e.code === 'UNAUTHORIZED');
-            assert.equal(sessionExpiredCount, 3);
+            await assert.rejects(
+                () => apiFetch('/api/conversations'),
+                (e) => e instanceof ApiError && e.status === 200 && e.code === 'INVALID_RESPONSE'
+            );
+            assert.equal(sessionExpiredCount, 2);
             console.log('OK');
             """;
 
@@ -1065,6 +1077,150 @@ public sealed class ZeroRefreshClientCoreTests
 
             deferredPresence.destroy();
             eagerPresence.destroy();
+            console.log('OK');
+            """;
+
+        var (exitCode, output, error) = RunNodeModuleScript(script);
+        Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
+    }
+
+    [Fact]
+    public void MessageActions_And_MessageRenderer_CleanupVideosObserversAndGuardEmptyPlaceholder()
+    {
+        var script = $$"""
+            import assert from 'node:assert/strict';
+            {{MockDomPrelude}}
+
+            const dom = createMockDom();
+            const disconnectedObservers = [];
+            globalThis.IntersectionObserver = class {
+                constructor(cb) { this.cb = cb; }
+                observe() {}
+                disconnect() { disconnectedObservers.push(this); }
+            };
+
+            const { configureApiClient } = await import('{{JsUrl("api-client.js")}}');
+            const { renderMessages, clearPane, hydrateMediaElements } = await import('{{JsUrl("message-renderer.js")}}');
+            const { setupMessageActions } = await import('{{JsUrl("message-actions.js")}}');
+
+            const container = dom.document.createElement('div');
+            container.id = 'messages-container';
+            const emptyPlaceholder = dom.document.createElement('div');
+            emptyPlaceholder.id = 'no-messages-placeholder';
+            emptyPlaceholder.classList.add('hidden');
+            const deleteModal = dom.document.createElement('div');
+            deleteModal.id = 'delete-message-modal';
+            deleteModal.classList.add('hidden');
+            const deleteForMeBtn = dom.document.createElement('button');
+            deleteForMeBtn.id = 'delete-for-me-btn';
+            const deleteForEveryoneBtn = dom.document.createElement('button');
+            deleteForEveryoneBtn.id = 'delete-for-everyone-btn';
+            const cancelDeleteBtn = dom.document.createElement('button');
+            cancelDeleteBtn.id = 'cancel-delete-btn';
+            deleteModal.appendChild(deleteForMeBtn);
+            deleteModal.appendChild(deleteForEveryoneBtn);
+            deleteModal.appendChild(cancelDeleteBtn);
+
+            dom.document.body.appendChild(container);
+            dom.document.body.appendChild(emptyPlaceholder);
+            dom.document.body.appendChild(deleteModal);
+
+            let hasMore = true;
+            const deletedFromMap = [];
+            configureApiClient({
+                onSessionExpired: () => {},
+                fetchImpl: async (url) => ({
+                    status: 200,
+                    ok: true,
+                    redirected: false,
+                    headers: { get: () => 'application/json' },
+                    text: async () => JSON.stringify({ url: `https://r2.test/${url}` })
+                })
+            });
+
+            // 1. DeleteForMe on NON-latest row cleans up video & map without falsely showing No-messages placeholder when hasMore=true
+            const row1 = dom.document.createElement('div');
+            row1.id = 'msg-101';
+            row1.className = 'message-bubble-row';
+            row1.setAttribute('data-message-id', '101');
+            const vid1 = dom.document.createElement('video');
+            let pauseCount = 0;
+            let loadCount = 0;
+            vid1.pause = () => { pauseCount++; };
+            vid1.load = () => { loadCount++; };
+            vid1.setAttribute('src', 'https://r2.test/v1.mp4');
+            row1.appendChild(vid1);
+            const delBtn1 = dom.document.createElement('button');
+            delBtn1.setAttribute('data-action', 'delete');
+            delBtn1.setAttribute('data-message-id', '101');
+            delBtn1.setAttribute('data-can-delete-everyone', 'false');
+            row1.appendChild(delBtn1);
+
+            const row2 = dom.document.createElement('div');
+            row2.id = 'msg-102';
+            row2.className = 'message-bubble-row';
+            row2.setAttribute('data-message-id', '102');
+            const delBtn2 = dom.document.createElement('button');
+            delBtn2.setAttribute('data-action', 'delete');
+            delBtn2.setAttribute('data-message-id', '102');
+            delBtn2.setAttribute('data-can-delete-everyone', 'false');
+            row2.appendChild(delBtn2);
+
+            container.setAttribute('data-has-more', 'true');
+            container.appendChild(row1);
+            container.appendChild(row2);
+
+            const actions = setupMessageActions('conv-1', 'u1', {
+                hasMoreOlder: () => hasMore,
+                onMessageDeleted: (id) => deletedFromMap.push(String(id))
+            });
+
+            // Delete non-latest message 101
+            dom.document.dispatchEvent({ type: 'click', target: delBtn1, preventDefault() {}, stopPropagation() {} });
+            await deleteForMeBtn.dispatchEvent({ type: 'click' });
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(pauseCount, 1);
+            assert.equal(loadCount, 1);
+            assert.equal(vid1.hasAttribute('src'), false);
+            assert.deepEqual(deletedFromMap, ['101']);
+            assert.equal(dom.document.getElementById('msg-101'), null);
+
+            // Delete remaining message 102 while hasMore=true -> placeholder must remain hidden
+            dom.document.dispatchEvent({ type: 'click', target: delBtn2, preventDefault() {}, stopPropagation() {} });
+            await deleteForMeBtn.dispatchEvent({ type: 'click' });
+            await new Promise(r => setTimeout(r, 15));
+            assert.deepEqual(deletedFromMap, ['101', '102']);
+            assert.equal(emptyPlaceholder.classList.contains('hidden'), true);
+
+            // 2. renderMessages & clearPane disconnect media observers and tear down videos before clearing DOM
+            const vRow = dom.document.createElement('div');
+            vRow.className = 'message-bubble-row';
+            const vid2 = dom.document.createElement('video');
+            let v2Paused = 0;
+            vid2.setAttribute('data-media-video', 'true');
+            vid2.setAttribute('data-conversation-id', 'conv-1');
+            vid2.setAttribute('data-message-id', '200');
+            vid2.setAttribute('data-media-id', 'm200');
+            vid2.setAttribute('src', 'https://r2.test/v2.mp4');
+            vid2.pause = () => { v2Paused++; };
+            vid2.load = () => {};
+            vRow.appendChild(vid2);
+            container.appendChild(vRow);
+            hydrateMediaElements(vRow);
+
+            renderMessages(container, [], 'u1');
+            assert.equal(disconnectedObservers.length, 1);
+            assert.equal(v2Paused, 1);
+
+            const vid3 = dom.document.createElement('video');
+            let v3Paused = 0;
+            vid3.pause = () => { v3Paused++; };
+            vid3.load = () => {};
+            container.appendChild(vid3);
+            clearPane();
+            assert.equal(v3Paused, 1);
+
+            actions.destroy();
             console.log('OK');
             """;
 

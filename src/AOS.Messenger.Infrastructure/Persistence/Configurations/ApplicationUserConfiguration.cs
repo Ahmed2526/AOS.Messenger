@@ -20,5 +20,34 @@ public sealed class ApplicationUserConfiguration : IEntityTypeConfiguration<Appl
             .IsRequired();
 
         builder.Property(u => u.LastSeenAtUtc);
+
+        builder.Property(u => u.AvatarObjectKey)
+            .HasMaxLength(256);
+
+        builder.Property(u => u.AvatarThumbnailObjectKey)
+            .HasMaxLength(256);
+
+        builder.Property(u => u.AvatarContentType)
+            .HasMaxLength(64);
+
+        builder.Property(u => u.AvatarVersion)
+            .HasMaxLength(32);
+
+        builder.HasIndex(u => u.AvatarObjectKey)
+            .IsUnique()
+            .HasFilter("[AvatarObjectKey] IS NOT NULL");
+
+        builder.HasIndex(u => u.AvatarThumbnailObjectKey)
+            .IsUnique()
+            .HasFilter("[AvatarThumbnailObjectKey] IS NOT NULL");
+
+        builder.HasIndex(u => new { u.EmailConfirmed, u.CreatedAtUtc });
+
+        builder.ToTable(t =>
+        {
+            t.HasCheckConstraint(
+                "CK_AspNetUsers_AvatarKeys",
+                "(([AvatarObjectKey] IS NULL AND [AvatarThumbnailObjectKey] IS NULL) OR ([AvatarObjectKey] LIKE N'avatars/%' AND [AvatarThumbnailObjectKey] LIKE N'avatars/%' AND [AvatarObjectKey] <> [AvatarThumbnailObjectKey]))");
+        });
     }
 }

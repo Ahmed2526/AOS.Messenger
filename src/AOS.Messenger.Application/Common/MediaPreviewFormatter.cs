@@ -1,16 +1,18 @@
 using System.Globalization;
 using AOS.Messenger.Application.DTOs;
+using AOS.Messenger.Domain.Constants;
 using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.Enums;
 
 namespace AOS.Messenger.Application.Common;
 
 /// <summary>
-/// Builds human-friendly, surrogate-safe preview text for text, media, and captioned media messages
+/// Builds human-friendly, surrogate-safe preview text for text, sticker, media, and captioned media messages
 /// across conversation lists, reply banners, live edits, and delete fallbacks.
 /// </summary>
 public static class MediaPreviewFormatter
 {
+    public static string FormatStickerPreview() => StickerConstraints.StickerPreviewText;
     public static string FormatPreview(
         string? content,
         IReadOnlyList<MediaAttachmentDto>? attachments,

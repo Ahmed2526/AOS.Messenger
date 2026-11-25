@@ -25,7 +25,8 @@ public sealed class UserReader : IUserReader
                 u.UserName ?? string.Empty,
                 u.DisplayName,
                 u.Bio,
-                u.IsDeleted))
+                u.IsDeleted,
+                u.IsDeleted ? null : u.AvatarVersion))
             .FirstOrDefaultAsync(ct);
     }
 
@@ -49,7 +50,8 @@ public sealed class UserReader : IUserReader
                     u.UserName ?? string.Empty,
                     u.DisplayName,
                     u.Bio,
-                    u.IsDeleted))
+                    u.IsDeleted,
+                    u.IsDeleted ? null : u.AvatarVersion))
                 .ToListAsync(ct);
 
             results.AddRange(chunkResults);
@@ -69,7 +71,8 @@ public sealed class UserReader : IUserReader
                 u.UserName ?? string.Empty,
                 u.DisplayName,
                 u.Bio,
-                u.IsDeleted))
+                u.IsDeleted,
+                u.IsDeleted ? null : u.AvatarVersion))
             .FirstOrDefaultAsync(ct);
     }
 
@@ -84,7 +87,8 @@ public sealed class UserReader : IUserReader
                 u.UserName ?? string.Empty,
                 u.DisplayName,
                 u.Bio,
-                u.IsDeleted))
+                u.IsDeleted,
+                u.IsDeleted ? null : u.AvatarVersion))
             .FirstOrDefaultAsync(ct);
     }
 
@@ -94,6 +98,33 @@ public sealed class UserReader : IUserReader
         return await _db.Users
             .AsNoTracking()
             .AnyAsync(u => u.Id == guid && !u.IsDeleted && u.EmailConfirmed, ct);
+    }
+
+    public async Task<IReadOnlySet<UserId>> GetActiveUserIdsAsync(IEnumerable<UserId> userIds, CancellationToken ct = default)
+    {
+        var guids = userIds.Select(u => u.Value).Distinct().ToList();
+        if (guids.Count == 0)
+        {
+            return new HashSet<UserId>();
+        }
+
+        var active = new HashSet<UserId>(guids.Count);
+        foreach (var chunk in guids.Chunk(500))
+        {
+            var chunkList = chunk.ToList();
+            var ids = await _db.Users
+                .AsNoTracking()
+                .Where(u => chunkList.Contains(u.Id) && !u.IsDeleted && u.EmailConfirmed)
+                .Select(u => u.Id)
+                .ToListAsync(ct);
+
+            foreach (var id in ids)
+            {
+                active.Add(new UserId(id));
+            }
+        }
+
+        return active;
     }
 
     public async Task<IReadOnlyList<UserSearchResultDto>> SearchUsersAsync(
@@ -124,7 +155,8 @@ public sealed class UserReader : IUserReader
                     new UserId(u.Id),
                     u.UserName ?? string.Empty,
                     u.DisplayName,
-                    u.Bio))
+                    u.Bio,
+                    u.AvatarVersion))
                 .ToListAsync(ct);
 
             return candidates.Where(u => !excludedGuids.Contains(u.Id.Value)).Take(limit).ToList();
@@ -144,7 +176,8 @@ public sealed class UserReader : IUserReader
                 new UserId(u.Id),
                 u.UserName ?? string.Empty,
                 u.DisplayName,
-                u.Bio))
+                u.Bio,
+                u.AvatarVersion))
             .ToListAsync(ct);
     }
 }

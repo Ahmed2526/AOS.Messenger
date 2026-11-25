@@ -72,3 +72,176 @@
         </button>
     </div>
 </div>
+
+<!-- Sticker Info & Favorite Modal -->
+<div id="sticker-info-modal" role="dialog" aria-modal="true" aria-labelledby="sticker-info-pack-name" class="hidden fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-xs p-5 flex flex-col items-center gap-3 text-center">
+        <div class="w-full flex items-center justify-between">
+            <span id="sticker-info-anim-badge" class="hidden px-2 py-0.5 rounded-full bg-[#B3929D]/20 text-[#735761] dark:text-[#E1BDC9] text-[10px] font-bold uppercase tracking-wider">Animated</span>
+            <button type="button" id="sticker-info-close-btn" class="ml-auto w-7 h-7 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer" aria-label="Close sticker details" title="Close (Esc)">
+                <span class="material-symbols-outlined text-[18px]">close</span>
+            </button>
+        </div>
+        <div class="w-40 h-40 rounded-2xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center p-3">
+            <img id="sticker-info-img" alt="Sticker preview" width="512" height="512" decoding="async" class="w-32 h-32 object-contain drop-shadow-sm select-none" />
+        </div>
+        <div class="min-w-0 w-full">
+            <h3 id="sticker-info-pack-name" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">Stickers</h3>
+            <p id="sticker-info-pack-author" class="text-xs text-[#6E6560] dark:text-[#C9C0B9] truncate mt-0.5"></p>
+        </div>
+        <button type="button" id="sticker-info-fav-btn" aria-pressed="false" class="w-full px-4 py-2 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-95 active:scale-[0.99] transition-all flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50">
+            <span id="sticker-info-fav-icon" class="material-symbols-outlined text-[16px]">star_outline</span>
+            <span id="sticker-info-fav-label">Add to Favorites</span>
+        </button>
+    </div>
+</div>
+
+<!-- Custom Sticker Creator Modal -->
+<div id="sticker-creator-modal" role="dialog" aria-modal="true" aria-labelledby="sticker-creator-title" class="hidden fixed inset-0 z-[70] flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto custom-scroll p-4 sm:p-5 flex flex-col gap-3.5">
+        <div class="flex items-center justify-between gap-2">
+            <div>
+                <h3 id="sticker-creator-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Create Custom Sticker</h3>
+                <p class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">PNG, JPEG, WebP, or animated GIF/WebP (normalized to 512×512 WebP)</p>
+            </div>
+            <button type="button" id="sticker-creator-close-btn" class="w-7 h-7 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer shrink-0" aria-label="Close sticker creator" title="Close (Esc)">
+                <span class="material-symbols-outlined text-[18px]">close</span>
+            </button>
+        </div>
+
+        <p id="sticker-creator-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-xl px-3 py-2"></p>
+
+        <input id="sticker-creator-file-input" type="file" class="hidden" accept=".webp,.png,.jpg,.jpeg,.gif,image/webp,image/png,image/jpeg,image/gif" />
+
+        <!-- Dropzone -->
+        <div id="sticker-creator-dropzone" class="border-2 border-dashed border-[#E3DCD7] dark:border-[#514D48] rounded-2xl p-6 flex flex-col items-center justify-center text-center gap-2 bg-[#F8F6F3]/80 dark:bg-[#302F2C]/60 transition-colors">
+            <span class="material-symbols-outlined text-[36px] text-[#B3929D]">add_photo_alternate</span>
+            <p class="text-xs font-semibold text-[#2B2725] dark:text-[#F0E9E2]">Drop an image or animated GIF here</p>
+            <p class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">Static images up to 15 MB • Animated GIF/WebP up to 5 MB</p>
+            <button type="button" id="sticker-creator-pick-btn" class="mt-1 px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-95 transition-opacity cursor-pointer">Choose Image</button>
+        </div>
+
+        <!-- Preview & Controls -->
+        <div id="sticker-creator-preview-area" class="hidden flex flex-col items-center gap-3">
+            <div class="relative w-52 h-52 rounded-2xl border border-[#E3DCD7] dark:border-[#514D48] overflow-hidden flex items-center justify-center bg-[repeating-conic-gradient(#e5e0db_0%_25%,#f8f6f3_0%_50%)] dark:bg-[repeating-conic-gradient(#3b3835_0%_25%,#2d2b28_0%_50%)] [background-size:16px_16px]">
+                <canvas id="sticker-creator-canvas" width="512" height="512" class="w-full h-full cursor-grab active:cursor-grabbing touch-none"></canvas>
+                <img id="sticker-creator-anim-preview" alt="Animated sticker preview" width="512" height="512" class="hidden w-full h-full object-contain select-none" />
+                <span id="sticker-creator-anim-badge" class="hidden absolute bottom-2 left-2 px-2 py-0.5 rounded-full bg-black/65 text-white text-[10px] font-bold">Animated WebP</span>
+            </div>
+
+            <div id="sticker-creator-static-controls" class="w-full flex flex-col gap-2">
+                <div class="flex items-center justify-center gap-1.5">
+                    <button type="button" data-sticker-shape="square" aria-pressed="true" class="px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-[#B3929D] text-white cursor-pointer">Square</button>
+                    <button type="button" data-sticker-shape="rounded" aria-pressed="false" class="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-[#E3DCD7] dark:border-[#514D48] text-[#6E6560] dark:text-[#C9C0B9] cursor-pointer">Rounded</button>
+                    <button type="button" data-sticker-shape="circle" aria-pressed="false" class="px-2.5 py-1 rounded-lg text-[11px] font-medium border border-[#E3DCD7] dark:border-[#514D48] text-[#6E6560] dark:text-[#C9C0B9] cursor-pointer">Circle</button>
+                </div>
+                <div class="flex items-center gap-2.5 px-1">
+                    <span class="text-[11px] font-medium text-[#6E6560] dark:text-[#C9C0B9]">Zoom</span>
+                    <input id="sticker-creator-zoom" type="range" min="1" max="3" step="0.05" value="1" aria-label="Zoom sticker" class="flex-1 accent-[#B3929D]" />
+                </div>
+            </div>
+
+            <button type="button" id="sticker-creator-change-file-btn" class="text-[11px] font-semibold text-[#735761] dark:text-[#E1BDC9] hover:underline cursor-pointer">Choose a different image</button>
+        </div>
+
+        <!-- Pack Selector & Inline New Pack -->
+        <div class="flex flex-col gap-1.5">
+            <div class="flex items-center justify-between">
+                <label for="sticker-creator-pack-select" class="text-xs font-semibold text-[#2B2725] dark:text-[#F0E9E2]">Sticker Pack</label>
+                <button type="button" id="sticker-creator-new-pack-btn" class="text-[11px] font-semibold text-[#735761] dark:text-[#E1BDC9] hover:underline cursor-pointer">+ New pack</button>
+            </div>
+            <select id="sticker-creator-pack-select" class="w-full rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] px-3 py-2 text-xs text-[#2B2725] dark:text-[#F0E9E2] focus:outline-none focus:border-[#B3929D]"></select>
+            <div id="sticker-creator-new-pack-row" class="hidden flex items-center gap-1.5 mt-1">
+                <input id="sticker-creator-new-pack-input" type="text" maxlength="64" placeholder="New pack name..." aria-label="New pack name" class="flex-1 rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] px-3 py-1.5 text-xs text-[#2B2725] dark:text-[#F0E9E2] focus:outline-none focus:border-[#B3929D]" />
+                <button type="button" id="sticker-creator-new-pack-save-btn" class="px-3 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-95 cursor-pointer">Add</button>
+            </div>
+        </div>
+
+        <!-- Emoji / Search Tags -->
+        <div class="flex flex-col gap-1">
+            <label for="sticker-creator-tags-input" class="text-xs font-semibold text-[#2B2725] dark:text-[#F0E9E2]">Emoji &amp; Search Tags <span class="font-normal text-[#6E6560] dark:text-[#C9C0B9]">(optional)</span></label>
+            <input id="sticker-creator-tags-input" type="text" maxlength="128" placeholder="e.g. 😂 funny cat wave" class="w-full rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] px-3 py-2 text-xs text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none focus:border-[#B3929D]" />
+        </div>
+
+        <!-- Upload Progress -->
+        <div id="sticker-creator-progress-wrap" class="hidden flex flex-col gap-1">
+            <div class="w-full h-1.5 rounded-full bg-[#E3DCD7] dark:bg-[#514D48] overflow-hidden">
+                <div id="sticker-creator-progress-bar" class="h-full w-0 bg-[#B3929D] transition-all duration-150"></div>
+            </div>
+            <span id="sticker-creator-progress-label" class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]"></span>
+        </div>
+
+        <!-- Actions -->
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" id="sticker-creator-cancel-btn" class="px-3.5 py-1.5 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
+            <button type="button" id="sticker-creator-submit-btn" disabled class="px-4 py-1.5 rounded-xl bg-[#B3929D] text-white text-xs font-bold hover:opacity-95 active:scale-95 transition-all shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Create Sticker</button>
+        </div>
+    </div>
+</div>
+
+<!-- Sticker / Pack Delete Confirmation Modal -->
+<div id="sticker-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="sticker-confirm-title" aria-describedby="sticker-confirm-message" class="hidden fixed inset-0 z-[75] flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-sm p-5 flex flex-col gap-3.5">
+        <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-full bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-[20px]">delete_forever</span>
+            </div>
+            <div class="min-w-0 flex-1">
+                <h3 id="sticker-confirm-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Delete sticker pack?</h3>
+                <p id="sticker-confirm-message" class="text-xs text-[#6E6560] dark:text-[#C9C0B9] mt-1 leading-relaxed break-words"></p>
+            </div>
+        </div>
+        <p id="sticker-confirm-error" role="alert" class="hidden text-xs text-red-600 dark:text-red-400 font-medium bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900/50 rounded-xl px-3 py-2"></p>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" id="sticker-confirm-cancel-btn" class="px-3.5 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-50">Cancel</button>
+            <button type="button" id="sticker-confirm-accept-btn" class="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold active:scale-[0.98] transition-all shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- WhatsApp-Style Mobile Message Action Sheet (Long-Press / Context Menu) -->
+<div id="mobile-message-action-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-action-sheet-title" class="hidden fixed inset-0 z-[65] flex flex-col justify-end bg-black/50 backdrop-blur-[2px] sm:hidden">
+    <div class="w-full rounded-t-3xl bg-white dark:bg-[#3A3835] border-t border-[#E3DCD7] dark:border-[#514D48] shadow-2xl px-4 pt-3 pb-5 pb-safe flex flex-col gap-3">
+        <div class="w-10 h-1 rounded-full bg-[#E3DCD7] dark:bg-[#5B5752] mx-auto" aria-hidden="true"></div>
+
+        <!-- Quick Reaction Strip -->
+        <div id="mobile-action-reactions" role="group" aria-label="Quick reactions" class="flex items-center justify-between gap-0.5 rounded-full bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] px-2 py-1.5 select-none">
+            <button type="button" data-mobile-react-emoji="👍" aria-label="React with Thumbs Up" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">👍</button>
+            <button type="button" data-mobile-react-emoji="❤️" aria-label="React with Heart" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">❤️</button>
+            <button type="button" data-mobile-react-emoji="😂" aria-label="React with Joy" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">😂</button>
+            <button type="button" data-mobile-react-emoji="😮" aria-label="React with Open Mouth" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">😮</button>
+            <button type="button" data-mobile-react-emoji="😢" aria-label="React with Cry" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">😢</button>
+            <button type="button" data-mobile-react-emoji="🙏" aria-label="React with Pray" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">🙏</button>
+            <button type="button" data-mobile-react-emoji="🔥" aria-label="React with Fire" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">🔥</button>
+            <button type="button" data-mobile-react-emoji="🎉" aria-label="React with Party" class="w-9 h-9 rounded-full flex items-center justify-center text-lg hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-110 transition-transform cursor-pointer">🎉</button>
+        </div>
+
+        <p id="mobile-action-sheet-title" class="px-1 text-[11px] font-medium text-[#6E6560] dark:text-[#C9C0B9] truncate">Message actions</p>
+
+        <!-- Action List -->
+        <div class="rounded-2xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] overflow-hidden divide-y divide-[#E3DCD7] dark:divide-[#514D48]">
+            <button type="button" id="mobile-action-reply-btn" class="w-full px-4 py-3 text-left flex items-center gap-3 text-sm font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:bg-[#E3DCD7]/70 dark:active:bg-[#514D48] transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-[20px] text-[#735761] dark:text-[#E1BDC9]">reply</span>
+                <span>Reply</span>
+            </button>
+            <button type="button" id="mobile-action-copy-btn" class="hidden w-full px-4 py-3 text-left flex items-center gap-3 text-sm font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:bg-[#E3DCD7]/70 dark:active:bg-[#514D48] transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-[20px] text-[#6E6560] dark:text-[#C9C0B9]">content_copy</span>
+                <span>Copy text</span>
+            </button>
+            <button type="button" id="mobile-action-sticker-info-btn" class="hidden w-full px-4 py-3 text-left flex items-center gap-3 text-sm font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:bg-[#E3DCD7]/70 dark:active:bg-[#514D48] transition-colors cursor-pointer">
+                <span id="mobile-action-sticker-info-icon" class="material-symbols-outlined text-[20px] text-amber-500">star_outline</span>
+                <span>Sticker info &amp; favorites</span>
+            </button>
+            <button type="button" id="mobile-action-edit-btn" class="hidden w-full px-4 py-3 text-left flex items-center gap-3 text-sm font-semibold text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:bg-[#E3DCD7]/70 dark:active:bg-[#514D48] transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-[20px] text-[#6E6560] dark:text-[#C9C0B9]">edit</span>
+                <span>Edit</span>
+            </button>
+            <button type="button" id="mobile-action-delete-btn" class="w-full px-4 py-3 text-left flex items-center gap-3 text-sm font-semibold text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 active:bg-red-100/70 dark:active:bg-red-950/50 transition-colors cursor-pointer">
+                <span class="material-symbols-outlined text-[20px]">delete</span>
+                <span>Delete</span>
+            </button>
+        </div>
+
+        <button type="button" id="mobile-action-cancel-btn" class="w-full py-2.5 rounded-2xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-bold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Cancel</button>
+    </div>
+</div>

@@ -58,8 +58,13 @@
                     var initials = GetInitials(conv.OtherParticipantName, conv.OtherParticipantHandle);
                     <div class="group p-3 rounded-xl bg-surface-container-lowest dark:bg-[#45423E] hover:bg-surface-container dark:hover:bg-[#514D48] transition-all flex items-center justify-between shadow-xs border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#5B5752]">
                         <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value" class="flex items-center gap-3 min-w-0 flex-1">
-                            <div class="w-10 h-10 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs flex-shrink-0">
-                                @initials
+                            <div data-avatar-slot="true"
+                                 data-avatar-user-id="@conv.OtherParticipantId.Value"
+                                 data-avatar-version="@(conv.OtherParticipantAvatarVersion ?? "")"
+                                 data-avatar-name="@conv.OtherParticipantName"
+                                 data-avatar-handle="@conv.OtherParticipantHandle"
+                                 class="w-10 h-10 rounded-full overflow-hidden bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs flex-shrink-0">
+                                <span data-avatar-initials="true">@initials</span>
                             </div>
                             <div class="min-w-0 flex-1">
                                 <div class="flex items-center gap-1.5 mb-0.5">

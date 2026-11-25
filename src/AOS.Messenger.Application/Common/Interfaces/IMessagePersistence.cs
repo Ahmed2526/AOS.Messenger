@@ -1,3 +1,4 @@
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.ValueObjects;
 
@@ -15,8 +16,8 @@ public interface IMessagePersistence
     Task<PersistMessageResult> AddAsync(Message message, CancellationToken ct = default);
     Task<PersistMessageResult> AddWithMediaAsync(Message message, IReadOnlyList<MediaId> mediaIds, DateTimeOffset attachedAtUtc, CancellationToken ct = default);
     Task UpdateAsync(Message message, CancellationToken ct = default);
-    Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = 30, CancellationToken ct = default);
-    Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, UserId callerId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = 30, CancellationToken ct = default);
+    Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = PaginationDefaults.DefaultMessagePageSize, CancellationToken ct = default);
+    Task<IReadOnlyList<Message>> GetKeysetMessagesAsync(ConversationId conversationId, UserId callerId, DateTimeOffset? cursorCreatedAtUtc, MessageId? cursorId, DateTimeOffset? clearedAtUtc, int pageSize = PaginationDefaults.DefaultMessagePageSize, CancellationToken ct = default);
     Task DeleteForMeAsync(ConversationId conversationId, MessageId messageId, UserId callerId, DateTimeOffset deletedAtUtc, CancellationToken ct = default);
     Task<bool> IsMessageDeletedForUserAsync(ConversationId conversationId, MessageId messageId, UserId callerId, CancellationToken ct = default);
     Task<HashSet<MessageId>> GetDeletedMessageIdsForUserAsync(ConversationId conversationId, UserId callerId, IEnumerable<MessageId> messageIds, CancellationToken ct = default);

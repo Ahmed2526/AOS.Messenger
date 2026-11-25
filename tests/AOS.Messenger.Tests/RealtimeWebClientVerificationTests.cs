@@ -95,7 +95,8 @@ public sealed class RealtimeWebClientVerificationTests
         // Keyset query against authoritative SQL Server REST endpoint (RT-005)
         Assert.Contains("/api/conversations/", content);
         Assert.Contains("/bundle?pageSize=", content);
-        Assert.Contains("pageSize: 30", content);
+        Assert.Contains("DEFAULT_MESSAGE_PAGE_SIZE = 20", content);
+        Assert.Contains("pageSize: DEFAULT_MESSAGE_PAGE_SIZE", content);
 
         // Deduplication during reconciliation
         Assert.Contains("isMessageRendered", content);

@@ -19,8 +19,14 @@ import {
     ensureSidebarBroadcastChannel,
     syncSidebarConversations,
     updateDocumentTitleUnreadBadge,
-    resetDocumentTitleState
+    resetDocumentTitleState,
+    updateSidebarPeerProfile
 } from './conversation-list.js';
+import {
+    hydrateAllAvatars,
+    updateUserAvatarAcrossDom,
+    clearAvatarUrlCache
+} from './avatar-loader.js';
 import { setupPresence } from './presence.js';
 import { resetReceiptsState } from './receipts.js';
 
@@ -95,6 +101,7 @@ export function initSidebar(overrides = {}) {
         if (signalrClient && typeof signalrClient.stop === 'function') {
             signalrClient.stop();
         }
+        clearAvatarUrlCache();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -119,6 +126,7 @@ export function initSidebar(overrides = {}) {
 
     ensureSidebarBroadcastChannel();
     updateDocumentTitleUnreadBadge();
+    hydrateAllAvatars(document);
 
     const presence = setupPresence(null, sidebarListEl, null, { skipInitialFetch: true });
 
@@ -127,6 +135,16 @@ export function initSidebar(overrides = {}) {
         onSessionExpired: handleSessionExpired,
         onPresenceChanged: presence.handlePresenceChanged,
         onRefreshPresence: () => presence.fetchPresence(),
+        onUserProfileUpdated: (profile) => {
+            if (!profile || expiredHandled) return;
+            const rawId = profile.userId ?? profile.UserId;
+            const userId = rawId && typeof rawId === 'object' && rawId.value !== undefined ? String(rawId.value) : String(rawId || '');
+            const displayName = profile.displayName ?? profile.DisplayName ?? null;
+            const avatarVersion = profile.avatarVersion !== undefined ? profile.avatarVersion : profile.AvatarVersion;
+            if (!userId) return;
+            updateUserAvatarAcrossDom(userId, avatarVersion, displayName);
+            updateSidebarPeerProfile(userId, displayName);
+        },
         signalRLib: overrides.signalRLib || null
     });
 

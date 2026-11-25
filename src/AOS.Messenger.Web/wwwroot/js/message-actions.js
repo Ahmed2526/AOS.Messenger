@@ -22,7 +22,9 @@ import {
     isLatestRenderedMessage,
     applyMessageEditedToRow,
     applyMessageDeletedForEveryone,
-    applyMessageDeletedForMe
+    applyMessageDeletedForMe,
+    teardownRowVideos,
+    evictMediaUrlCacheForMessage
 } from './message-renderer.js';
 
 function updateSidebarLastMessageIfLatest(conversationId, messageId, previewText) {
@@ -38,7 +40,14 @@ function updateSidebarLastMessageIfLatest(conversationId, messageId, previewText
  */
 export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}) {
     if (typeof document === 'undefined' || !convIdOrGetter) {
-        return { resetForSwitch: () => {}, closeEditModal: () => {}, closeDeleteModal: () => {}, destroy: () => {} };
+        return {
+            resetForSwitch: () => {},
+            closeEditModal: () => {},
+            closeDeleteModal: () => {},
+            closeMobileActionSheet: () => {},
+            closeMobileActionSheetIfMessage: () => {},
+            destroy: () => {}
+        };
     }
 
     const resolveConvId = typeof convIdOrGetter === 'function' ? convIdOrGetter : () => convIdOrGetter;
@@ -46,6 +55,22 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const emojiPicker = options?.emojiPicker || null;
     const emojiAutocomplete = options?.emojiAutocomplete || null;
     const mediaLightbox = options?.mediaLightbox || null;
+    const stickerPicker = options?.stickerPicker || null;
+    const loadOlderMessagesFn = typeof options?.loadOlderMessages === 'function' ? options.loadOlderMessages : null;
+    const hasMoreOlderFn = typeof options?.hasMoreOlder === 'function' ? options.hasMoreOlder : null;
+    const onMessagesMutated = typeof options?.onMessagesMutated === 'function' ? options.onMessagesMutated : null;
+    const onMessageDeleted = typeof options?.onMessageDeleted === 'function' ? options.onMessageDeleted : null;
+    const showActionNotice = typeof options?.showActionNotice === 'function' ? options.showActionNotice : null;
+    const onToggleReaction = typeof options?.onToggleReaction === 'function' ? options.onToggleReaction : null;
+    const onReply = typeof options?.onReply === 'function' ? options.onReply : null;
+    const onBeforeOpenMobileSheet = typeof options?.onBeforeOpenMobileSheet === 'function' ? options.onBeforeOpenMobileSheet : null;
+    const isMobileViewport = typeof options?.isMobileViewport === 'function'
+        ? options.isMobileViewport
+        : () => typeof window !== 'undefined' && (window.innerWidth || document.documentElement?.clientWidth || 1024) < 640;
+    const longPressDelayMs = Number.isFinite(options?.longPressDelayMs) ? Math.max(0, options.longPressDelayMs) : 450;
+    const LONG_PRESS_MOVE_TOLERANCE_PX = 10;
+    let isJumpingToReply = false;
+    const MAX_REPLY_JUMP_PAGES = 3;
 
     // Modals
     const editModal = document.getElementById('edit-message-modal');
@@ -61,9 +86,26 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const deleteForEveryoneBtn = document.getElementById('delete-for-everyone-btn');
     const cancelDeleteBtn = document.getElementById('cancel-delete-btn');
 
+    // WhatsApp-style Mobile Message Action Sheet
+    const mobileSheet = document.getElementById('mobile-message-action-sheet');
+    const mobileSheetTitle = document.getElementById('mobile-action-sheet-title');
+    const mobileReactionsWrap = document.getElementById('mobile-action-reactions');
+    const mobileReplyBtn = document.getElementById('mobile-action-reply-btn');
+    const mobileCopyBtn = document.getElementById('mobile-action-copy-btn');
+    const mobileStickerInfoBtn = document.getElementById('mobile-action-sticker-info-btn');
+    const mobileStickerInfoIcon = document.getElementById('mobile-action-sticker-info-icon');
+    const mobileEditBtn = document.getElementById('mobile-action-edit-btn');
+    const mobileDeleteBtn = document.getElementById('mobile-action-delete-btn');
+    const mobileCancelBtn = document.getElementById('mobile-action-cancel-btn');
+
     let activeEditMessageId = null;
     let activeEditHasAttachments = false;
     let activeDeleteMessageId = null;
+    let activeMobileSheetContext = null;
+    let highlightedMobileBubble = null;
+    let longPressTimer = null;
+    let longPressStart = null;
+    let suppressNextClickUntil = 0;
 
     function setEditError(message) {
         if (!editErrorEl) return;
@@ -223,10 +265,326 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         }
     }
 
+    function cancelLongPress() {
+        if (longPressTimer !== null) {
+            clearTimeout(longPressTimer);
+            longPressTimer = null;
+        }
+        longPressStart = null;
+    }
+
+    function clearHighlightedMobileBubble() {
+        if (highlightedMobileBubble && highlightedMobileBubble.classList) {
+            highlightedMobileBubble.classList.remove('ring-2', 'ring-[#B3929D]', 'ring-offset-1');
+        }
+        highlightedMobileBubble = null;
+    }
+
+    function setElVisible(el, visible) {
+        if (!el || !el.classList) return;
+        if (visible) {
+            el.classList.remove('hidden');
+        } else {
+            el.classList.add('hidden');
+        }
+    }
+
+    function closeMobileActionSheet() {
+        cancelLongPress();
+        clearHighlightedMobileBubble();
+        activeMobileSheetContext = null;
+        if (mobileSheetTitle) {
+            mobileSheetTitle.textContent = 'Message actions';
+        }
+        if (mobileSheet && mobileSheet.classList) {
+            mobileSheet.classList.add('hidden');
+        }
+    }
+
+    function closeMobileActionSheetIfMessage(messageId) {
+        if (!messageId || !activeMobileSheetContext) return;
+        if (String(activeMobileSheetContext.messageId) === String(messageId)) {
+            closeMobileActionSheet();
+        }
+    }
+
+    function getUserReactedEmojisForRow(row) {
+        const reacted = new Set();
+        if (!row || typeof row.querySelectorAll !== 'function') return reacted;
+        const pills = row.querySelectorAll('.reaction-pill');
+        for (let i = 0; i < pills.length; i++) {
+            const pill = pills[i];
+            const emoji = pill?.getAttribute('data-emoji');
+            if (!emoji) continue;
+            const title = pill.getAttribute('title') || '';
+            if (title.startsWith('Remove ') || (pill.classList && pill.classList.contains('font-bold'))) {
+                reacted.add(emoji);
+            }
+        }
+        return reacted;
+    }
+
+    function openMobileActionSheet(row) {
+        if (!mobileSheet || !row || row.getAttribute('data-deleted') === 'true') return;
+        const messageId = row.getAttribute('data-message-id');
+        if (!messageId) return;
+
+        if (onBeforeOpenMobileSheet) {
+            onBeforeOpenMobileSheet();
+        }
+
+        clearHighlightedMobileBubble();
+        const bubble = typeof row.querySelector === 'function' ? row.querySelector('.message-bubble') : null;
+        if (bubble && bubble.classList) {
+            bubble.classList.add('ring-2', 'ring-[#B3929D]', 'ring-offset-1');
+            highlightedMobileBubble = bubble;
+        }
+
+        const isOutgoing = row.getAttribute('data-is-outgoing') === 'true';
+        const isSticker = row.getAttribute('data-is-sticker') === 'true';
+        const hasAttachments = row.getAttribute('data-has-attachments') === 'true';
+        const createdAt = row.getAttribute('data-created-at') || '';
+        const contentEl = typeof row.querySelector === 'function' ? row.querySelector('.message-text-content') : null;
+        const hasVisibleText = Boolean(contentEl && (!contentEl.classList || !contentEl.classList.contains('hidden')) && (contentEl.textContent || '').trim().length > 0);
+        const textContent = hasVisibleText ? (contentEl.textContent || '') : '';
+        const replyBtnInRow = typeof row.querySelector === 'function' ? row.querySelector('.reply-action-btn') : null;
+        const senderName = replyBtnInRow?.getAttribute('data-sender') || '';
+        const rawPreview = row.getAttribute('data-message-preview') || replyBtnInRow?.getAttribute('data-preview') || textContent || 'Message';
+        const stickerTriggerInRow = isSticker && typeof row.querySelector === 'function'
+            ? row.querySelector('[data-sticker-info-trigger="true"]')
+            : null;
+        const stickerFavorited = stickerTriggerInRow?.getAttribute('data-sticker-favorited') === 'true';
+        const composerInput = document.getElementById('message-content-input');
+        const canReply = !(composerInput && composerInput.disabled);
+
+        activeMobileSheetContext = {
+            row,
+            messageId,
+            isOutgoing,
+            isSticker,
+            hasAttachments,
+            createdAt,
+            senderName,
+            preview: rawPreview,
+            textContent,
+            stickerTriggerInRow
+        };
+
+        if (mobileSheetTitle) {
+            mobileSheetTitle.textContent = rawPreview;
+        }
+
+        if (mobileReactionsWrap && typeof mobileReactionsWrap.querySelectorAll === 'function') {
+            const reactedEmojis = getUserReactedEmojisForRow(row);
+            const reactionBtns = mobileReactionsWrap.querySelectorAll('[data-mobile-react-emoji]');
+            for (let i = 0; i < reactionBtns.length; i++) {
+                const btn = reactionBtns[i];
+                const emoji = btn.getAttribute('data-mobile-react-emoji') || '';
+                const isSelected = reactedEmojis.has(emoji);
+                btn.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
+                if (btn.classList) {
+                    if (isSelected) {
+                        btn.classList.add('bg-[#B3929D]/25', 'ring-1', 'ring-[#B3929D]');
+                    } else {
+                        btn.classList.remove('bg-[#B3929D]/25', 'ring-1', 'ring-[#B3929D]');
+                    }
+                }
+            }
+        }
+
+        setElVisible(mobileReplyBtn, canReply);
+        setElVisible(mobileCopyBtn, !isSticker && textContent.length > 0);
+        setElVisible(mobileStickerInfoBtn, isSticker && Boolean(stickerTriggerInRow));
+        if (mobileStickerInfoIcon) {
+            mobileStickerInfoIcon.textContent = stickerFavorited ? 'star' : 'star_outline';
+        }
+        setElVisible(mobileEditBtn, isOutgoing && !isSticker);
+        setElVisible(mobileDeleteBtn, true);
+
+        mobileSheet.classList.remove('hidden');
+
+        const focusTarget = (canReply && mobileReplyBtn) || mobileDeleteBtn || mobileCancelBtn;
+        if (focusTarget && typeof focusTarget.focus === 'function') {
+            focusTarget.focus();
+        }
+    }
+
     function resetForSwitch() {
+        closeMobileActionSheet();
         closeEditModal();
         closeDeleteModal();
     }
+
+    const onMobileSheetBackdropClick = (e) => {
+        if (e.target === mobileSheet) {
+            closeMobileActionSheet();
+        }
+    };
+
+    const onMobileReactionClick = async (e) => {
+        const btn = e.target && typeof e.target.closest === 'function'
+            ? e.target.closest('[data-mobile-react-emoji]')
+            : null;
+        if (!btn || !activeMobileSheetContext) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const emoji = btn.getAttribute('data-mobile-react-emoji');
+        const msgId = activeMobileSheetContext.messageId;
+        closeMobileActionSheet();
+        if (emoji && msgId && onToggleReaction) {
+            await onToggleReaction(msgId, emoji);
+        }
+    };
+
+    const onMobileReplyClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        const ctx = activeMobileSheetContext;
+        if (!ctx) return;
+        closeMobileActionSheet();
+        if (onReply) {
+            onReply(ctx.messageId, ctx.senderName, ctx.preview);
+        } else {
+            const btn = ctx.row && typeof ctx.row.querySelector === 'function'
+                ? ctx.row.querySelector('.reply-action-btn')
+                : null;
+            if (btn && typeof btn.click === 'function') btn.click();
+        }
+    };
+
+    const onMobileCopyClick = async (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        const text = activeMobileSheetContext?.textContent || '';
+        closeMobileActionSheet();
+        if (!text) return;
+        try {
+            if (typeof navigator !== 'undefined' && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(text);
+            }
+        } catch {
+            // Clipboard permission denied or unavailable in non-secure context
+        }
+    };
+
+    const onMobileStickerInfoClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        const ctx = activeMobileSheetContext;
+        if (!ctx) return;
+        const trigger = ctx.stickerTriggerInRow;
+        closeMobileActionSheet();
+        if (trigger && stickerPicker && typeof stickerPicker.openStickerInfoModal === 'function') {
+            stickerPicker.openStickerInfoModal({
+                id: trigger.getAttribute('data-sticker-id') || '',
+                packId: trigger.getAttribute('data-sticker-pack-id') || '',
+                packName: trigger.getAttribute('data-sticker-pack-name') || 'Stickers',
+                packAuthor: trigger.getAttribute('data-sticker-pack-author') || 'Community Sticker',
+                isAnimated: trigger.getAttribute('data-sticker-animated') === 'true',
+                isSystem: trigger.getAttribute('data-sticker-system') === 'true',
+                staticUrl: trigger.getAttribute('data-sticker-static-url') || null,
+                emojiTags: trigger.getAttribute('data-sticker-tags') || '',
+                isFavorited: trigger.getAttribute('data-sticker-favorited') === 'true'
+            }, {
+                conversationId: resolveConvId(),
+                messageId: ctx.messageId
+            });
+        } else if (trigger && typeof trigger.click === 'function') {
+            trigger.click();
+        }
+    };
+
+    const onMobileEditClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        const ctx = activeMobileSheetContext;
+        if (!ctx || !ctx.isOutgoing || ctx.isSticker) return;
+        closeMobileActionSheet();
+        openEditModal(ctx.messageId, ctx.textContent, ctx.hasAttachments);
+    };
+
+    const onMobileDeleteClick = (e) => {
+        if (e && typeof e.preventDefault === 'function') e.preventDefault();
+        const ctx = activeMobileSheetContext;
+        if (!ctx) return;
+        closeMobileActionSheet();
+        openDeleteModal(ctx.messageId, ctx.isOutgoing, ctx.createdAt);
+    };
+
+    const onPointerDownForLongPress = (e) => {
+        cancelLongPress();
+        if (!mobileSheet || !isMobileViewport()) return;
+        if (e.isPrimary === false) return;
+        if (typeof e.button === 'number' && e.button !== 0) return;
+        if (!e.target || typeof e.target.closest !== 'function') return;
+        if (e.target.closest('.reaction-pill') || e.target.closest('video')) return;
+
+        const bubble = e.target.closest('.message-bubble');
+        if (!bubble) return;
+        const row = bubble.closest('.message-bubble-row');
+        if (!row || row.getAttribute('data-deleted') === 'true') return;
+
+        longPressStart = {
+            x: typeof e.clientX === 'number' ? e.clientX : 0,
+            y: typeof e.clientY === 'number' ? e.clientY : 0,
+            row
+        };
+        longPressTimer = setTimeout(() => {
+            const targetRow = longPressStart?.row || null;
+            longPressTimer = null;
+            longPressStart = null;
+            if (!targetRow || !isMobileViewport() || targetRow.getAttribute('data-deleted') === 'true') return;
+            suppressNextClickUntil = Date.now() + 500;
+            try {
+                if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+                    navigator.vibrate(15);
+                }
+            } catch {}
+            openMobileActionSheet(targetRow);
+        }, longPressDelayMs);
+    };
+
+    const onPointerMoveForLongPress = (e) => {
+        if (!longPressStart || longPressTimer === null) return;
+        const dx = Math.abs((typeof e.clientX === 'number' ? e.clientX : 0) - longPressStart.x);
+        const dy = Math.abs((typeof e.clientY === 'number' ? e.clientY : 0) - longPressStart.y);
+        if (dx > LONG_PRESS_MOVE_TOLERANCE_PX || dy > LONG_PRESS_MOVE_TOLERANCE_PX) {
+            cancelLongPress();
+        }
+    };
+
+    const onPointerEndForLongPress = () => {
+        cancelLongPress();
+    };
+
+    const onMobileBubbleContextMenu = (e) => {
+        if (!mobileSheet || !isMobileViewport()) return;
+        if (!e.target || typeof e.target.closest !== 'function') return;
+        const bubble = e.target.closest('.message-bubble');
+        if (!bubble) return;
+        const row = bubble.closest('.message-bubble-row');
+        if (!row || row.getAttribute('data-deleted') === 'true') return;
+
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        cancelLongPress();
+        openMobileActionSheet(row);
+    };
+
+    const onCaptureSuppressLongPressClick = (e) => {
+        if (suppressNextClickUntil <= 0) return;
+        const now = Date.now();
+        if (now > suppressNextClickUntil) {
+            suppressNextClickUntil = 0;
+            return;
+        }
+        if (e.target && typeof e.target.closest === 'function' && e.target.closest('.message-bubble')) {
+            suppressNextClickUntil = 0;
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        }
+    };
+
+    const onWindowResizeForMobileSheet = () => {
+        if (activeMobileSheetContext && !isMobileViewport()) {
+            closeMobileActionSheet();
+        }
+    };
 
     const onDeleteModalBackdropClick = (e) => {
         if (e.target === deleteModal) {
@@ -238,6 +596,10 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         if (e.key === 'Escape') {
             if ((emojiPicker && typeof emojiPicker.isOpen === 'function' && emojiPicker.isOpen()) ||
                 (emojiAutocomplete && typeof emojiAutocomplete.isOpen === 'function' && emojiAutocomplete.isOpen())) {
+                return;
+            }
+            if (mobileSheet && !mobileSheet.classList.contains('hidden')) {
+                closeMobileActionSheet();
                 return;
             }
             if (editModal && !editModal.classList.contains('hidden')) {
@@ -265,13 +627,20 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
             const row = document.getElementById(`msg-${msgId}`);
             if (row) {
+                teardownRowVideos(row);
                 row.remove();
+            }
+            evictMediaUrlCacheForMessage(msgId);
+            if (onMessageDeleted) {
+                onMessageDeleted(msgId);
             }
 
             document.querySelectorAll(`[data-reply-parent-id="${msgId}"]`).forEach(el => el.remove());
 
             const remainingRows = container ? container.querySelectorAll('.message-bubble-row') : [];
-            if (container && remainingRows.length === 0) {
+            const hasMore = (hasMoreOlderFn ? Boolean(hasMoreOlderFn()) : false)
+                || Boolean(container && typeof container.getAttribute === 'function' && container.getAttribute('data-has-more') === 'true');
+            if (container && remainingRows.length === 0 && !hasMore) {
                 const emptyPlaceholder = document.getElementById('no-messages-placeholder');
                 if (emptyPlaceholder) {
                     emptyPlaceholder.classList.remove('hidden');
@@ -295,14 +664,20 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
                     }
                 }
 
-                applyMessageDeletedForMe(msgId, targetConvId, fallbackLastId, fallbackPreview, true);
+                applyMessageDeletedForMe(msgId, targetConvId, fallbackLastId, fallbackPreview, true, { hasMore });
             }
 
             if (mediaLightbox && typeof mediaLightbox.closeIfMessage === 'function') {
                 mediaLightbox.closeIfMessage(msgId);
             }
+            if (stickerPicker && typeof stickerPicker.closeIfMessage === 'function') {
+                stickerPicker.closeIfMessage(msgId);
+            }
 
             closeDeleteModal();
+            if (onMessagesMutated) {
+                onMessagesMutated();
+            }
         } catch (err) {
             if (epoch !== getSwitchEpoch()) return;
             console.warn('[MessageActions] Error deleting for me:', err?.status || err);
@@ -331,8 +706,14 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
             if (mediaLightbox && typeof mediaLightbox.closeIfMessage === 'function') {
                 mediaLightbox.closeIfMessage(msgId);
             }
+            if (stickerPicker && typeof stickerPicker.closeIfMessage === 'function') {
+                stickerPicker.closeIfMessage(msgId);
+            }
             updateSidebarLastMessageIfLatest(targetConvId, msgId, 'This message was deleted');
             closeDeleteModal();
+            if (onMessagesMutated) {
+                onMessagesMutated();
+            }
         } catch (err) {
             if (epoch !== getSwitchEpoch()) return;
             console.warn('[MessageActions] Error deleting for everyone:', err?.status || err);
@@ -355,6 +736,96 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     if (deleteForEveryoneBtn) {
         deleteForEveryoneBtn.addEventListener('click', onDeleteForEveryoneClick);
     }
+    if (mobileSheet) {
+        mobileSheet.addEventListener('click', onMobileSheetBackdropClick);
+    }
+    if (mobileReactionsWrap) {
+        mobileReactionsWrap.addEventListener('click', onMobileReactionClick);
+    }
+    if (mobileReplyBtn) {
+        mobileReplyBtn.addEventListener('click', onMobileReplyClick);
+    }
+    if (mobileCopyBtn) {
+        mobileCopyBtn.addEventListener('click', onMobileCopyClick);
+    }
+    if (mobileStickerInfoBtn) {
+        mobileStickerInfoBtn.addEventListener('click', onMobileStickerInfoClick);
+    }
+    if (mobileEditBtn) {
+        mobileEditBtn.addEventListener('click', onMobileEditClick);
+    }
+    if (mobileDeleteBtn) {
+        mobileDeleteBtn.addEventListener('click', onMobileDeleteClick);
+    }
+    if (mobileCancelBtn) {
+        mobileCancelBtn.addEventListener('click', closeMobileActionSheet);
+    }
+
+    const streamElForLongPress = document.getElementById('message-stream');
+    if (streamElForLongPress && typeof streamElForLongPress.addEventListener === 'function') {
+        streamElForLongPress.addEventListener('scroll', onPointerEndForLongPress, { passive: true });
+    }
+    document.addEventListener('pointerdown', onPointerDownForLongPress);
+    document.addEventListener('pointermove', onPointerMoveForLongPress, { passive: true });
+    document.addEventListener('pointerup', onPointerEndForLongPress);
+    document.addEventListener('pointercancel', onPointerEndForLongPress);
+    document.addEventListener('contextmenu', onMobileBubbleContextMenu);
+    document.addEventListener('click', onCaptureSuppressLongPressClick, true);
+    if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+        window.addEventListener('resize', onWindowResizeForMobileSheet);
+    }
+
+    const scrollAndHighlightRow = (row) => {
+        if (!row) return;
+        if (typeof row.scrollIntoView === 'function') {
+            row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        if (row.classList) {
+            row.classList.add('ring-2', 'ring-[#B3929D]', 'rounded-xl');
+            setTimeout(() => {
+                row.classList.remove('ring-2', 'ring-[#B3929D]', 'rounded-xl');
+            }, 2000);
+        }
+    };
+
+    const jumpToReplyParent = async (parentId) => {
+        if (!parentId) return;
+        const immediate = document.getElementById(`msg-${parentId}`);
+        if (immediate) {
+            scrollAndHighlightRow(immediate);
+            return;
+        }
+        if (!loadOlderMessagesFn || isJumpingToReply) {
+            if (!loadOlderMessagesFn && showActionNotice) {
+                showActionNotice('Original message is older or no longer available.');
+            }
+            return;
+        }
+
+        const startEpoch = getSwitchEpoch();
+        isJumpingToReply = true;
+        try {
+            for (let page = 0; page < MAX_REPLY_JUMP_PAGES; page++) {
+                if (startEpoch !== getSwitchEpoch()) return;
+                if (hasMoreOlderFn && !hasMoreOlderFn()) break;
+
+                const res = await loadOlderMessagesFn({ force: true });
+                if (startEpoch !== getSwitchEpoch()) return;
+
+                const found = document.getElementById(`msg-${parentId}`);
+                if (found) {
+                    scrollAndHighlightRow(found);
+                    return;
+                }
+                if (!res || res.error || !res.hasMore) break;
+            }
+            if (startEpoch === getSwitchEpoch() && showActionNotice) {
+                showActionNotice('Original message is older or no longer available.');
+            }
+        } finally {
+            isJumpingToReply = false;
+        }
+    };
 
     const onActionClick = (e) => {
         if (!e.target || typeof e.target.closest !== 'function') return;
@@ -391,14 +862,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
             e.preventDefault();
             const parentId = replyQuote.getAttribute('data-reply-parent-id');
             if (parentId) {
-                const targetRow = document.getElementById(`msg-${parentId}`);
-                if (targetRow) {
-                    targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    targetRow.classList.add('ring-2', 'ring-[#B3929D]', 'rounded-xl');
-                    setTimeout(() => {
-                        targetRow.classList.remove('ring-2', 'ring-[#B3929D]', 'rounded-xl');
-                    }, 2000);
-                }
+                jumpToReplyParent(parentId);
             }
         }
     };
@@ -409,12 +873,35 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         resetForSwitch,
         closeEditModal,
         closeDeleteModal,
+        closeMobileActionSheet,
+        closeMobileActionSheetIfMessage,
+        openMobileActionSheet,
         destroy: () => {
             resetForSwitch();
             if (detachEditAutocomplete) detachEditAutocomplete();
             if (editEmojiBtn) editEmojiBtn.removeEventListener('click', onEditEmojiBtnClick);
             document.removeEventListener('click', onActionClick);
             document.removeEventListener('keydown', onEscapeKeyDown);
+            document.removeEventListener('pointerdown', onPointerDownForLongPress);
+            document.removeEventListener('pointermove', onPointerMoveForLongPress);
+            document.removeEventListener('pointerup', onPointerEndForLongPress);
+            document.removeEventListener('pointercancel', onPointerEndForLongPress);
+            document.removeEventListener('contextmenu', onMobileBubbleContextMenu);
+            document.removeEventListener('click', onCaptureSuppressLongPressClick, true);
+            if (streamElForLongPress && typeof streamElForLongPress.removeEventListener === 'function') {
+                streamElForLongPress.removeEventListener('scroll', onPointerEndForLongPress);
+            }
+            if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+                window.removeEventListener('resize', onWindowResizeForMobileSheet);
+            }
+            if (mobileSheet) mobileSheet.removeEventListener('click', onMobileSheetBackdropClick);
+            if (mobileReactionsWrap) mobileReactionsWrap.removeEventListener('click', onMobileReactionClick);
+            if (mobileReplyBtn) mobileReplyBtn.removeEventListener('click', onMobileReplyClick);
+            if (mobileCopyBtn) mobileCopyBtn.removeEventListener('click', onMobileCopyClick);
+            if (mobileStickerInfoBtn) mobileStickerInfoBtn.removeEventListener('click', onMobileStickerInfoClick);
+            if (mobileEditBtn) mobileEditBtn.removeEventListener('click', onMobileEditClick);
+            if (mobileDeleteBtn) mobileDeleteBtn.removeEventListener('click', onMobileDeleteClick);
+            if (mobileCancelBtn) mobileCancelBtn.removeEventListener('click', closeMobileActionSheet);
             if (cancelEditBtn) cancelEditBtn.removeEventListener('click', closeEditModal);
             if (editModal) editModal.removeEventListener('click', onEditModalBackdropClick);
             if (saveEditBtn && editInput) saveEditBtn.removeEventListener('click', onSaveEditClick);

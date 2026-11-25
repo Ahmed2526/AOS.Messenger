@@ -100,23 +100,15 @@ public sealed class PresenceService : IPresenceService
             return [];
         }
 
-        var eligible = new List<UserId>(peerIds.Count);
-        foreach (var peerId in peerIds)
+        var blockedPeerIds = await _blockPersistence.GetBidirectionalBlockedUserIdsAsync(userId, ct);
+        var unblockedPeerIds = peerIds.Where(id => !blockedPeerIds.Contains(id)).ToList();
+        if (unblockedPeerIds.Count == 0)
         {
-            if (await _blockPersistence.IsBlockedBidirectionalAsync(userId, peerId, ct))
-            {
-                continue;
-            }
-
-            if (!await IsTargetUserActiveAsync(peerId, ct))
-            {
-                continue;
-            }
-
-            eligible.Add(peerId);
+            return [];
         }
 
-        return eligible;
+        var activePeerIds = await _userReader.GetActiveUserIdsAsync(unblockedPeerIds, ct);
+        return unblockedPeerIds.Where(activePeerIds.Contains).ToList();
     }
 
     public async Task RecordLastSeenAsync(UserId userId, DateTimeOffset lastSeenAtUtc, CancellationToken ct = default)
@@ -125,14 +117,6 @@ public sealed class PresenceService : IPresenceService
         await _userPresencePersistence.UpdateLastSeenAsync(userId, lastSeenAtUtc, ct);
     }
 
-    private async Task<bool> IsTargetUserActiveAsync(UserId userId, CancellationToken ct)
-    {
-        var user = await _userReader.GetByIdAsync(userId, ct);
-        if (user is null || user.IsDeleted)
-        {
-            return false;
-        }
-
-        return await _userReader.ExistsAsync(userId, ct);
-    }
+    private Task<bool> IsTargetUserActiveAsync(UserId userId, CancellationToken ct) =>
+        _userReader.ExistsAsync(userId, ct);
 }

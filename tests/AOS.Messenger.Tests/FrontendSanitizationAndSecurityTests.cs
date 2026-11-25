@@ -255,6 +255,30 @@ public sealed class FrontendSanitizationAndSecurityTests
     }
 
     [Fact]
+    public void ProfileView_DisplayName_MaxLengthIs64()
+    {
+        var slnRoot = FindSolutionRoot();
+        var profileViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Profile", "Index.cshtml");
+        var html = File.ReadAllText(profileViewPath);
+
+        Assert.Contains("asp-for=\"DisplayName\" maxlength=\"64\"", html, StringComparison.Ordinal);
+        Assert.Contains("Maximum 64 characters.", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("maxlength=\"100\"", html, StringComparison.Ordinal);
+        Assert.DoesNotContain("Maximum 100 characters.", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void MobileView_AllowsPinchZoom()
+    {
+        var slnRoot = FindSolutionRoot();
+        var mobileViewPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Mobile.cshtml");
+        var html = File.ReadAllText(mobileViewPath);
+
+        Assert.DoesNotContain("user-scalable=no", html, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("maximum-scale=1.0", html, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void RegisterViewModel_UserName_EnforcesAsciiRegex()
     {
         var prop = typeof(RegisterViewModel).GetProperty(nameof(RegisterViewModel.UserName));

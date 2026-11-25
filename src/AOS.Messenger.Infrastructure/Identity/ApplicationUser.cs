@@ -23,5 +23,19 @@ public sealed class ApplicationUser : IdentityUser<Guid>
 
     public DateTimeOffset? LastSeenAtUtc { get; set; }
 
+    public string? AvatarObjectKey { get; set; }
+
+    public string? AvatarThumbnailObjectKey { get; set; }
+
+    public string? AvatarContentType { get; set; }
+
+    public long? AvatarSizeBytes { get; set; }
+
+    public long? AvatarThumbnailSizeBytes { get; set; }
+
+    public string? AvatarVersion { get; set; }
+
+    public DateTimeOffset? AvatarUpdatedAtUtc { get; set; }
+
     public UserId ToDomainUserId() => new(Id);
 }

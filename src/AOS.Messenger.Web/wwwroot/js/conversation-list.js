@@ -11,6 +11,7 @@
  */
 
 import { getConversations } from './api-client.js';
+import { hydrateAvatarSlot } from './avatar-loader.js';
 
 const ACTIVE_ROW_CLASS = 'conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all bg-[#FFFFFF] dark:bg-[#45423E] shadow-xs border border-[#E3DCD7] dark:border-[#514D48]';
 const INACTIVE_ROW_CLASS = 'conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/50 border border-transparent';
@@ -417,15 +418,15 @@ export function updateSidebarLastMessage(convId, previewText, messageId = null, 
  * @param {string|null} [activeConvId]
  * @returns {HTMLElement|null}
  */
-export function createSidebarConversationItemElement(summary, activeConvId = null) {
-    if (!summary || typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
-
-    const convId = normalizeId(summary.id !== undefined ? summary.id : summary.Id).trim();
+function extractSidebarSummaryFields(summary, activeConvId) {
+    const convId = normalizeId(summary.id !== undefined ? summary.id : (summary.conversationId ?? summary.ConversationId ?? summary.Id)).trim();
     if (!convId) return null;
 
     const peerId = normalizeId(summary.otherParticipantId !== undefined ? summary.otherParticipantId : summary.OtherParticipantId);
     const peerName = summary.otherParticipantName || summary.OtherParticipantName || 'Unknown';
     const peerHandle = summary.otherParticipantHandle || summary.OtherParticipantHandle || '';
+    const peerAvatarVersion = summary.otherParticipantAvatarVersion ?? summary.OtherParticipantAvatarVersion ?? '';
+    const peerAvatarVersionStr = peerAvatarVersion ? String(peerAvatarVersion) : '';
     const previewRaw = summary.lastMessagePreview !== undefined ? summary.lastMessagePreview : summary.LastMessagePreview;
     const previewText = previewRaw && String(previewRaw).trim() ? String(previewRaw) : 'No messages yet';
     const unreadCount = Math.max(0, parseInt(summary.unreadCount !== undefined ? summary.unreadCount : (summary.UnreadCount || 0), 10) || 0);
@@ -434,37 +435,176 @@ export function createSidebarConversationItemElement(summary, activeConvId = nul
     const isOnline = !!(summary.isOnline !== undefined ? summary.isOnline : summary.IsOnline);
     const lastMsgRaw = summary.lastMessageId !== undefined ? summary.lastMessageId : summary.LastMessageId;
     const lastMessageId = normalizeId(lastMsgRaw);
-
     const isActive = !!(activeConvId && String(activeConvId).trim().toLowerCase() === convId.toLowerCase());
     const initials = getInitials(peerName, peerHandle);
+    const searchAttr = `${peerName} ${peerHandle} ${previewRaw || ''}`.trim();
+
+    return {
+        convId,
+        peerId,
+        peerName,
+        peerHandle,
+        peerAvatarVersionStr,
+        previewText,
+        unreadCount,
+        isPinned,
+        isMuted,
+        isOnline,
+        lastMessageId,
+        isActive,
+        initials,
+        searchAttr
+    };
+}
+
+function syncSidebarItemBadges(badgesDiv, isPinned, isMuted, unreadCount) {
+    if (!badgesDiv) return;
+    while (badgesDiv.firstChild) {
+        badgesDiv.removeChild(badgesDiv.firstChild);
+    }
+    if (isPinned) {
+        const pinIcon = document.createElement('span');
+        pinIcon.className = 'material-symbols-outlined text-[14px] text-[#A07860] dark:text-[#D8C080]';
+        pinIcon.title = 'Pinned';
+        pinIcon.textContent = 'push_pin';
+        badgesDiv.appendChild(pinIcon);
+    }
+    if (isMuted) {
+        const muteIcon = document.createElement('span');
+        muteIcon.className = 'material-symbols-outlined text-[14px] text-[#6E6560] dark:text-[#C9C0B9]';
+        muteIcon.title = 'Muted';
+        muteIcon.textContent = 'volume_off';
+        badgesDiv.appendChild(muteIcon);
+    }
+    if (unreadCount > 0) {
+        const unreadBadge = document.createElement('span');
+        unreadBadge.className = 'conversation-unread-badge px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white';
+        unreadBadge.setAttribute('data-unread-badge', 'true');
+        unreadBadge.setAttribute('aria-label', unreadCount === 1 ? '1 unread message' : `${unreadCount} unread messages`);
+        unreadBadge.textContent = String(unreadCount);
+        badgesDiv.appendChild(unreadBadge);
+    }
+}
+
+function patchSidebarConversationItemElement(link, summary, activeConvId = null) {
+    const f = extractSidebarSummaryFields(summary, activeConvId);
+    if (!f || !link) return null;
+
+    const targetHref = `/chat/${encodeURIComponent(f.convId)}`;
+    if (link.href !== targetHref) link.href = targetHref;
+    link.setAttribute('data-conversation-link', 'true');
+    if (f.isActive) {
+        link.setAttribute('aria-current', 'page');
+    } else if (typeof link.removeAttribute === 'function') {
+        link.removeAttribute('aria-current');
+    }
+    link.setAttribute('data-conversation-id', f.convId);
+    if (f.peerId) link.setAttribute('data-peer-user-id', f.peerId);
+    link.setAttribute('data-peer-name', f.peerName);
+    link.setAttribute('data-peer-handle', f.peerHandle);
+    link.setAttribute('data-last-message-id', f.lastMessageId);
+    link.setAttribute('data-is-pinned', f.isPinned ? 'true' : 'false');
+    link.setAttribute('data-is-muted', f.isMuted ? 'true' : 'false');
+    link.setAttribute('data-unread-count', String(f.unreadCount));
+    link.setAttribute('data-search', f.searchAttr);
+    link.className = f.isActive ? ACTIVE_ROW_CLASS : INACTIVE_ROW_CLASS;
+
+    if (typeof link.querySelector === 'function') {
+        const avatarSlot = link.querySelector('[data-avatar-slot]');
+        if (avatarSlot && typeof avatarSlot.getAttribute === 'function') {
+            const prevUid = normalizeId(avatarSlot.getAttribute('data-avatar-user-id'));
+            const prevVer = avatarSlot.getAttribute('data-avatar-version') || '';
+            const prevName = avatarSlot.getAttribute('data-avatar-name') || '';
+
+            if (f.peerId) avatarSlot.setAttribute('data-avatar-user-id', f.peerId);
+            avatarSlot.setAttribute('data-avatar-version', f.peerAvatarVersionStr);
+            avatarSlot.setAttribute('data-avatar-name', f.peerName);
+            avatarSlot.setAttribute('data-avatar-handle', f.peerHandle);
+
+            const initialsEl = typeof avatarSlot.querySelector === 'function'
+                ? avatarSlot.querySelector('[data-avatar-initials]')
+                : null;
+            if (initialsEl && initialsEl.textContent !== f.initials) {
+                initialsEl.textContent = f.initials;
+            }
+            if (prevUid !== f.peerId || prevVer !== f.peerAvatarVersionStr || prevName !== f.peerName) {
+                hydrateAvatarSlot(avatarSlot);
+            }
+        }
+
+        const presenceDot = link.querySelector('.presence-indicator-dot');
+        if (presenceDot) {
+            presenceDot.className = `presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ${f.isOnline ? 'bg-[#6F9473]' : 'bg-stone-400 dark:bg-stone-500'} border-2 border-[#F0E9DF] dark:border-[#3A3835]`;
+        }
+
+        const nameSpan = link.querySelector('.text-xs.font-bold');
+        if (nameSpan && nameSpan.textContent !== f.peerName) {
+            nameSpan.textContent = f.peerName;
+        }
+
+        const badgesDiv = link.querySelector('.conversation-badges');
+        syncSidebarItemBadges(badgesDiv, f.isPinned, f.isMuted, f.unreadCount);
+
+        const previewSpan = link.querySelector('.conversation-last-message');
+        if (previewSpan) {
+            if (previewSpan.textContent !== f.previewText) {
+                previewSpan.textContent = f.previewText;
+            }
+            const handleSpan = previewSpan.parentNode && previewSpan.parentNode.children
+                ? previewSpan.parentNode.children[1]
+                : null;
+            const handleText = f.peerHandle ? `@${f.peerHandle}` : '';
+            if (handleSpan && handleSpan.textContent !== handleText) {
+                handleSpan.textContent = handleText;
+            }
+        }
+    }
+
+    return link;
+}
+
+export function createSidebarConversationItemElement(summary, activeConvId = null) {
+    if (!summary || typeof document === 'undefined' || typeof document.createElement !== 'function') return null;
+
+    const f = extractSidebarSummaryFields(summary, activeConvId);
+    if (!f) return null;
 
     const link = document.createElement('a');
-    link.href = `/chat/${encodeURIComponent(convId)}`;
+    link.href = `/chat/${encodeURIComponent(f.convId)}`;
     link.setAttribute('data-conversation-link', 'true');
-    if (isActive) {
+    if (f.isActive) {
         link.setAttribute('aria-current', 'page');
     }
-    link.setAttribute('data-conversation-id', convId);
-    if (peerId) link.setAttribute('data-peer-user-id', peerId);
-    link.setAttribute('data-peer-name', peerName);
-    link.setAttribute('data-peer-handle', peerHandle);
-    link.setAttribute('data-last-message-id', lastMessageId);
-    link.setAttribute('data-is-pinned', isPinned ? 'true' : 'false');
-    link.setAttribute('data-is-muted', isMuted ? 'true' : 'false');
-    link.setAttribute('data-unread-count', String(unreadCount));
-    link.setAttribute('data-search', `${peerName} ${peerHandle} ${previewRaw || ''}`.trim());
-    link.className = isActive ? ACTIVE_ROW_CLASS : INACTIVE_ROW_CLASS;
+    link.setAttribute('data-conversation-id', f.convId);
+    if (f.peerId) link.setAttribute('data-peer-user-id', f.peerId);
+    link.setAttribute('data-peer-name', f.peerName);
+    link.setAttribute('data-peer-handle', f.peerHandle);
+    link.setAttribute('data-last-message-id', f.lastMessageId);
+    link.setAttribute('data-is-pinned', f.isPinned ? 'true' : 'false');
+    link.setAttribute('data-is-muted', f.isMuted ? 'true' : 'false');
+    link.setAttribute('data-unread-count', String(f.unreadCount));
+    link.setAttribute('data-search', f.searchAttr);
+    link.className = f.isActive ? ACTIVE_ROW_CLASS : INACTIVE_ROW_CLASS;
 
     const avatarWrap = document.createElement('div');
     avatarWrap.className = 'relative flex-shrink-0';
 
     const avatarCircle = document.createElement('div');
-    avatarCircle.className = 'w-11 h-11 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs';
-    avatarCircle.textContent = initials;
+    avatarCircle.className = 'w-11 h-11 rounded-full overflow-hidden bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs';
+    avatarCircle.setAttribute('data-avatar-slot', 'true');
+    if (f.peerId) avatarCircle.setAttribute('data-avatar-user-id', f.peerId);
+    avatarCircle.setAttribute('data-avatar-version', f.peerAvatarVersionStr);
+    avatarCircle.setAttribute('data-avatar-name', f.peerName);
+    avatarCircle.setAttribute('data-avatar-handle', f.peerHandle);
+    const initialsSpan = document.createElement('span');
+    initialsSpan.setAttribute('data-avatar-initials', 'true');
+    initialsSpan.textContent = f.initials;
+    avatarCircle.appendChild(initialsSpan);
+    hydrateAvatarSlot(avatarCircle);
     avatarWrap.appendChild(avatarCircle);
 
     const presenceDot = document.createElement('span');
-    presenceDot.className = `presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ${isOnline ? 'bg-[#6F9473]' : 'bg-stone-400 dark:bg-stone-500'} border-2 border-[#F0E9DF] dark:border-[#3A3835]`;
+    presenceDot.className = `presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full ${f.isOnline ? 'bg-[#6F9473]' : 'bg-stone-400 dark:bg-stone-500'} border-2 border-[#F0E9DF] dark:border-[#3A3835]`;
     avatarWrap.appendChild(presenceDot);
     link.appendChild(avatarWrap);
 
@@ -476,36 +616,12 @@ export function createSidebarConversationItemElement(summary, activeConvId = nul
 
     const nameSpan = document.createElement('span');
     nameSpan.className = 'text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate';
-    nameSpan.textContent = peerName;
+    nameSpan.textContent = f.peerName;
     topRow.appendChild(nameSpan);
 
     const badgesDiv = document.createElement('div');
     badgesDiv.className = 'conversation-badges flex items-center gap-1 flex-shrink-0';
-
-    if (isPinned) {
-        const pinIcon = document.createElement('span');
-        pinIcon.className = 'material-symbols-outlined text-[14px] text-[#A07860] dark:text-[#D8C080]';
-        pinIcon.title = 'Pinned';
-        pinIcon.textContent = 'push_pin';
-        badgesDiv.appendChild(pinIcon);
-    }
-
-    if (isMuted) {
-        const muteIcon = document.createElement('span');
-        muteIcon.className = 'material-symbols-outlined text-[14px] text-[#6E6560] dark:text-[#C9C0B9]';
-        muteIcon.title = 'Muted';
-        muteIcon.textContent = 'volume_off';
-        badgesDiv.appendChild(muteIcon);
-    }
-
-    if (unreadCount > 0) {
-        const unreadBadge = document.createElement('span');
-        unreadBadge.className = 'conversation-unread-badge px-1.5 py-0.5 text-[10px] font-bold rounded-full bg-[#B3929D] text-white';
-        unreadBadge.setAttribute('data-unread-badge', 'true');
-        unreadBadge.setAttribute('aria-label', unreadCount === 1 ? '1 unread message' : `${unreadCount} unread messages`);
-        unreadBadge.textContent = String(unreadCount);
-        badgesDiv.appendChild(unreadBadge);
-    }
+    syncSidebarItemBadges(badgesDiv, f.isPinned, f.isMuted, f.unreadCount);
 
     topRow.appendChild(badgesDiv);
     body.appendChild(topRow);
@@ -515,18 +631,42 @@ export function createSidebarConversationItemElement(summary, activeConvId = nul
 
     const previewSpan = document.createElement('span');
     previewSpan.className = 'text-[11px] text-[#6E6560] dark:text-[#C9C0B9] truncate conversation-last-message';
-    previewSpan.textContent = previewText;
+    previewSpan.textContent = f.previewText;
     bottomRow.appendChild(previewSpan);
 
     const handleSpan = document.createElement('span');
     handleSpan.className = 'text-[10px] text-[#A07860] dark:text-[#C9C0B9] flex-shrink-0';
-    handleSpan.textContent = peerHandle ? `@${peerHandle}` : '';
+    handleSpan.textContent = f.peerHandle ? `@${f.peerHandle}` : '';
     bottomRow.appendChild(handleSpan);
 
     body.appendChild(bottomRow);
     link.appendChild(body);
 
     return link;
+}
+
+/**
+ * Updates peer display name and avatar version across matching sidebar items.
+ * @param {string|object} peerUserId
+ * @param {string|null|undefined} displayName
+ */
+export function updateSidebarPeerProfile(peerUserId, displayName) {
+    const norm = normalizeId(peerUserId).trim().toLowerCase();
+    if (!norm || !displayName || typeof document === 'undefined') return;
+    const items = getSidebarItems();
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (!item || typeof item.getAttribute !== 'function') continue;
+        const itemPeerId = String(item.getAttribute('data-peer-user-id') || '').trim().toLowerCase();
+        if (itemPeerId !== norm) continue;
+        item.setAttribute('data-peer-name', displayName);
+        if (typeof item.querySelector === 'function') {
+            const nameEl = item.querySelector('.text-xs.font-bold');
+            if (nameEl) nameEl.textContent = displayName;
+            const previewEl = item.querySelector('.conversation-last-message');
+            updateSidebarItemSearchAttr(item, previewEl ? previewEl.textContent : '');
+        }
+    }
 }
 
 /**
@@ -608,25 +748,77 @@ export function renderSidebarConversations(conversations, activeConvId = null) {
         itemsContainer = document.createElement('div');
         itemsContainer.className = 'p-2 space-y-1 conversation-items-container';
         listEl.appendChild(itemsContainer);
+
+        const frag = typeof document.createDocumentFragment === 'function'
+            ? document.createDocumentFragment()
+            : itemsContainer;
+
+        for (let i = 0; i < conversations.length; i++) {
+            const el = createSidebarConversationItemElement(conversations[i], effectiveActiveId);
+            if (el) {
+                frag.appendChild(el);
+            }
+        }
+
+        if (frag !== itemsContainer) {
+            itemsContainer.appendChild(frag);
+        }
     } else {
-        while (itemsContainer.firstChild) {
-            itemsContainer.removeChild(itemsContainer.firstChild);
+        const existingById = new Map();
+        const currentChildren = Array.from(itemsContainer.children || itemsContainer.childNodes || []);
+        for (let i = 0; i < currentChildren.length; i++) {
+            const child = currentChildren[i];
+            const cid = child && typeof child.getAttribute === 'function'
+                ? normalizeId(child.getAttribute('data-conversation-id')).trim().toLowerCase()
+                : '';
+            if (cid && !existingById.has(cid)) {
+                existingById.set(cid, child);
+            } else if (child && typeof child.remove === 'function') {
+                child.remove();
+            } else if (child && child.parentNode === itemsContainer && typeof itemsContainer.removeChild === 'function') {
+                itemsContainer.removeChild(child);
+            }
         }
-    }
 
-    const frag = typeof document.createDocumentFragment === 'function'
-        ? document.createDocumentFragment()
-        : itemsContainer;
-
-    for (let i = 0; i < conversations.length; i++) {
-        const el = createSidebarConversationItemElement(conversations[i], effectiveActiveId);
-        if (el) {
-            frag.appendChild(el);
+        const orderedNodes = [];
+        for (let i = 0; i < conversations.length; i++) {
+            const summary = conversations[i];
+            const cid = normalizeId(summary?.conversationId ?? summary?.ConversationId ?? summary?.id ?? summary?.Id).trim().toLowerCase();
+            if (!cid) continue;
+            const existing = existingById.get(cid);
+            if (existing) {
+                existingById.delete(cid);
+                patchSidebarConversationItemElement(existing, summary, effectiveActiveId);
+                orderedNodes.push(existing);
+            } else {
+                const created = createSidebarConversationItemElement(summary, effectiveActiveId);
+                if (created) orderedNodes.push(created);
+            }
         }
-    }
 
-    if (frag !== itemsContainer) {
-        itemsContainer.appendChild(frag);
+        for (const staleEl of existingById.values()) {
+            if (typeof staleEl.remove === 'function') {
+                staleEl.remove();
+            } else if (staleEl.parentNode === itemsContainer && typeof itemsContainer.removeChild === 'function') {
+                itemsContainer.removeChild(staleEl);
+            }
+        }
+
+        for (let i = 0; i < orderedNodes.length; i++) {
+            const desired = orderedNodes[i];
+            const liveChildren = itemsContainer.children || itemsContainer.childNodes || [];
+            const currentAtIndex = liveChildren[i] || null;
+            if (currentAtIndex !== desired) {
+                if (desired.parentNode === itemsContainer && typeof itemsContainer.removeChild === 'function') {
+                    itemsContainer.removeChild(desired);
+                }
+                if (typeof itemsContainer.insertBefore === 'function') {
+                    itemsContainer.insertBefore(desired, (itemsContainer.children || itemsContainer.childNodes || [])[i] || null);
+                } else if (typeof itemsContainer.appendChild === 'function') {
+                    itemsContainer.appendChild(desired);
+                }
+            }
+        }
     }
 
     applySidebarSearchFilter();

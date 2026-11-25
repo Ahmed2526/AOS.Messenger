@@ -9,6 +9,8 @@
 import { sendMessage as apiSendMessage } from './api-client.js';
 import { formatMessagePreview, getMessageId, insertMessageOrdered, scrollToBottom } from './message-renderer.js';
 import { updateSidebarLastMessage } from './conversation-list.js';
+import { evictUserAvatarCache, closeAvatarLightboxIfUser } from './avatar-loader.js';
+import { showChatActionError, hideChatActionError } from './chat-action-error.js';
 
 const POLICY_BASE_CLASS = 'px-4 py-2 text-xs text-center font-medium';
 const POLICY_ERROR_CLASS = 'px-4 py-2 bg-red-50 dark:bg-red-950/30 border-b border-red-200 dark:border-red-900/50 text-xs text-red-700 dark:text-red-300 text-center font-medium';
@@ -19,11 +21,10 @@ const POLICY_INFO_CLASS = 'px-4 py-2 bg-[#F0E9DF] dark:bg-[#45423E] border-b bor
  * @param {{ state: object, typingEmitter?: object|null, emojiPicker?: object|null, emojiAutocomplete?: object|null }} deps
  * @returns {object}
  */
-export function createComposer({ state, typingEmitter = null, emojiPicker = null, emojiAutocomplete = null, mediaUploader = null }) {
+export function createComposer({ state, typingEmitter = null, emojiPicker = null, emojiAutocomplete = null, mediaUploader = null, onStickerSent = null }) {
     let isSending = false;
     let locked = true;
     let activeReplyTo = null;
-    let actionErrorTimer = null;
     const transientResetHooks = new Set();
 
     let initialized = false;
@@ -172,28 +173,11 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
     }
 
     function showActionError(message) {
-        if (typeof document === 'undefined' || !message || typeof document.getElementById !== 'function') return;
-        const el = document.getElementById('chat-action-error');
-        if (!el) return;
-        el.textContent = message;
-        if (el.classList) el.classList.remove('hidden');
-        if (actionErrorTimer) clearTimeout(actionErrorTimer);
-        actionErrorTimer = setTimeout(() => {
-            hideActionError();
-        }, 5000);
+        showChatActionError(message, 5000);
     }
 
     function hideActionError() {
-        if (actionErrorTimer) {
-            clearTimeout(actionErrorTimer);
-            actionErrorTimer = null;
-        }
-        if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
-        const el = document.getElementById('chat-action-error');
-        if (el) {
-            el.textContent = '';
-            if (el.classList) el.classList.add('hidden');
-        }
+        hideChatActionError();
     }
 
     /**
@@ -334,6 +318,11 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
                     state.activeMeta.isBlocked = true;
                     state.activeMeta.canSend = false;
                 }
+                const peerId = state.activeMeta?.otherParticipantId ?? state.activeMeta?.OtherParticipantId;
+                if (peerId) {
+                    evictUserAvatarCache(peerId);
+                    closeAvatarLightboxIfUser(peerId);
+                }
                 setLocked(true);
                 showPolicyNotice('You cannot send messages in this conversation.', 'error');
                 return null;
@@ -358,6 +347,91 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
                         currentInput.focus();
                     }
                 }
+            }
+        }
+    }
+
+    async function sendSticker(sticker) {
+        if (isSending || locked || !sticker) return null;
+        const stickerId = sticker.id || sticker.Id || (typeof sticker === 'string' ? sticker : '');
+        if (!stickerId) return null;
+
+        const targetConvId = state.activeConversationId;
+        if (!targetConvId) return null;
+
+        const epoch = state.switchEpoch;
+        const replyToMessageId = activeReplyTo ? activeReplyTo.id : null;
+
+        isSending = true;
+        closeEmojiOverlays();
+        syncDisabledState();
+
+        if (typingEmitter && typeof typingEmitter.stopTyping === 'function') {
+            typingEmitter.stopTyping();
+        }
+
+        const payload = {
+            content: null,
+            idempotencyKey: crypto.randomUUID(),
+            replyToMessageId: replyToMessageId,
+            stickerId: stickerId
+        };
+
+        try {
+            const sentMessage = await apiSendMessage(targetConvId, payload);
+            const msgId = getMessageId(sentMessage);
+            const previewText = formatMessagePreview(sentMessage) || '🏷️ Sticker';
+
+            updateSidebarLastMessage(targetConvId, previewText, msgId, false, false, true);
+            if (typeof onStickerSent === 'function') {
+                onStickerSent(sticker);
+            }
+
+            if (epoch !== state.switchEpoch) {
+                return sentMessage;
+            }
+
+            const containerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+                ? document.getElementById('messages-container')
+                : null;
+            if (containerEl) {
+                insertMessageOrdered(containerEl, sentMessage, state.currentUserId, state.activeMeta);
+            }
+            if (msgId && state.messagesById && typeof state.messagesById.set === 'function') {
+                state.messagesById.set(msgId, sentMessage);
+            }
+
+            clearReply();
+            hideActionError();
+            scrollToBottom(true);
+            return sentMessage;
+        } catch (err) {
+            if (epoch !== state.switchEpoch) return null;
+            if (err?.code === 'UNAUTHORIZED' || err?.code === 'CSRF_MISMATCH') return null;
+            if (err?.status === 403 || err?.code === 'FORBIDDEN') {
+                if (state.activeMeta && typeof state.activeMeta === 'object') {
+                    state.activeMeta.isBlocked = true;
+                    state.activeMeta.canSend = false;
+                }
+                const peerId = state.activeMeta?.otherParticipantId ?? state.activeMeta?.OtherParticipantId;
+                if (peerId) {
+                    evictUserAvatarCache(peerId);
+                    closeAvatarLightboxIfUser(peerId);
+                }
+                setLocked(true);
+                showPolicyNotice('You cannot send messages in this conversation.', 'error');
+                return null;
+            }
+            if (err?.status === 429 || err?.code === 'RATE_LIMITED') {
+                showActionError('You are sending messages too quickly. Please wait a moment.');
+                return null;
+            }
+            showActionError(err?.message || 'Could not send sticker. Please try again.');
+            return null;
+        } finally {
+            if (epoch === state.switchEpoch) {
+                isSending = false;
+                syncDisabledState();
             }
         }
     }
@@ -387,7 +461,7 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
             emojiAutocomplete.close();
         }
         if (emojiPicker && typeof emojiPicker.toggle === 'function') {
-            emojiPicker.toggle(emojiBtn, inputEl, { surface: 'composer' });
+            emojiPicker.toggle(emojiBtn, inputEl, { surface: 'composer', initialMode: 'emoji' });
         }
     };
 
@@ -490,6 +564,7 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         hideActionError,
         registerTransientResetHook,
         resetTransientState,
-        sendMessage
+        sendMessage,
+        sendSticker
     };
 }

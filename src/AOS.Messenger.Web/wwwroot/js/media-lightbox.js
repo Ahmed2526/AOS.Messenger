@@ -7,7 +7,13 @@
  * - Pure DOM updates via textContent / element properties (zero innerHTML, zero inline style="...").
  */
 
-import { buildMediaInlineUrl, getMediaDownloadUrl } from './api-client.js';
+import { getMediaDownloadUrl } from './api-client.js';
+import {
+    createCachedImageLoader,
+    parkLoadedFallbackImage,
+    DEFAULT_CHAT_PHOTO_MAX_ITEMS,
+    DEFAULT_CHAT_PHOTO_MAX_BYTES
+} from './memory-image-cache.js';
 
 /**
  * Validates that a resolved media URL is either strict HTTPS or a single-slash /dev-media/ endpoint.
@@ -21,9 +27,13 @@ export function isSafeMediaUrl(rawUrl) {
     if (!trimmed) return false;
 
     if (trimmed.startsWith('/')) {
-        if (trimmed.startsWith('//')) return false;
+        if (trimmed.startsWith('//') || trimmed.includes('..') || trimmed.includes('\\')) {
+            return false;
+        }
         return /^\/dev-media\/download(?:\?|$)/i.test(trimmed) ||
-               /^\/api\/conversations\/[0-9a-f-]+\/messages\/\d+\/media\/[0-9a-f-]+(?:\?|$)/i.test(trimmed);
+               /^\/api\/conversations\/[0-9a-f-]+\/messages\/\d+\/media\/[0-9a-f-]+(?:\?|$)/i.test(trimmed) ||
+               /^\/api\/users\/[0-9a-f-]+\/avatar(?:\?|$)/i.test(trimmed) ||
+               /^\/api\/stickers\/[0-9a-f-]+\/image(?:\?|$)/i.test(trimmed);
     }
 
     try {
@@ -70,10 +80,26 @@ export function triggerSafeDownloadAnchor(url, fileName = '') {
 
 /**
  * Creates the accessible image Lightbox controller bound to #media-lightbox-modal.
- * @param {{ getMediaUrlFn?: Function }} [options]
+ * Caches loaded full-resolution photos in a bounded tab-only RAM LRU cache for the active
+ * conversation and revokes ObjectURLs cleanly on delete, switch, or logout.
+ * @param {{
+ *   getMediaUrlFn?: Function,
+ *   fetchFn?: Function|null,
+ *   createObjectUrlFn?: Function|null,
+ *   revokeObjectUrlFn?: Function|null,
+ *   maxCachedItems?: number,
+ *   maxCachedBytes?: number
+ * }} [options]
  * @returns {object}
  */
-export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}) {
+export function createMediaLightbox({
+    getMediaUrlFn = getMediaDownloadUrl,
+    fetchFn = null,
+    createObjectUrlFn = null,
+    revokeObjectUrlFn = null,
+    maxCachedItems = DEFAULT_CHAT_PHOTO_MAX_ITEMS,
+    maxCachedBytes = DEFAULT_CHAT_PHOTO_MAX_BYTES
+} = {}) {
     if (typeof document === 'undefined') {
         return {
             open: () => {},
@@ -82,16 +108,39 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
             resetForSwitch: () => {},
             wipe: () => {},
             destroy: () => {},
-            isOpen: () => false
+            isOpen: () => false,
+            getCacheStats: () => ({ count: 0, totalBytes: 0, maxItems: maxCachedItems, maxBytes: maxCachedBytes, inFlightCount: 0 })
         };
     }
+
+    const photoLoader = createCachedImageLoader({
+        maxItems: maxCachedItems,
+        maxBytes: maxCachedBytes,
+        isSafeUrlFn: isSafeMediaUrl,
+        fetchFn,
+        createObjectUrlFn,
+        revokeObjectUrlFn
+    });
 
     let items = [];
     let currentIndex = -1;
     let activeMessageId = null;
+    let activeCacheKey = null;
     let retriedCurrent = false;
     let openGeneration = 0;
     let lastFocusedElement = null;
+    let activeTransientBlob = null;
+    let activeFallbackElement = null;
+    let pendingFallback = null;
+    let loadedFallback = null;
+    let boundPrimaryImg = null;
+
+    function makeCacheKey(item) {
+        const conv = String(item?.conversationId || '').trim().toLowerCase();
+        const msg = String(item?.messageId || '').trim();
+        const media = String(item?.mediaId || '').trim().toLowerCase();
+        return `${conv}:${msg}:${media}:original`;
+    }
 
     function els() {
         return {
@@ -99,6 +148,7 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
             title: document.getElementById('media-lightbox-title'),
             counter: document.getElementById('media-lightbox-counter'),
             img: document.getElementById('media-lightbox-img'),
+            loading: document.getElementById('media-lightbox-loading'),
             error: document.getElementById('media-lightbox-error'),
             prevBtn: document.getElementById('media-lightbox-prev-btn'),
             nextBtn: document.getElementById('media-lightbox-next-btn'),
@@ -107,12 +157,145 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
         };
     }
 
+    function setLoadingVisible(visible) {
+        const { img, loading } = els();
+        let loadingEl = loading;
+        if (visible && !loadingEl && img && img.parentNode && typeof document.createElement === 'function' && typeof img.parentNode.insertBefore === 'function') {
+            loadingEl = document.createElement('div');
+            loadingEl.id = 'media-lightbox-loading';
+            loadingEl.className = 'flex items-center gap-2 text-xs text-white/80';
+            const spin = document.createElement('span');
+            spin.className = 'material-symbols-outlined animate-spin text-[20px]';
+            spin.textContent = 'progress_activity';
+            const txt = document.createElement('span');
+            txt.textContent = 'Loading photo...';
+            loadingEl.appendChild(spin);
+            loadingEl.appendChild(txt);
+            img.parentNode.insertBefore(loadingEl, img);
+        }
+        if (loadingEl && loadingEl.classList) {
+            loadingEl.classList.toggle('hidden', !visible);
+        }
+    }
+
+    function revokeTransientBlob() {
+        if (!activeTransientBlob) return;
+        try {
+            activeTransientBlob.revokeFn(activeTransientBlob.url);
+        } catch {}
+        activeTransientBlob = null;
+    }
+
+    function hideActiveFallbackElement() {
+        if (!activeFallbackElement) return;
+        if (activeFallbackElement.classList) {
+            activeFallbackElement.classList.add('hidden');
+        }
+        activeFallbackElement = null;
+    }
+
+    function hasActiveImgSrc(imgEl) {
+        if (!imgEl) return false;
+        return typeof imgEl.hasAttribute === 'function' && imgEl.hasAttribute('src')
+            ? Boolean(imgEl.getAttribute('src'))
+            : Boolean(imgEl.src);
+    }
+
+    const onImgLoadEvent = () => {
+        setLoadingVisible(false);
+        if (pendingFallback && boundPrimaryImg && hasActiveImgSrc(boundPrimaryImg)) {
+            loadedFallback = pendingFallback;
+        }
+    };
+
+    const onImgErrorEvent = () => {
+        handleImgError();
+    };
+
+    function bindPrimaryImgListeners(imgEl) {
+        if (!imgEl || boundPrimaryImg === imgEl) return;
+        if (boundPrimaryImg && typeof boundPrimaryImg.removeEventListener === 'function') {
+            boundPrimaryImg.removeEventListener('load', onImgLoadEvent);
+            boundPrimaryImg.removeEventListener('error', onImgErrorEvent);
+        }
+        boundPrimaryImg = imgEl;
+        if (typeof imgEl.addEventListener === 'function') {
+            imgEl.addEventListener('load', onImgLoadEvent);
+            imgEl.addEventListener('error', onImgErrorEvent);
+        }
+    }
+
+    function parkCurrentFallbackIfLoaded() {
+        const currentLoaded = loadedFallback;
+        loadedFallback = null;
+        pendingFallback = null;
+        if (!currentLoaded) return;
+
+        const epochs = photoLoader.getEpochs(currentLoaded.scopeKey);
+        if (epochs.globalEpoch !== currentLoaded.cacheEpoch || epochs.scopeEpoch !== currentLoaded.scopeEpoch) {
+            return;
+        }
+
+        const { img } = els();
+        if (!img || !hasActiveImgSrc(img)) return;
+        const parked = parkLoadedFallbackImage(img);
+        if (!parked) return;
+
+        const parkedEl = parked.parkedElement;
+        const parkedCacheKey = currentLoaded.cacheKey;
+        if (typeof parkedEl.removeEventListener === 'function') {
+            parkedEl.removeEventListener('load', onImgLoadEvent);
+            parkedEl.removeEventListener('error', onImgErrorEvent);
+        }
+        parkedEl.addEventListener?.('error', () => {
+            const wasActive = isOpen() && activeFallbackElement === parkedEl;
+            photoLoader.evictKey(parkedCacheKey);
+            if (wasActive) {
+                hideActiveFallbackElement();
+                handleImgError({ fromElement: parkedEl });
+            }
+        });
+
+        boundPrimaryImg = null;
+        bindPrimaryImgListeners(parked.freshPrimary);
+        photoLoader.setElement(currentLoaded.cacheKey, parked.parkedElement, currentLoaded.meta);
+    }
+
+    function clearSlideMedia({ cacheCurrentFallback = true } = {}) {
+        setLoadingVisible(false);
+        if (cacheCurrentFallback) {
+            parkCurrentFallbackIfLoaded();
+        } else {
+            loadedFallback = null;
+            pendingFallback = null;
+        }
+        revokeTransientBlob();
+        hideActiveFallbackElement();
+
+        const { img } = els();
+        if (img) {
+            if (typeof img.removeAttribute === 'function') {
+                img.removeAttribute('src');
+            } else {
+                img.src = '';
+            }
+            img.alt = '';
+            if (img.classList) {
+                img.classList.add('hidden');
+            }
+        }
+    }
+
     function isOpen() {
         const { modal } = els();
         return !!(modal && modal.classList && !modal.classList.contains('hidden'));
     }
 
     function renderSlide() {
+        openGeneration++;
+        const gen = openGeneration;
+        clearSlideMedia({ cacheCurrentFallback: true });
+
         const { title, counter, img, error, prevBtn, nextBtn } = els();
         const item = items[currentIndex];
         if (!item) return;
@@ -131,11 +314,108 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
         if (prevBtn) prevBtn.classList.toggle('hidden', items.length <= 1);
         if (nextBtn) nextBtn.classList.toggle('hidden', items.length <= 1);
         if (error) error.classList.add('hidden');
-        if (img) {
-            img.classList.remove('hidden');
+        if (!img) return;
+
+        bindPrimaryImgListeners(img);
+        const cacheKey = makeCacheKey(item);
+        activeCacheKey = cacheKey;
+        const cached = photoLoader.get(cacheKey);
+        if (cached?.kind === 'blob') {
             img.alt = item.fileName || 'Image attachment';
-            img.src = buildMediaInlineUrl(item.conversationId, item.messageId, item.mediaId);
+            if (img.classList) img.classList.remove('hidden');
+            img.src = cached.objectUrl;
+            return;
         }
+        if (cached?.kind === 'element' && cached.element) {
+            const fallbackEl = cached.element;
+            if (!fallbackEl.parentNode && img.parentNode && typeof img.parentNode.insertBefore === 'function') {
+                img.parentNode.insertBefore(fallbackEl, img);
+            }
+            fallbackEl.alt = item.fileName || 'Image attachment';
+            if (fallbackEl.classList) fallbackEl.classList.remove('hidden');
+            activeFallbackElement = fallbackEl;
+            return;
+        }
+
+        img.alt = item.fileName || 'Image attachment';
+        setLoadingVisible(true);
+
+        const resolveSignedUrl = async (signal) => {
+            const payload = await getMediaUrlFn(item.conversationId, item.messageId, item.mediaId, {
+                download: false,
+                variant: 'original',
+                signal
+            });
+            return payload?.url ?? payload?.Url ?? '';
+        };
+
+        Promise.resolve(photoLoader.load({
+            cacheKey,
+            scopeKey: String(item.messageId || ''),
+            meta: {
+                conversationId: String(item.conversationId || ''),
+                messageId: String(item.messageId || ''),
+                mediaId: String(item.mediaId || '')
+            },
+            getSignedUrlFn: resolveSignedUrl,
+            refreshSignedUrlFn: resolveSignedUrl
+        })).then((result) => {
+            if (gen !== openGeneration || !isOpen()) {
+                if (result?.status === 'blob' && !result.stored && result.revokeFn && (!isOpen() || activeCacheKey !== cacheKey)) {
+                    try { result.revokeFn(result.objectUrl); } catch {}
+                }
+                return;
+            }
+            setLoadingVisible(false);
+
+            const { img: curImg, error: curErr } = els();
+            if (!curImg) return;
+            bindPrimaryImgListeners(curImg);
+
+            if (result?.status === 'blob') {
+                if (!result.stored && result.revokeFn) {
+                    activeTransientBlob = { url: result.objectUrl, revokeFn: result.revokeFn };
+                }
+                if (curErr) curErr.classList.add('hidden');
+                curImg.alt = item.fileName || 'Image attachment';
+                if (curImg.classList) curImg.classList.remove('hidden');
+                curImg.src = result.objectUrl;
+                return;
+            }
+
+            if (result?.status === 'fallback-url') {
+                pendingFallback = {
+                    cacheKey,
+                    url: result.url,
+                    cacheEpoch: result.cacheEpoch,
+                    scopeEpoch: result.scopeEpoch,
+                    scopeKey: result.scopeKey,
+                    meta: {
+                        conversationId: String(item.conversationId || ''),
+                        messageId: String(item.messageId || ''),
+                        mediaId: String(item.mediaId || ''),
+                        cacheEpoch: result.cacheEpoch,
+                        scopeEpoch: result.scopeEpoch,
+                        scopeKey: result.scopeKey
+                    }
+                };
+                if (curErr) curErr.classList.add('hidden');
+                curImg.alt = item.fileName || 'Image attachment';
+                if (curImg.classList) curImg.classList.remove('hidden');
+                curImg.src = result.url;
+                return;
+            }
+
+            if (result?.status === 'aborted') {
+                return;
+            }
+
+            if (curImg.classList) curImg.classList.add('hidden');
+            if (curErr) {
+                curErr.textContent = 'Media unavailable';
+                curErr.classList.remove('hidden');
+            }
+        });
     }
 
     function getFocusableElements() {
@@ -167,22 +447,19 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
         }
     }
 
-    function close() {
-        const { modal, img, title, counter, error, prevBtn, nextBtn } = els();
+    function close({ cacheCurrentFallback = true } = {}) {
+        const { modal, title, counter, error, prevBtn, nextBtn } = els();
         const restoreTarget = lastFocusedElement;
         lastFocusedElement = null;
 
         openGeneration++;
+        clearSlideMedia({ cacheCurrentFallback });
         items = [];
         currentIndex = -1;
         activeMessageId = null;
+        activeCacheKey = null;
         retriedCurrent = false;
 
-        if (img) {
-            img.removeAttribute('src');
-            img.alt = '';
-            img.classList.remove('hidden');
-        }
         if (error) error.classList.add('hidden');
         if (title) title.textContent = '';
         if (counter) {
@@ -199,22 +476,35 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
     }
 
     function closeIfMessage(msgId) {
-        if (!msgId || !activeMessageId) return;
-        if (String(msgId) === String(activeMessageId)) {
-            close();
+        if (msgId === null || msgId === undefined || msgId === '') return;
+        const targetId = String(msgId);
+        if (activeMessageId && targetId === String(activeMessageId)) {
+            close({ cacheCurrentFallback: false });
         }
+        photoLoader.evictScope(targetId);
+    }
+
+    function resetAndWipe() {
+        close({ cacheCurrentFallback: false });
+        photoLoader.clear();
     }
 
     function navigate(delta) {
         if (items.length <= 1 || currentIndex < 0) return;
         currentIndex = (currentIndex + delta + items.length) % items.length;
+        activeMessageId = items[currentIndex]?.messageId ? String(items[currentIndex].messageId) : activeMessageId;
         renderSlide();
     }
 
-    async function handleImgError() {
+    async function handleImgError({ fromElement = null } = {}) {
         const { img, error } = els();
         const item = items[currentIndex];
-        if (!item || !img) return;
+        if (!item || !img || (!fromElement && !hasActiveImgSrc(img))) return;
+
+        pendingFallback = null;
+        loadedFallback = null;
+        revokeTransientBlob();
+        photoLoader.evictKey(makeCacheKey(item));
 
         if (retriedCurrent) {
             img.classList.add('hidden');
@@ -228,10 +518,12 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
         retriedCurrent = true;
         const gen = openGeneration;
         try {
-            const payload = await getMediaUrlFn(item.conversationId, item.messageId, item.mediaId, { download: false });
-            if (gen !== openGeneration) return;
+            const payload = await getMediaUrlFn(item.conversationId, item.messageId, item.mediaId, { download: false, variant: 'original' });
+            if (gen !== openGeneration || !isOpen()) return;
             const resolvedUrl = payload?.url ?? payload?.Url ?? '';
             if (isSafeMediaUrl(resolvedUrl)) {
+                bindPrimaryImgListeners(img);
+                img.alt = item.fileName || 'Image attachment';
                 img.classList.remove('hidden');
                 if (error) error.classList.add('hidden');
                 img.src = resolvedUrl;
@@ -256,7 +548,7 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
 
         const gen = openGeneration;
         try {
-            const payload = await getMediaUrlFn(item.conversationId, item.messageId, item.mediaId, { download: true });
+            const payload = await getMediaUrlFn(item.conversationId, item.messageId, item.mediaId, { download: true, variant: 'original' });
             if (gen !== openGeneration) return;
             const resolvedUrl = payload?.url ?? payload?.Url ?? '';
             if (isSafeMediaUrl(resolvedUrl)) {
@@ -371,37 +663,35 @@ export function createMediaLightbox({ getMediaUrlFn = getMediaDownloadUrl } = {}
         }
     };
 
-    const onImgErrorEvent = () => {
-        handleImgError();
-    };
-
     if (typeof document.addEventListener === 'function') {
         document.addEventListener('click', onDocumentClick);
         document.addEventListener('keydown', onDocumentKeyDown);
     }
 
     const { img: initialImg } = els();
-    if (initialImg && typeof initialImg.addEventListener === 'function') {
-        initialImg.addEventListener('error', onImgErrorEvent);
+    if (initialImg) {
+        bindPrimaryImgListeners(initialImg);
     }
 
     return {
         open,
         close,
         closeIfMessage,
-        resetForSwitch: close,
-        wipe: close,
+        resetForSwitch: resetAndWipe,
+        wipe: resetAndWipe,
         isOpen,
+        getCacheStats: () => photoLoader.stats(),
         destroy: () => {
-            close();
+            resetAndWipe();
             if (typeof document.removeEventListener === 'function') {
                 document.removeEventListener('click', onDocumentClick);
                 document.removeEventListener('keydown', onDocumentKeyDown);
             }
-            const { img } = els();
-            if (img && typeof img.removeEventListener === 'function') {
-                img.removeEventListener('error', onImgErrorEvent);
+            if (boundPrimaryImg && typeof boundPrimaryImg.removeEventListener === 'function') {
+                boundPrimaryImg.removeEventListener('load', onImgLoadEvent);
+                boundPrimaryImg.removeEventListener('error', onImgErrorEvent);
             }
+            boundPrimaryImg = null;
         }
     };
 }

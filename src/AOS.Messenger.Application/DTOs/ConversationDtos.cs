@@ -17,7 +17,8 @@ public sealed record ConversationSummaryDto(
     DateTimeOffset? LastSeenAtUtc = null,
     MessageId? PeerLastDeliveredMessageId = null,
     MessageId? PeerLastReadMessageId = null,
-    MessageId? LastMessageId = null);
+    MessageId? LastMessageId = null,
+    string? OtherParticipantAvatarVersion = null);
 
 public sealed record ConversationDetailDto(
     ConversationId Id,
@@ -35,7 +36,8 @@ public sealed record ConversationDetailDto(
     MessageId? PeerLastDeliveredMessageId = null,
     MessageId? PeerLastReadMessageId = null,
     bool IsPeerDeleted = false,
-    bool CanSend = true);
+    bool CanSend = true,
+    string? OtherParticipantAvatarVersion = null);
 
 public sealed record ConversationBundleDto(
     UserId ViewerUserId,

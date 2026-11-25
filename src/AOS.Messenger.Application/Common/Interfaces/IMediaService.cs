@@ -32,5 +32,6 @@ public interface IMediaService
         MessageId messageId,
         MediaId mediaId,
         bool forceDownload = false,
+        bool thumbnail = false,
         CancellationToken ct = default);
 }

@@ -21,6 +21,18 @@ internal static class MediaStorageKeyValidator
         {
             matchedPrefix = MediaConstraints.MediaKeyPrefix;
         }
+        else if (objectKey.StartsWith(MediaConstraints.ThumbnailKeyPrefix, StringComparison.Ordinal))
+        {
+            matchedPrefix = MediaConstraints.ThumbnailKeyPrefix;
+        }
+        else if (objectKey.StartsWith(MediaConstraints.AvatarKeyPrefix, StringComparison.Ordinal))
+        {
+            matchedPrefix = MediaConstraints.AvatarKeyPrefix;
+        }
+        else if (objectKey.StartsWith(MediaConstraints.StickerKeyPrefix, StringComparison.Ordinal))
+        {
+            matchedPrefix = MediaConstraints.StickerKeyPrefix;
+        }
         else
         {
             throw new DomainException("Storage object key has an invalid prefix.");
@@ -38,12 +50,24 @@ internal static class MediaStorageKeyValidator
         }
     }
 
+    public static void ValidatePermanentObjectKey(string? objectKey)
+    {
+        ValidateObjectKey(objectKey);
+        if (objectKey!.StartsWith(MediaConstraints.PendingKeyPrefix, StringComparison.Ordinal))
+        {
+            throw new DomainException("Permanent storage object key cannot use the 'pending/' staging prefix.");
+        }
+    }
+
     public static void ValidatePrefix(string? prefix)
     {
         if (!string.Equals(prefix, MediaConstraints.PendingKeyPrefix, StringComparison.Ordinal) &&
-            !string.Equals(prefix, MediaConstraints.MediaKeyPrefix, StringComparison.Ordinal))
+            !string.Equals(prefix, MediaConstraints.MediaKeyPrefix, StringComparison.Ordinal) &&
+            !string.Equals(prefix, MediaConstraints.ThumbnailKeyPrefix, StringComparison.Ordinal) &&
+            !string.Equals(prefix, MediaConstraints.AvatarKeyPrefix, StringComparison.Ordinal) &&
+            !string.Equals(prefix, MediaConstraints.StickerKeyPrefix, StringComparison.Ordinal))
         {
-            throw new DomainException("Storage listing prefix must be 'pending/' or 'media/'.");
+            throw new DomainException("Storage listing prefix must be 'pending/', 'media/', 'thumbs/', 'avatars/', or 'stickers/'.");
         }
     }
 }

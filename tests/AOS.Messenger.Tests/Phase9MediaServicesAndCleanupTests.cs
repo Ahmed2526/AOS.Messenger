@@ -196,6 +196,7 @@ public sealed class Phase9MediaServicesAndCleanupTests : IClassFixture<SqlTestDa
         }
 
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class InterceptingMediaStorage : IMediaStorage

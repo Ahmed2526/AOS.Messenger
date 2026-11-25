@@ -323,15 +323,10 @@ public sealed class IdentityService : IIdentityService
         ResetPasswordDto dto, CancellationToken ct = default)
     {
         var user = await _userManager.FindByEmailAsync(dto.Email.Trim());
-        if (user is null)
+        if (user is null || user.IsDeleted)
         {
             _passwordHasher.VerifyHashedPassword(DummyUser, DummyPasswordHash, dto.NewPassword);
             return (false, ["User not found."]);
-        }
-
-        if (user.IsDeleted)
-        {
-            throw new ForbiddenException("Account is deleted");
         }
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);

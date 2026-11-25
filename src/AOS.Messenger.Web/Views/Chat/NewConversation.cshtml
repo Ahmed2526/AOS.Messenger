@@ -122,6 +122,22 @@
                         </button>
                     </div>
                 </div>
+
+                <!-- State 5: Error View (401 Session Expired / 429 Rate Limited / Network Failure) -->
+                <div class="hidden flex-col items-center justify-center p-space-xl text-center space-y-space-md min-h-[320px]" id="state-search-error" data-search-state="error" role="alert">
+                    <div class="w-16 h-16 rounded-2xl bg-error-container text-on-error-container flex items-center justify-center shadow-xs">
+                        <span class="material-symbols-outlined text-[32px]">error_outline</span>
+                    </div>
+                    <div class="max-w-[340px] space-y-space-xs">
+                        <h3 id="search-error-title" class="font-headline-sm text-headline-sm text-on-surface">Search failed</h3>
+                        <p id="search-error-message" class="font-body-sm text-body-sm text-on-surface-variant leading-relaxed">Unable to search users right now. Please try again.</p>
+                    </div>
+                    <div class="flex items-center gap-space-sm pt-space-xs">
+                        <a asp-controller="Account" asp-action="Login" id="search-error-login-link" class="hidden px-space-md py-2 rounded-xl bg-primary text-on-primary font-label-md text-label-md transition-colors cursor-pointer">
+                            Sign in again
+                        </a>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

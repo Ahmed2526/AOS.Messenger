@@ -11,7 +11,8 @@ namespace AOS.Messenger.Web.Controllers;
 [Route("api/presence")]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [AutoValidateAntiforgeryToken]
-[EnableRateLimiting("messages")]
+[EnableRateLimiting("presence")]
+[RequestSizeLimit(16 * 1024)]
 public sealed class PresenceController : ControllerBase
 {
     private readonly IPresenceService _presenceService;

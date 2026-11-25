@@ -52,35 +52,21 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
     private static readonly UTF8Encoding StrictUtf8 = new(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
 
-    private static readonly Lock ResourceLimitsLock = new();
-
     private readonly IMediaStorage _storage;
     private readonly MediaOptions _options;
     private readonly ILogger<MediaVerifier> _logger;
+    private readonly ImageProcessingGate _imageGate;
+    private readonly bool _ownsImageGate;
     private readonly SemaphoreSlim _imageSemaphore;
     private readonly long _maxEncodedImageBytes;
-
-    static MediaVerifier()
-    {
-        lock (ResourceLimitsLock)
-        {
-            ResourceLimits.Width = (ulong)MediaConstraints.MaxImageWidth;
-            ResourceLimits.Height = (ulong)MediaConstraints.MaxImageHeight;
-            ResourceLimits.Area = 256UL * 1024 * 1024;
-            ResourceLimits.Memory = 512UL * 1024 * 1024;
-            ResourceLimits.Disk = 1024UL * 1024 * 1024;
-            ResourceLimits.MaxMemoryRequest = 256UL * 1024 * 1024;
-            ResourceLimits.Thread = 1UL;
-            ResourceLimits.Time = 15UL;
-        }
-    }
 
     [ActivatorUtilitiesConstructor]
     public MediaVerifier(
         IMediaStorage storage,
         IOptions<MediaOptions> options,
-        ILogger<MediaVerifier>? logger = null)
-        : this(storage, options, logger ?? NullLogger<MediaVerifier>.Instance, MediaConstraints.MaxImageBytes)
+        ILogger<MediaVerifier>? logger = null,
+        ImageProcessingGate? sharedGate = null)
+        : this(storage, options, logger ?? NullLogger<MediaVerifier>.Instance, MediaConstraints.MaxImageBytes, sharedGate)
     {
     }
 
@@ -88,7 +74,8 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         IMediaStorage storage,
         IOptions<MediaOptions> options,
         ILogger<MediaVerifier> logger,
-        long maxEncodedImageBytes)
+        long maxEncodedImageBytes,
+        ImageProcessingGate? sharedGate = null)
     {
         ArgumentNullException.ThrowIfNull(storage);
         ArgumentNullException.ThrowIfNull(options);
@@ -99,16 +86,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         _options = options.Value;
         _logger = logger;
         _maxEncodedImageBytes = maxEncodedImageBytes;
-
-        var concurrency = Math.Max(1, _options.MaxImageProcessingConcurrency);
-        _imageSemaphore = new SemaphoreSlim(concurrency, concurrency);
-        if (_options.ImageProcessingTimeoutSeconds is >= 1 and <= 60)
-        {
-            lock (ResourceLimitsLock)
-            {
-                ResourceLimits.Time = (ulong)_options.ImageProcessingTimeoutSeconds;
-            }
-        }
+        _ownsImageGate = sharedGate is null;
+        _imageGate = sharedGate ?? new ImageProcessingGate(options);
+        _imageSemaphore = _imageGate.Semaphore;
     }
 
     public async Task<VerifiedMediaResult> VerifyAndSanitizeAsync(
@@ -144,7 +124,10 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
     public void Dispose()
     {
-        _imageSemaphore.Dispose();
+        if (_ownsImageGate)
+        {
+            _imageGate.Dispose();
+        }
     }
 
     private async Task<VerifiedMediaResult> VerifyAndSanitizeImageAsync(
@@ -184,7 +167,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             _ => new AnimationScanResult(1, 0, 0, 0)
         };
 
-        var timeout = TimeSpan.FromSeconds(Math.Max(1, _options.ImageProcessingTimeoutSeconds));
+        var timeout = _imageGate.Timeout;
         var acquired = await _imageSemaphore.WaitAsync(timeout, ct);
         if (!acquired)
         {
@@ -192,13 +175,16 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         }
 
         FileStream? outputStream = null;
+        FileStream? thumbStream = null;
         try
         {
             outputStream = CreateDeleteOnCloseTempStream();
+            thumbStream = CreateDeleteOnCloseTempStream();
             var (finalWidth, finalHeight) = await Task.Run(
                 () => ProcessImageLocked(
                     inputStream,
                     outputStream,
+                    thumbStream,
                     expectedFormat,
                     animationScan,
                     maxFrames,
@@ -207,6 +193,15 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
             await outputStream.FlushAsync(ct);
             outputStream.Seek(0, SeekOrigin.Begin);
+
+            FileStream? ownershipThumb = null;
+            if (thumbStream.Length > 0)
+            {
+                await thumbStream.FlushAsync(ct);
+                thumbStream.Seek(0, SeekOrigin.Begin);
+                ownershipThumb = thumbStream;
+                thumbStream = null;
+            }
 
             var ownershipStream = outputStream;
             outputStream = null;
@@ -217,7 +212,10 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 finalWidth,
                 finalHeight,
                 durationMs: null,
-                processedStream: ownershipStream);
+                processedStream: ownershipStream,
+                thumbnailStream: ownershipThumb,
+                thumbnailContentType: ownershipThumb is not null ? "image/webp" : null,
+                thumbnailSizeBytes: ownershipThumb?.Length);
         }
         catch (MagickException ex)
         {
@@ -231,6 +229,11 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 await outputStream.DisposeAsync();
             }
 
+            if (thumbStream is not null)
+            {
+                await thumbStream.DisposeAsync();
+            }
+
             // Release semaphore only after all native CPU work inside Task.Run has completed.
             _imageSemaphore.Release();
         }
@@ -239,6 +242,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
     private (int Width, int Height) ProcessImageLocked(
         FileStream inputStream,
         FileStream outputStream,
+        FileStream thumbStream,
         MagickFormat pinnedFormat,
         AnimationScanResult animationScan,
         int maxFrames,
@@ -278,7 +282,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             {
                 decodeSettings.FrameIndex = 0;
                 decodeSettings.FrameCount = (uint)maxFrames;
-                return ProcessAnimationCollectionLocked(inputStream, outputStream, pinnedFormat, decodeSettings, maxFrames, ct);
+                return ProcessAnimationCollectionLocked(inputStream, outputStream, thumbStream, pinnedFormat, decodeSettings, maxFrames, ct);
             }
 
             using var image = new MagickImage(inputStream, decodeSettings);
@@ -292,6 +296,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
             StripSingleImageMetadata(image);
             EncodeSingleImageWithinLimit(image, pinnedFormat, outputStream, ct);
+            TryGenerateChatThumbnail(image, finalWidth, finalHeight, outputStream.Length, thumbStream, ct);
             return (finalWidth, finalHeight);
         }
         catch (MagickException ex) when (IsTransientResourceExhaustion(ex, headersValidated))
@@ -335,6 +340,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
     private (int Width, int Height) ProcessAnimationCollectionLocked(
         FileStream inputStream,
         FileStream outputStream,
+        FileStream thumbStream,
         MagickFormat pinnedFormat,
         MagickReadSettings decodeSettings,
         int maxFrames,
@@ -378,7 +384,64 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         ValidateImageDimensions(maxWidth, maxHeight);
 
         EncodeCollectionWithinLimit(collection, pinnedFormat, outputStream, ct);
+
+        if (pinnedFormat == MagickFormat.WebP && collection.Count == 1)
+        {
+            TryGenerateChatThumbnail(collection[0], maxWidth, maxHeight, outputStream.Length, thumbStream, ct);
+        }
+
         return (maxWidth, maxHeight);
+    }
+
+    private static void TryGenerateChatThumbnail(
+        IMagickImage<byte> strippedUprightImage,
+        int width,
+        int height,
+        long fullOutputLength,
+        FileStream thumbStream,
+        CancellationToken ct)
+    {
+        if (width <= MediaConstraints.MaxChatImageThumbnailEdge
+            && height <= MediaConstraints.MaxChatImageThumbnailEdge
+            && fullOutputLength <= MediaConstraints.ChatImageThumbnailThresholdBytes)
+        {
+            return;
+        }
+
+        try
+        {
+            using var clone = strippedUprightImage.Clone();
+            clone.FilterType = FilterType.Lanczos;
+            if (width > MediaConstraints.MaxChatImageThumbnailEdge || height > MediaConstraints.MaxChatImageThumbnailEdge)
+            {
+                clone.Resize(new MagickGeometry(
+                    (uint)MediaConstraints.MaxChatImageThumbnailEdge,
+                    (uint)MediaConstraints.MaxChatImageThumbnailEdge)
+                {
+                    Greater = true
+                });
+            }
+
+            foreach (var quality in new uint[] { 75, 60 })
+            {
+                ct.ThrowIfCancellationRequested();
+                thumbStream.SetLength(0);
+                thumbStream.Seek(0, SeekOrigin.Begin);
+                clone.Quality = quality;
+                clone.Write(thumbStream, MagickFormat.WebP);
+
+                if (thumbStream.Length > 0 && thumbStream.Length <= MediaConstraints.MaxChatImageThumbnailBytes)
+                {
+                    return;
+                }
+            }
+
+            thumbStream.SetLength(0);
+        }
+        catch (MagickException)
+        {
+            thumbStream.SetLength(0);
+        }
     }
 
     private static void StripSingleImageMetadata(IMagickImage<byte> image)

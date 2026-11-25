@@ -25,7 +25,8 @@ public sealed record MediaAttachmentDto(
     int? Width,
     int? Height,
     int? DurationMs,
-    int DisplayOrder);
+    int DisplayOrder,
+    bool HasThumbnail = false);
 
 public sealed record MediaDownloadUrlDto(
     string Url,

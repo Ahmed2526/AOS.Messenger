@@ -15,6 +15,8 @@ public static class ApplicationServiceRegistration
         services.AddScoped<IConversationService, ConversationService>();
         services.AddScoped<IMessageService, MessageService>();
         services.AddScoped<IMediaService, MediaService>();
+        services.AddScoped<IAvatarService, AvatarService>();
+        services.AddScoped<IStickerService, StickerService>();
         services.AddScoped<IBlockService, BlockService>();
         services.AddScoped<IProfileService, ProfileService>();
         services.AddScoped<IUserDiscoveryService, UserDiscoveryService>();

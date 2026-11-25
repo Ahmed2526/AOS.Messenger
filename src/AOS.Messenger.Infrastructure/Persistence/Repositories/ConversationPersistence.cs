@@ -1,4 +1,4 @@
-using System.Linq.Expressions;
+using System.Text.Json;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.ValueObjects;
@@ -132,7 +132,10 @@ public sealed class ConversationPersistence : IConversationPersistence
         return await _db.Conversations
             .AsNoTracking()
             .Where(c => c.Participant1Id == userId || c.Participant2Id == userId)
-            .OrderByDescending(c => c.CreatedAtUtc)
+            .OrderByDescending(c => _db.Messages
+                .Where(m => m.ConversationId == c.Id)
+                .Max(m => (DateTimeOffset?)m.CreatedAtUtc) ?? c.CreatedAtUtc)
+            .ThenByDescending(c => c.Id)
             .Take(1000)
             .ToListAsync(ct);
     }
@@ -147,9 +150,24 @@ public sealed class ConversationPersistence : IConversationPersistence
             .ToListAsync(ct);
     }
 
-    public async Task<IReadOnlyList<UserConversationState>> GetUserStatesForConversationsAsync(
+    public Task<IReadOnlyList<UserConversationState>> GetUserStatesForConversationsAsync(
         IReadOnlyList<ConversationId> conversationIds,
         CancellationToken ct = default)
+        => GetStatesForConversationsInternalAsync(conversationIds, excludeUserId: null, ct);
+
+    public Task<IReadOnlyList<UserConversationState>> GetPeerStatesForConversationsAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        UserId callerId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        return GetStatesForConversationsInternalAsync(conversationIds, excludeUserId: callerId, ct);
+    }
+
+    private async Task<IReadOnlyList<UserConversationState>> GetStatesForConversationsInternalAsync(
+        IReadOnlyList<ConversationId> conversationIds,
+        UserId? excludeUserId,
+        CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(conversationIds);
 
@@ -164,11 +182,16 @@ public sealed class ConversationPersistence : IConversationPersistence
         foreach (var chunk in distinctIds.Chunk(500))
         {
             var chunkList = chunk.ToList();
-            var states = await _db.UserConversationStates
+            var query = _db.UserConversationStates
                 .AsNoTracking()
-                .Where(s => chunkList.Contains(s.ConversationId))
-                .ToListAsync(ct);
+                .Where(s => chunkList.Contains(s.ConversationId));
 
+            if (excludeUserId is not null)
+            {
+                query = query.Where(s => s.UserId != excludeUserId);
+            }
+
+            var states = await query.ToListAsync(ct);
             result.AddRange(states);
         }
 
@@ -393,114 +416,55 @@ public sealed class ConversationPersistence : IConversationPersistence
             return [];
         }
 
-        var lastReadIds = requests
-            .Where(r => r.LastReadMessageId is not null)
-            .Select(r => r.LastReadMessageId!)
-            .Distinct()
-            .ToList();
-
-        var lastReadMap = new Dictionary<MessageId, Message>();
-        if (lastReadIds.Count > 0)
-        {
-            foreach (var chunk in lastReadIds.Chunk(500))
-            {
-                var chunkList = chunk.ToList();
-                var chunkMap = await _db.Messages
-                    .AsNoTracking()
-                    .Where(m => chunkList.Contains(m.Id))
-                    .ToDictionaryAsync(m => m.Id, ct);
-
-                foreach (var (k, v) in chunkMap)
-                {
-                    lastReadMap[k] = v;
-                }
-            }
-        }
-
-        var parameter = Expression.Parameter(typeof(Message), "m");
-        var convIdProp = Expression.Property(parameter, nameof(Message.ConversationId));
-        var senderIdProp = Expression.Property(parameter, nameof(Message.SenderId));
-        var createdAtProp = Expression.Property(parameter, nameof(Message.CreatedAtUtc));
-        var idProp = Expression.Property(parameter, nameof(Message.Id));
-
-        var notSender = Expression.NotEqual(
-            senderIdProp,
-            Expression.Constant(userId));
-
-        var result = new Dictionary<ConversationId, int>();
+        var result = new Dictionary<ConversationId, int>(requests.Count);
         foreach (var req in requests)
         {
             result.TryAdd(req.ConversationId, 0);
         }
 
+        var userGuid = userId.Value;
+
         foreach (var reqChunk in requests.Chunk(500))
         {
-            Expression? combinedOr = null;
+            var payload = reqChunk
+                .Select(r => new UnreadCountRequestJson(
+                    r.ConversationId.Value,
+                    r.LastReadMessageId?.Value,
+                    r.ClearedAtUtc))
+                .ToArray();
+            var requestsJson = JsonSerializer.Serialize(payload);
 
-            foreach (var req in reqChunk)
+            var counts = await _db.Database.SqlQuery<UnreadCountRow>(
+                $"""
+                 SELECT m.[ConversationId], COUNT(*) AS [UnreadCount]
+                 FROM [Messages] AS m
+                 INNER JOIN OPENJSON({requestsJson}) WITH (
+                     [ConversationId] uniqueidentifier '$.ConversationId',
+                     [LastReadMessageId] bigint '$.LastReadMessageId',
+                     [ClearedAtUtc] datetimeoffset(7) '$.ClearedAtUtc'
+                 ) AS r ON r.[ConversationId] = m.[ConversationId]
+                 LEFT JOIN [Messages] AS lr ON lr.[ConversationId] = r.[ConversationId] AND lr.[Id] = r.[LastReadMessageId]
+                 WHERE m.[SenderId] <> {userGuid}
+                   AND (
+                       lr.[Id] IS NULL
+                       OR m.[CreatedAtUtc] > lr.[CreatedAtUtc]
+                       OR (m.[CreatedAtUtc] = lr.[CreatedAtUtc] AND m.[Id] > lr.[Id])
+                   )
+                   AND (r.[ClearedAtUtc] IS NULL OR m.[CreatedAtUtc] >= r.[ClearedAtUtc])
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM [UserMessageDeletions] AS d
+                       WHERE d.[ConversationId] = m.[ConversationId]
+                         AND d.[UserId] = {userGuid}
+                         AND d.[MessageId] = m.[Id]
+                   )
+                 GROUP BY m.[ConversationId]
+                 """)
+                .ToListAsync(ct);
+
+            foreach (var item in counts)
             {
-                var convMatch = Expression.Equal(
-                    convIdProp,
-                    Expression.Constant(req.ConversationId));
-
-                Expression? filter = null;
-
-                if (req.LastReadMessageId is not null &&
-                    lastReadMap.TryGetValue(req.LastReadMessageId, out var lastRead) &&
-                    lastRead.ConversationId == req.ConversationId)
-                {
-                    var createdAfter = Expression.GreaterThan(
-                        createdAtProp,
-                        Expression.Constant(lastRead.CreatedAtUtc));
-                    var createdEqual = Expression.Equal(
-                        createdAtProp,
-                        Expression.Constant(lastRead.CreatedAtUtc));
-                    var idGreater = Expression.GreaterThan(
-                        idProp,
-                        Expression.Constant(lastRead.Id));
-                    var tieBreaker = Expression.AndAlso(createdEqual, idGreater);
-                    filter = Expression.OrElse(createdAfter, tieBreaker);
-                }
-
-                if (req.ClearedAtUtc.HasValue)
-                {
-                    var afterCleared = Expression.GreaterThanOrEqual(
-                        createdAtProp,
-                        Expression.Constant(req.ClearedAtUtc.Value));
-                    filter = filter is null
-                        ? afterCleared
-                        : Expression.AndAlso(filter, afterCleared);
-                }
-
-                var convCondition = filter is null
-                    ? convMatch
-                    : Expression.AndAlso(convMatch, filter);
-
-                combinedOr = combinedOr is null
-                    ? convCondition
-                    : Expression.OrElse(combinedOr, convCondition);
-            }
-
-            if (combinedOr is not null)
-            {
-                var body = Expression.AndAlso(notSender, combinedOr);
-                var lambda = Expression.Lambda<Func<Message, bool>>(body, parameter);
-
-                var counts = await _db.Messages
-                    .AsNoTracking()
-                    .Where(lambda)
-                    .Where(m => !_db.UserMessageDeletions.Any(d =>
-                        d.ConversationId == m.ConversationId &&
-                        d.UserId == userId &&
-                        d.MessageId == m.Id))
-                    .GroupBy(m => m.ConversationId)
-                    .Select(g => new { ConversationId = g.Key, Count = g.Count() })
-                    .ToListAsync(ct);
-
-                foreach (var item in counts)
-                {
-                    result[item.ConversationId] = item.Count;
-                }
+                result[new ConversationId(item.ConversationId)] = item.UnreadCount;
             }
         }
 
@@ -568,6 +532,51 @@ public sealed class ConversationPersistence : IConversationPersistence
             .Distinct()
             .ToListAsync(ct);
     }
+
+    public async Task<UserId?> GetVerifiedTypingRecipientAsync(
+        UserId senderId,
+        ConversationId conversationId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(senderId);
+        ArgumentNullException.ThrowIfNull(conversationId);
+
+        var senderGuid = senderId.Value;
+        var convGuid = conversationId.Value;
+
+        var rows = await _db.Database.SqlQuery<Guid>(
+            $"""
+             SELECT TOP (1) u.[Id] AS [Value]
+             FROM [Conversations] AS c
+             INNER JOIN [AspNetUsers] AS u
+                 ON u.[Id] = CASE
+                     WHEN c.[Participant1Id] = {senderGuid} THEN c.[Participant2Id]
+                     ELSE c.[Participant1Id]
+                 END
+             WHERE c.[Id] = {convGuid}
+               AND (c.[Participant1Id] = {senderGuid} OR c.[Participant2Id] = {senderGuid})
+               AND u.[IsDeleted] = 0
+               AND u.[EmailConfirmed] = 1
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM [UserBlocks] AS b
+                   WHERE (b.[BlockerId] = {senderGuid} AND b.[BlockedUserId] = u.[Id])
+                      OR (b.[BlockerId] = u.[Id] AND b.[BlockedUserId] = {senderGuid})
+               )
+             """)
+            .ToListAsync(ct);
+
+        return rows.Count > 0 ? new UserId(rows[0]) : null;
+    }
+
+    private sealed record UnreadCountRequestJson(
+        Guid ConversationId,
+        long? LastReadMessageId,
+        DateTimeOffset? ClearedAtUtc);
+
+    private sealed record UnreadCountRow(
+        Guid ConversationId,
+        int UnreadCount);
 
     private async Task EnsureUserStateExistsAsync(ConversationId conversationId, UserId userId, CancellationToken ct)
     {

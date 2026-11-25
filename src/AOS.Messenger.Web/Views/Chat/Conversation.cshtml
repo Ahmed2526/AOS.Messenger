@@ -17,6 +17,7 @@
             otherParticipantName = Model.Conversation.OtherParticipantName,
             otherParticipantHandle = Model.Conversation.OtherParticipantHandle,
             otherParticipantBio = Model.Conversation.OtherParticipantBio,
+            otherParticipantAvatarVersion = Model.Conversation.OtherParticipantAvatarVersion,
             isBlocked = Model.Conversation.IsBlocked,
             isPeerDeleted = Model.Conversation.IsPeerDeleted,
             canSend = Model.Conversation.CanSend,
@@ -103,12 +104,19 @@
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
             </a>
             <div class="relative shrink-0">
-                <div data-peer-initials="true" class="w-9 h-9 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 font-bold text-xs flex items-center justify-center">
-                    @initials
+                <div id="header-peer-avatar"
+                     data-avatar-slot="true"
+                     data-avatar-clickable="true"
+                     data-avatar-user-id="@Model.Conversation.OtherParticipantId.Value"
+                     data-avatar-version="@(Model.Conversation.OtherParticipantAvatarVersion ?? "")"
+                     data-avatar-name="@Model.Conversation.OtherParticipantName"
+                     data-avatar-handle="@Model.Conversation.OtherParticipantHandle"
+                     class="w-9 h-9 rounded-full overflow-hidden bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 font-bold text-xs flex items-center justify-center">
+                    <span data-avatar-initials="true" data-peer-initials="true">@initials</span>
                 </div>
                 <span id="header-presence-dot"
                       data-presence-dot="true"
-                      class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(Model.Conversation.IsOnline ? "bg-[#6F9473]" : "bg-stone-400 dark:bg-stone-500") border-2 border-[#FFFFFF] dark:border-[#3A3835]"></span>
+                      class="pointer-events-none absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(Model.Conversation.IsOnline ? "bg-[#6F9473]" : "bg-stone-400 dark:bg-stone-500") border-2 border-[#FFFFFF] dark:border-[#3A3835]"></span>
             </div>
             <!-- Peer Identity Block -->
             <div id="peer-identity-block" class="flex-1 min-w-0 overflow-hidden">
@@ -258,6 +266,10 @@
 
     <!-- Scrollable Message Stream -->
     <div id="message-stream" class="flex-1 min-h-0 overflow-y-auto custom-scroll p-4 md:p-6 space-y-3 flex flex-col">
+        <div id="messages-top-sentinel" class="h-px w-full shrink-0" aria-hidden="true"></div>
+        <div id="messages-history-start" class="hidden flex items-center justify-center py-2 text-[11px] text-[#6E6560] dark:text-[#C9C0B9] select-none"><span class="px-3 py-1 rounded-full bg-[#F0E9DF]/80 dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48]">Beginning of conversation</span></div>
+        <div id="messages-load-older-wrap" class="hidden flex items-center justify-center py-1"><button id="messages-load-older-btn" type="button" class="px-3 py-1 rounded-full text-xs font-medium bg-[#FFFFFF] dark:bg-[#3A3835] text-[#735761] dark:text-[#E1BDC9] border border-[#E3DCD7] dark:border-[#514D48] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">Load older messages</button></div>
+        <div id="messages-load-older-error" role="alert" class="hidden flex items-center justify-center gap-2 py-1.5 text-xs text-red-700 dark:text-red-300"><span id="messages-load-older-error-text">Could not load older messages.</span><button id="messages-load-older-retry-btn" type="button" class="underline font-semibold hover:opacity-80 cursor-pointer">Retry</button></div>
         <!-- Loading indicator for keyset pagination -->
         <div id="messages-loading-top" class="hidden flex items-center justify-center py-2 text-xs text-[#6E6560] dark:text-[#C9C0B9] gap-2">
             <span class="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
@@ -303,10 +315,13 @@
             {
                 var msgInitials = GetInitials(message.SenderName, message.SenderHandle);
                 var hasAttachments = !message.IsDeletedForEveryone && message.Attachments is { Count: > 0 };
+                var isSticker = !message.IsDeletedForEveryone && message.Sticker != null;
                 var hasCaption = !string.IsNullOrEmpty(message.Content);
                 var formattedPreview = message.IsDeletedForEveryone
                     ? "This message was deleted"
-                    : MediaPreviewFormatter.FormatPreview(message.Content, message.Attachments);
+                    : isSticker
+                        ? MediaPreviewFormatter.FormatStickerPreview()
+                        : MediaPreviewFormatter.FormatPreview(message.Content, message.Attachments);
                 var imageAttachments = hasAttachments
                     ? message.Attachments!.Where(a => string.Equals(a.Kind, "image", StringComparison.OrdinalIgnoreCase)).ToList()
                     : [];
@@ -332,32 +347,55 @@
                         receiptClass = "text-white/70";
                     }
 
-                    <!-- Outgoing message (Right-aligned, warm rose) -->
-                    <div id="msg-@message.Id.Value" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                    <!-- Outgoing message (Right-aligned, warm rose or frameless sticker) -->
+                    <div id="msg-@message.Id.Value" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="true" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-is-sticker="@(isSticker ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
                         @if (!message.IsDeletedForEveryone)
                         {
-                            <div class="message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 flex items-center gap-0.5">
+                            <div class="message-actions-bar hidden sm:flex sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 items-center gap-0.5">
                                 <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
                                     <span class="material-symbols-outlined text-[16px]">add_reaction</span>
                                 </button>
                                 <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@formattedPreview">
                                     <span class="material-symbols-outlined text-[16px]">reply</span>
                                 </button>
-                                <button type="button" data-action="edit" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Edit message" aria-label="Edit message">
-                                    <span class="material-symbols-outlined text-[16px]">edit</span>
-                                </button>
+                                @if (isSticker)
+                                {
+                                    var st = message.Sticker!;
+                                    <button type="button"
+                                            data-sticker-info-trigger="true"
+                                            data-sticker-id="@st.Id.Value"
+                                            data-sticker-pack-id="@st.PackId.Value"
+                                            data-sticker-pack-name="@st.PackName"
+                                            data-sticker-pack-author="@st.PackAuthor"
+                                            data-sticker-animated="@(st.IsAnimated ? "true" : "false")"
+                                            data-sticker-system="@(st.IsSystem ? "true" : "false")"
+                                            data-sticker-static-url="@(st.StaticUrl ?? "")"
+                                            data-sticker-tags="@st.EmojiTags"
+                                            data-sticker-favorited="@(st.IsFavoritedByCurrentUser ? "true" : "false")"
+                                            class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-amber-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer"
+                                            title="Sticker info &amp; favorites"
+                                            aria-label="Sticker info and favorites">
+                                        <span class="material-symbols-outlined text-[16px]">@(st.IsFavoritedByCurrentUser ? "star" : "star_outline")</span>
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button type="button" data-action="edit" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Edit message" aria-label="Edit message">
+                                        <span class="material-symbols-outlined text-[16px]">edit</span>
+                                    </button>
+                                }
                                 <button type="button" data-action="delete" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-red-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Delete message" aria-label="Delete message">
                                     <span class="material-symbols-outlined text-[16px]">delete</span>
                                 </button>
                             </div>
                         }
 
-                        <div class="message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative">
+                        <div class="@(isSticker ? "message-bubble max-w-[75%] min-w-0 relative flex flex-col items-end" : "message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative")">
                             @if (message.ReplyTo != null)
                             {
-                                <div class="mb-1.5 px-2.5 py-1 rounded bg-black/15 border-l-2 border-white/70 text-xs cursor-pointer hover:bg-black/25 transition-colors" data-reply-parent-id="@message.ReplyTo.Id.Value">
-                                    <div class="font-bold text-[10px] text-white/95">@message.ReplyTo.SenderName</div>
-                                    <div class="reply-preview-text truncate text-[10px] text-white/80">
+                                <div class="@(isSticker ? "mb-1.5 px-2.5 py-1 rounded bg-[#FFFFFF] dark:bg-[#3A3835] border-l-2 border-[#B3929D] text-xs text-[#6E6560] dark:text-[#C9C0B9] cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors shadow-2xs" : "mb-1.5 px-2.5 py-1 rounded bg-black/15 border-l-2 border-white/70 text-xs cursor-pointer hover:bg-black/25 transition-colors")" data-reply-parent-id="@message.ReplyTo.Id.Value">
+                                    <div class="@(isSticker ? "font-bold text-[10px] text-[#2B2725] dark:text-[#F0E9E2]" : "font-bold text-[10px] text-white/95")">@message.ReplyTo.SenderName</div>
+                                    <div class="@(isSticker ? "reply-preview-text truncate text-[10px] text-[#6E6560] dark:text-[#C9C0B9]" : "reply-preview-text truncate text-[10px] text-white/80")">
                                         @if (message.ReplyTo.IsDeletedForEveryone)
                                         {
                                             <span class="italic">This message was deleted</span>
@@ -377,6 +415,39 @@
                                     <span>This message was deleted</span>
                                 </div>
                             }
+                            else if (isSticker)
+                            {
+                                var st = message.Sticker!;
+                                var stSrc = !string.IsNullOrWhiteSpace(st.StaticUrl) ? st.StaticUrl : $"/api/stickers/{st.Id.Value}/image";
+                                <div class="message-sticker-container">
+                                    <button type="button"
+                                            data-sticker-info-trigger="true"
+                                            data-sticker-id="@st.Id.Value"
+                                            data-sticker-pack-id="@st.PackId.Value"
+                                            data-sticker-pack-name="@st.PackName"
+                                            data-sticker-pack-author="@st.PackAuthor"
+                                            data-sticker-animated="@(st.IsAnimated ? "true" : "false")"
+                                            data-sticker-system="@(st.IsSystem ? "true" : "false")"
+                                            data-sticker-static-url="@(st.StaticUrl ?? "")"
+                                            data-sticker-tags="@st.EmojiTags"
+                                            data-sticker-favorited="@(st.IsFavoritedByCurrentUser ? "true" : "false")"
+                                            aria-label="View sticker details"
+                                            title="@st.PackName"
+                                            class="block rounded-2xl p-0.5 focus:outline-none focus:ring-2 focus:ring-[#B3929D] transition-transform hover:scale-[1.03] active:scale-[0.98] cursor-pointer">
+                                        <img src="@stSrc"
+                                             alt="@(string.IsNullOrWhiteSpace(st.EmojiTags) ? "Sticker" : $"Sticker {st.EmojiTags}")"
+                                             width="@st.Width"
+                                             height="@st.Height"
+                                             loading="lazy"
+                                             decoding="async"
+                                             data-sticker-img="true"
+                                             data-sticker-id="@st.Id.Value"
+                                             data-sticker-static="@(!string.IsNullOrWhiteSpace(st.StaticUrl) ? "true" : "false")"
+                                             class="w-36 h-36 sm:w-44 sm:h-44 object-contain drop-shadow-sm select-none" />
+                                    </button>
+                                </div>
+                                <div class="message-text-content hidden"></div>
+                            }
                             else
                             {
                                 if (hasAttachments)
@@ -392,7 +463,7 @@
                                                     data-media-id="@img.Id.Value"
                                                     data-file-name="@img.FileName"
                                                     class="block w-full overflow-hidden rounded-xl bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer">
-                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value?variant=thumb"
                                                      alt="@img.FileName"
                                                      width="@img.Width"
                                                      height="@img.Height"
@@ -414,7 +485,7 @@
                                                             data-media-id="@img.Id.Value"
                                                             data-file-name="@img.FileName"
                                                             class="block aspect-square overflow-hidden rounded-lg bg-black/10 focus:outline-none focus:ring-2 focus:ring-white/80 cursor-pointer">
-                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value?variant=thumb"
                                                              alt="@img.FileName"
                                                              width="@img.Width"
                                                              height="@img.Height"
@@ -464,7 +535,7 @@
                                 <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)@(hasCaption ? "" : " hidden")">@message.Content</div>
                             }
 
-                            <div class="flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80">
+                            <div class="@(isSticker ? "message-meta-footer inline-flex items-center justify-end gap-1 mt-1 px-2 py-0.5 rounded-full bg-black/55 text-white text-[10px] shadow-2xs" : "message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80")">
                                 <span class="text-[9px] italic edited-label @(message.EditedAtUtc.HasValue && !message.IsDeletedForEveryone ? "" : "hidden")">edited</span>
                                 <span class="message-timestamp" data-created-at="@message.CreatedAtUtc.ToString("o")">@message.CreatedAtUtc.ToString("h:mm tt", System.Globalization.CultureInfo.InvariantCulture)</span>
                                 @if (!message.IsDeletedForEveryone)
@@ -478,9 +549,19 @@
                                 {
                                     foreach (var r in message.Reactions)
                                     {
-                                        <button type="button" data-emoji="@r.Emoji" data-message-id="@message.Id.Value" class="reaction-pill inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-all cursor-pointer select-none @(r.ReactedByCurrentUser ? "border-white/80 bg-white/20 text-white font-bold" : "border-white/30 bg-black/10 text-white/90")" title="@(r.ReactedByCurrentUser ? $"Remove {r.Emoji} reaction" : $"React with {r.Emoji}")">
+                                        var pillClass = isSticker
+                                            ? (r.ReactedByCurrentUser
+                                                ? "border-[#B3929D] bg-[#B3929D]/20 text-[#735761] dark:text-[#E1BDC9] font-bold shadow-2xs"
+                                                : "border-[#E3DCD7] dark:border-[#514D48] bg-white dark:bg-[#3A3835] text-[#2B2725] dark:text-[#F0E9E2]")
+                                            : (r.ReactedByCurrentUser
+                                                ? "border-white/80 bg-white/20 text-white font-bold"
+                                                : "border-white/30 bg-black/10 text-white/90");
+                                        var countClass = isSticker
+                                            ? "text-[10px] font-semibold text-[#6E6560] dark:text-[#C9C0B9]"
+                                            : "text-[10px] font-semibold text-white/90";
+                                        <button type="button" data-emoji="@r.Emoji" data-message-id="@message.Id.Value" class="reaction-pill inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border transition-all cursor-pointer select-none @pillClass" title="@(r.ReactedByCurrentUser ? $"Remove {r.Emoji} reaction" : $"React with {r.Emoji}")">
                                             <span class="text-xs select-none">@r.Emoji</span>
-                                            <span class="text-[10px] font-semibold text-white/90">@r.Count</span>
+                                            <span class="@countClass">@r.Count</span>
                                         </button>
                                     }
                                 }
@@ -490,17 +571,22 @@
                 }
                 else
                 {
-                    <!-- Incoming message (Left-aligned, surface container) -->
-                    <div id="msg-@message.Id.Value" class="flex flex-wrap justify-start items-center gap-2.5 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="false" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
-                        <div class="w-8 h-8 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1">
-                            @msgInitials
+                    <!-- Incoming message (Left-aligned, surface container or frameless sticker) -->
+                    <div id="msg-@message.Id.Value" class="flex flex-wrap justify-start items-center gap-2.5 message-bubble-row group relative" data-message-id="@message.Id.Value" data-is-outgoing="false" data-deleted="@(message.IsDeletedForEveryone ? "true" : "false")" data-has-attachments="@(hasAttachments ? "true" : "false")" data-is-sticker="@(isSticker ? "true" : "false")" data-message-preview="@formattedPreview" data-sender-id="@message.SenderId.Value" data-created-at="@message.CreatedAtUtc.ToString("o")">
+                        <div data-avatar-slot="true"
+                             data-avatar-user-id="@message.SenderId.Value"
+                             data-avatar-version="@(message.SenderAvatarVersion ?? "")"
+                             data-avatar-name="@message.SenderName"
+                             data-avatar-handle="@message.SenderHandle"
+                             class="w-8 h-8 rounded-full overflow-hidden bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1">
+                            <span data-avatar-initials="true">@msgInitials</span>
                         </div>
-                        <div class="message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tl-xs px-4 py-2 bg-[#FFFFFF] dark:bg-[#3A3835] text-[#2B2725] dark:text-[#F0E9E2] border border-[#E3DCD7] dark:border-[#514D48] shadow-2xs relative">
-                            <div class="text-[11px] font-bold text-[#735761] dark:text-[#E1BDC9] mb-0.5">@message.SenderName</div>
+                        <div class="@(isSticker ? "message-bubble max-w-[75%] min-w-0 relative flex flex-col items-start" : "message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tl-xs px-4 py-2 bg-[#FFFFFF] dark:bg-[#3A3835] text-[#2B2725] dark:text-[#F0E9E2] border border-[#E3DCD7] dark:border-[#514D48] shadow-2xs relative")">
+                            <div class="@(isSticker ? "text-[11px] font-bold text-[#735761] dark:text-[#E1BDC9] px-1 mb-0.5" : "text-[11px] font-bold text-[#735761] dark:text-[#E1BDC9] mb-0.5")">@message.SenderName</div>
 
                             @if (message.ReplyTo != null)
                             {
-                                <div class="mb-1.5 px-2.5 py-1 rounded bg-[#F8F6F3] dark:bg-[#302F2C] border-l-2 border-[#B3929D] text-xs cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors" data-reply-parent-id="@message.ReplyTo.Id.Value">
+                                <div class="@(isSticker ? "mb-1.5 px-2.5 py-1 rounded bg-[#FFFFFF] dark:bg-[#3A3835] border-l-2 border-[#B3929D] text-xs cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors shadow-2xs" : "mb-1.5 px-2.5 py-1 rounded bg-[#F8F6F3] dark:bg-[#302F2C] border-l-2 border-[#B3929D] text-xs cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors")" data-reply-parent-id="@message.ReplyTo.Id.Value">
                                     <div class="font-bold text-[10px] text-[#2B2725] dark:text-[#F0E9E2]">@message.ReplyTo.SenderName</div>
                                     <div class="reply-preview-text truncate text-[10px] text-[#6E6560] dark:text-[#C9C0B9]">
                                         @if (message.ReplyTo.IsDeletedForEveryone)
@@ -522,6 +608,39 @@
                                     <span>This message was deleted</span>
                                 </div>
                             }
+                            else if (isSticker)
+                            {
+                                var st = message.Sticker!;
+                                var stSrc = !string.IsNullOrWhiteSpace(st.StaticUrl) ? st.StaticUrl : $"/api/stickers/{st.Id.Value}/image";
+                                <div class="message-sticker-container">
+                                    <button type="button"
+                                            data-sticker-info-trigger="true"
+                                            data-sticker-id="@st.Id.Value"
+                                            data-sticker-pack-id="@st.PackId.Value"
+                                            data-sticker-pack-name="@st.PackName"
+                                            data-sticker-pack-author="@st.PackAuthor"
+                                            data-sticker-animated="@(st.IsAnimated ? "true" : "false")"
+                                            data-sticker-system="@(st.IsSystem ? "true" : "false")"
+                                            data-sticker-static-url="@(st.StaticUrl ?? "")"
+                                            data-sticker-tags="@st.EmojiTags"
+                                            data-sticker-favorited="@(st.IsFavoritedByCurrentUser ? "true" : "false")"
+                                            aria-label="View sticker details"
+                                            title="@st.PackName"
+                                            class="block rounded-2xl p-0.5 focus:outline-none focus:ring-2 focus:ring-[#B3929D] transition-transform hover:scale-[1.03] active:scale-[0.98] cursor-pointer">
+                                        <img src="@stSrc"
+                                             alt="@(string.IsNullOrWhiteSpace(st.EmojiTags) ? "Sticker" : $"Sticker {st.EmojiTags}")"
+                                             width="@st.Width"
+                                             height="@st.Height"
+                                             loading="lazy"
+                                             decoding="async"
+                                             data-sticker-img="true"
+                                             data-sticker-id="@st.Id.Value"
+                                             data-sticker-static="@(!string.IsNullOrWhiteSpace(st.StaticUrl) ? "true" : "false")"
+                                             class="w-36 h-36 sm:w-44 sm:h-44 object-contain drop-shadow-sm select-none" />
+                                    </button>
+                                </div>
+                                <div class="message-text-content hidden"></div>
+                            }
                             else
                             {
                                 if (hasAttachments)
@@ -537,7 +656,7 @@
                                                     data-media-id="@img.Id.Value"
                                                     data-file-name="@img.FileName"
                                                     class="block w-full overflow-hidden rounded-xl bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer">
-                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value?variant=thumb"
                                                      alt="@img.FileName"
                                                      width="@img.Width"
                                                      height="@img.Height"
@@ -559,7 +678,7 @@
                                                             data-media-id="@img.Id.Value"
                                                             data-file-name="@img.FileName"
                                                             class="block aspect-square overflow-hidden rounded-lg bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer">
-                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value"
+                                                        <img src="/api/conversations/@Model.Conversation.Id.Value/messages/@message.Id.Value/media/@img.Id.Value?variant=thumb"
                                                              alt="@img.FileName"
                                                              width="@img.Width"
                                                              height="@img.Height"
@@ -609,7 +728,7 @@
                                 <div class="@EmojiPresentationHelper.GetMessageContentCssClasses(message.Content)@(hasCaption ? "" : " hidden")">@message.Content</div>
                             }
 
-                            <div class="flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]">
+                            <div class="@(isSticker ? "message-meta-footer inline-flex items-center justify-end gap-1 mt-1 px-2 py-0.5 rounded-full bg-black/55 text-white text-[10px] shadow-2xs" : "message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]")">
                                 <span class="text-[9px] italic edited-label @(message.EditedAtUtc.HasValue && !message.IsDeletedForEveryone ? "" : "hidden")">edited</span>
                                 <span class="message-timestamp" data-created-at="@message.CreatedAtUtc.ToString("o")">@message.CreatedAtUtc.ToString("h:mm tt", System.Globalization.CultureInfo.InvariantCulture)</span>
                             </div>
@@ -630,13 +749,33 @@
 
                         @if (!message.IsDeletedForEveryone)
                         {
-                            <div class="message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 ml-1 flex items-center gap-0.5">
+                            <div class="message-actions-bar hidden sm:flex sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity self-center shrink-0 ml-1 items-center gap-0.5">
                                 <button type="button" data-action="react" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Add reaction" aria-label="Add reaction">
                                     <span class="material-symbols-outlined text-[16px]">add_reaction</span>
                                 </button>
                                 <button type="button" class="reply-action-btn w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#B3929D] hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Reply to message" aria-label="Reply to message" data-id="@message.Id.Value" data-sender="@message.SenderName" data-preview="@formattedPreview">
                                     <span class="material-symbols-outlined text-[16px]">reply</span>
                                 </button>
+                                @if (isSticker)
+                                {
+                                    var st = message.Sticker!;
+                                    <button type="button"
+                                            data-sticker-info-trigger="true"
+                                            data-sticker-id="@st.Id.Value"
+                                            data-sticker-pack-id="@st.PackId.Value"
+                                            data-sticker-pack-name="@st.PackName"
+                                            data-sticker-pack-author="@st.PackAuthor"
+                                            data-sticker-animated="@(st.IsAnimated ? "true" : "false")"
+                                            data-sticker-system="@(st.IsSystem ? "true" : "false")"
+                                            data-sticker-static-url="@(st.StaticUrl ?? "")"
+                                            data-sticker-tags="@st.EmojiTags"
+                                            data-sticker-favorited="@(st.IsFavoritedByCurrentUser ? "true" : "false")"
+                                            class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-amber-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer"
+                                            title="Sticker info &amp; favorites"
+                                            aria-label="Sticker info and favorites">
+                                        <span class="material-symbols-outlined text-[16px]">@(st.IsFavoritedByCurrentUser ? "star" : "star_outline")</span>
+                                    </button>
+                                }
                                 <button type="button" data-action="delete" class="w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-red-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer" title="Delete message" aria-label="Delete message">
                                     <span class="material-symbols-outlined text-[16px]">delete</span>
                                 </button>
@@ -717,7 +856,7 @@
             </div>
             <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
                 <textarea id="message-content-input" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
-                <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" aria-label="Add emoji" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Add Emoji">
+                <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" aria-label="Emoji and stickers" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Emoji &amp; Stickers">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
                 </button>
             </div>

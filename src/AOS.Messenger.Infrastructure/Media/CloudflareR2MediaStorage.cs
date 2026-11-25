@@ -124,7 +124,7 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         TimeSpan expiresIn,
         DateTimeOffset nowUtc)
     {
-        MediaStorageKeyValidator.ValidateObjectKey(objectKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(objectKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(responseContentType);
         ArgumentException.ThrowIfNullOrWhiteSpace(responseContentDisposition);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(expiresIn, TimeSpan.Zero);
@@ -319,7 +319,7 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidateObjectKey(stagingKey, MediaConstraints.PendingKeyPrefix);
-        MediaStorageKeyValidator.ValidateObjectKey(permanentKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(permanentKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(verifiedContentType);
 
         var request = new CopyObjectRequest
@@ -372,7 +372,7 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidateObjectKey(stagingKey, MediaConstraints.PendingKeyPrefix);
-        MediaStorageKeyValidator.ValidateObjectKey(permanentKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(permanentKey);
         ArgumentNullException.ThrowIfNull(content);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(contentLength);
         ArgumentException.ThrowIfNullOrWhiteSpace(verifiedContentType);

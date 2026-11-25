@@ -128,9 +128,9 @@ public sealed class MessagesControllerTests
     }
 
     [Theory]
-    [InlineData(nameof(MessagesController.GetMessages), typeof(HttpGetAttribute))]
-    [InlineData(nameof(MessagesController.SendMessage), typeof(HttpPostAttribute))]
-    public void Endpoints_HaveRateLimiting_AndCorrectHttpVerb(string actionName, Type httpVerbAttributeType)
+    [InlineData(nameof(MessagesController.GetMessages), typeof(HttpGetAttribute), "messages-read")]
+    [InlineData(nameof(MessagesController.SendMessage), typeof(HttpPostAttribute), "messages")]
+    public void Endpoints_HaveRateLimiting_AndCorrectHttpVerb(string actionName, Type httpVerbAttributeType, string expectedPolicy)
     {
         var method = typeof(MessagesController).GetMethod(actionName);
         Assert.NotNull(method);
@@ -140,7 +140,7 @@ public sealed class MessagesControllerTests
 
         var rateLimitAttr = method.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimitAttr);
-        Assert.Equal("messages", rateLimitAttr.PolicyName);
+        Assert.Equal(expectedPolicy, rateLimitAttr.PolicyName);
     }
 
     [Fact]

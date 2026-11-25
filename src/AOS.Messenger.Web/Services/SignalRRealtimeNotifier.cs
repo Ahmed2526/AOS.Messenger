@@ -58,6 +58,11 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
         ArgumentNullException.ThrowIfNull(recipientUserId);
         ArgumentNullException.ThrowIfNull(receipt);
 
+        if (!await IsAuthorizedDirectPeerAsync(new ConversationId(receipt.ConversationId), new UserId(receipt.UserId), recipientUserId, ct))
+        {
+            return;
+        }
+
         await _hubContext.Clients.User(recipientUserId.Value.ToString()).ReceiveReceiptUpdated(receipt);
     }
 
@@ -68,6 +73,11 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
     {
         ArgumentNullException.ThrowIfNull(recipientUserId);
         ArgumentNullException.ThrowIfNull(typing);
+
+        if (!await IsAuthorizedDirectPeerAsync(new ConversationId(typing.ConversationId), new UserId(typing.UserId), recipientUserId, ct))
+        {
+            return;
+        }
 
         await _hubContext.Clients.User(recipientUserId.Value.ToString()).ReceiveTypingIndicator(typing);
     }
@@ -158,6 +168,42 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
         await _hubContext.Clients.Users(recipientUserIds).ReceiveReactionUpdated(reaction);
     }
 
+    public async Task NotifyUserProfileUpdatedAsync(
+        UserId userId,
+        UserProfileUpdatedDto profile,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(userId);
+        ArgumentNullException.ThrowIfNull(profile);
+
+        var targetIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            userId.Value.ToString()
+        };
+
+        if (_conversationPersistence is not null && _blockPersistence is not null)
+        {
+            var conversations = await _conversationPersistence.GetConversationsForUserAsync(userId, ct);
+            var blockedPeerIds = await _blockPersistence.GetBidirectionalBlockedUserIdsAsync(userId, ct);
+
+            foreach (var conv in conversations)
+            {
+                var peerId = conv.GetOtherParticipant(userId);
+                if (!blockedPeerIds.Contains(peerId))
+                {
+                    targetIds.Add(peerId.Value.ToString());
+                }
+            }
+        }
+
+        _logger.LogDebug(
+            "Broadcasting profile update for user {UserId} to {Count} recipient users.",
+            userId.Value,
+            targetIds.Count);
+
+        await _hubContext.Clients.Users(targetIds.ToList()).ReceiveUserProfileUpdated(profile);
+    }
+
     private async Task<List<string>?> GetAuthorizedRecipientsAsync(ConversationId conversationId, CancellationToken ct)
     {
         if (_conversationPersistence is null || _blockPersistence is null)
@@ -185,5 +231,34 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
         }
 
         return [conversation.Participant1Id.Value.ToString(), conversation.Participant2Id.Value.ToString()];
+    }
+
+    private async Task<bool> IsAuthorizedDirectPeerAsync(
+        ConversationId conversationId,
+        UserId senderUserId,
+        UserId recipientUserId,
+        CancellationToken ct)
+    {
+        if (_conversationPersistence is null || _blockPersistence is null)
+        {
+            _logger.LogError("Realtime notifier missing persistence dependencies; suppressing direct broadcast to prevent information disclosure.");
+            return false;
+        }
+
+        var conversation = await _conversationPersistence.GetByIdAsync(conversationId, ct);
+        if (conversation is null ||
+            !conversation.HasParticipant(senderUserId) ||
+            !conversation.HasParticipant(recipientUserId))
+        {
+            return false;
+        }
+
+        if (await _blockPersistence.IsBlockedBidirectionalAsync(senderUserId, recipientUserId, ct))
+        {
+            _logger.LogDebug("Conversation {ConversationId} has active block; suppressing direct realtime broadcast", conversationId.Value);
+            return false;
+        }
+
+        return true;
     }
 }

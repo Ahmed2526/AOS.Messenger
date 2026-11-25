@@ -87,24 +87,13 @@ public sealed class BlockPersistence : IBlockPersistence
 
     public async Task<IReadOnlySet<UserId>> GetBidirectionalBlockedUserIdsAsync(UserId userId, CancellationToken ct = default)
     {
-        var blockedByMe = await _db.UserBlocks
+        var blockedIds = await _db.UserBlocks
             .AsNoTracking()
-            .Where(b => b.BlockerId == userId)
-            .Select(b => b.BlockedUserId)
+            .Where(b => b.BlockerId == userId || b.BlockedUserId == userId)
+            .Select(b => b.BlockerId == userId ? b.BlockedUserId : b.BlockerId)
+            .Distinct()
             .ToListAsync(ct);
 
-        var blockedMe = await _db.UserBlocks
-            .AsNoTracking()
-            .Where(b => b.BlockedUserId == userId)
-            .Select(b => b.BlockerId)
-            .ToListAsync(ct);
-
-        var set = new HashSet<UserId>(blockedByMe);
-        foreach (var id in blockedMe)
-        {
-            set.Add(id);
-        }
-
-        return set;
+        return new HashSet<UserId>(blockedIds);
     }
 }

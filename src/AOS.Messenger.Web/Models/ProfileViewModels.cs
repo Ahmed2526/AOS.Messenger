@@ -20,5 +20,6 @@ public sealed class ProfileViewModel : UpdateProfileViewModel
     public UserId? Id { get; set; }
     public string UserName { get; set; } = string.Empty;
     public string? Email { get; set; }
+    public string? AvatarVersion { get; set; }
     public string? StatusMessage { get; set; }
 }

@@ -101,6 +101,23 @@ public sealed class MediaCleanupService : BackgroundService
                     .SetProperty(m => m.FailureReason, "Upload timed out before completion."),
                 ct);
 
+        timedOutPendingCount += await db.PendingAvatarUploads
+            .Where(p => p.State == MediaState.Pending && p.CreatedAtUtc < pendingCutoff)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(p => p.State, MediaState.Failed)
+                    .SetProperty(p => p.FailureReason, "Upload timed out before completion."),
+                ct);
+
+        timedOutPendingCount += await db.Stickers
+            .Where(st => st.UploaderId != null && st.State == StickerState.Pending && st.CreatedAtUtc < pendingCutoff)
+            .ExecuteUpdateAsync(
+                s => s
+                    .SetProperty(st => st.State, StickerState.Failed)
+                    .SetProperty(st => st.FailureReason, "Upload timed out before completion.")
+                    .SetProperty(st => st.DeletedAtUtc, nowUtc),
+                ct);
+
         // Step 2: Transition stale unattached Uploaded rows -> Deleted atomically before touching media/ objects.
         var expiredUploadedCount = await db.Media
             .Where(m => m.State == MediaState.Uploaded
@@ -115,16 +132,53 @@ public sealed class MediaCleanupService : BackgroundService
 
         // Step 3: Delete storage objects for unpurged Failed/Deleted rows, then stamp PurgedAtUtc.
         var storagePurgedCount = await PurgeDeletedOrFailedStorageObjectsAsync(db, ct);
+        storagePurgedCount += await PurgeDeletedOrFailedAvatarUploadsAsync(db, ct);
+        storagePurgedCount += await PurgeFailedAndUnreferencedArchivedStickersAsync(db, ct);
 
         // Step 4: Sweep orphaned staging and permanent objects that have exceeded the grace period.
         var orphanDeletedCount = await SweepOrphanPrefixAsync(db, MediaConstraints.PendingKeyPrefix, orphanCutoff, ct);
         orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.MediaKeyPrefix, orphanCutoff, ct);
+        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.ThumbnailKeyPrefix, orphanCutoff, ct);
+        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.AvatarKeyPrefix, orphanCutoff, ct);
+        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.StickerKeyPrefix, orphanCutoff, ct);
 
         // Step 5: Delete expired metadata rows already purged from storage.
         var metadataDeletedCount = await db.Media
             .Where(m => (m.State == MediaState.Failed || m.State == MediaState.Deleted)
                         && m.PurgedAtUtc != null
                         && m.PurgedAtUtc < retentionCutoff)
+            .ExecuteDeleteAsync(ct);
+
+        metadataDeletedCount += await db.PendingAvatarUploads
+            .Where(p => (p.State == MediaState.Failed || p.State == MediaState.Deleted)
+                        && p.PurgedAtUtc != null
+                        && p.PurgedAtUtc < retentionCutoff)
+            .ExecuteDeleteAsync(ct);
+
+        var deletableExpiredStickerIds = db.Stickers
+            .Where(st => st.UploaderId != null
+                         && (st.State == StickerState.Failed || st.State == StickerState.Archived)
+                         && st.PurgedAtUtc != null
+                         && st.PurgedAtUtc < retentionCutoff
+                         && !db.Messages.Any(m => m.StickerId == st.Id))
+            .Select(st => st.Id);
+
+        await db.UserFavoriteStickers
+            .Where(f => deletableExpiredStickerIds.Contains(f.StickerId))
+            .ExecuteDeleteAsync(ct);
+
+        await db.UserRecentStickers
+            .Where(r => deletableExpiredStickerIds.Contains(r.StickerId))
+            .ExecuteDeleteAsync(ct);
+
+        metadataDeletedCount += await db.Stickers
+            .Where(st => st.UploaderId != null
+                         && (st.State == StickerState.Failed || st.State == StickerState.Archived)
+                         && st.PurgedAtUtc != null
+                         && st.PurgedAtUtc < retentionCutoff
+                         && !db.Messages.Any(m => m.StickerId == st.Id)
+                         && !db.UserFavoriteStickers.Any(f => f.StickerId == st.Id)
+                         && !db.UserRecentStickers.Any(r => r.StickerId == st.Id))
             .ExecuteDeleteAsync(ct);
 
         if (timedOutPendingCount > 0
@@ -164,7 +218,7 @@ public sealed class MediaCleanupService : BackgroundService
                             && !failedIds.Contains(m.Id))
                 .OrderBy(m => m.Id)
                 .Take(BatchSize)
-                .Select(m => new { m.Id, m.ObjectKey, m.State, m.VerifiedSizeBytes })
+                .Select(m => new { m.Id, m.ObjectKey, m.ThumbnailObjectKey, m.State, m.VerifiedSizeBytes })
                 .ToListAsync(ct);
 
             if (batch.Count == 0)
@@ -198,6 +252,11 @@ public sealed class MediaCleanupService : BackgroundService
                         await _mediaStorage.DeleteObjectAsync(item.ObjectKey, ct);
                     }
 
+                    if (!string.IsNullOrWhiteSpace(item.ThumbnailObjectKey))
+                    {
+                        await _mediaStorage.DeleteObjectAsync(item.ThumbnailObjectKey, ct);
+                    }
+
                     deletedIds.Add(item.Id);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -217,7 +276,7 @@ public sealed class MediaCleanupService : BackgroundService
             if (deletedIds.Count > 0)
             {
                 var purgeTime = _timeProvider.GetUtcNow();
-                foreach (var (mediaId, stagedBytes) in measuredStagedSizes)
+                foreach (var (mediaId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
                 {
                     var updatedMeasured = await db.Media
                         .Where(m => m.Id == mediaId
@@ -257,6 +316,213 @@ public sealed class MediaCleanupService : BackgroundService
         return totalPurged;
     }
 
+    private async Task<int> PurgeDeletedOrFailedAvatarUploadsAsync(ApplicationDbContext db, CancellationToken ct)
+    {
+        var totalPurged = 0;
+        var failedIds = new HashSet<AvatarUploadId>();
+
+        while (!ct.IsCancellationRequested && failedIds.Count < MaxFailedDeletesPerPass)
+        {
+            var batch = await db.PendingAvatarUploads
+                .AsNoTracking()
+                .Where(p => (p.State == MediaState.Deleted || p.State == MediaState.Failed)
+                            && p.PurgedAtUtc == null
+                            && !failedIds.Contains(p.Id))
+                .OrderBy(p => p.Id)
+                .Take(BatchSize)
+                .Select(p => new { p.Id, p.ObjectKey, p.State, p.VerifiedSizeBytes })
+                .ToListAsync(ct);
+
+            if (batch.Count == 0)
+            {
+                break;
+            }
+
+            var deletedIds = new List<AvatarUploadId>(batch.Count);
+            var measuredStagedSizes = new Dictionary<AvatarUploadId, long>();
+            foreach (var item in batch)
+            {
+                try
+                {
+                    if (item.State == MediaState.Failed
+                        && item.VerifiedSizeBytes is null
+                        && item.ObjectKey.StartsWith(MediaConstraints.PendingKeyPrefix, StringComparison.Ordinal))
+                    {
+                        var stagedMeta = await _mediaStorage.GetObjectMetadataAsync(item.ObjectKey, ct);
+                        if (stagedMeta is not null)
+                        {
+                            if (stagedMeta.ContentLength > 0)
+                            {
+                                measuredStagedSizes[item.Id] = stagedMeta.ContentLength;
+                            }
+
+                            await _mediaStorage.DeleteObjectAsync(item.ObjectKey, ct);
+                        }
+                    }
+                    else
+                    {
+                        await _mediaStorage.DeleteObjectAsync(item.ObjectKey, ct);
+                    }
+
+                    deletedIds.Add(item.Id);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failedIds.Add(item.Id);
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to delete staging object for avatar upload {UploadId} during cleanup.",
+                        item.Id.Value);
+                }
+            }
+
+            if (deletedIds.Count > 0)
+            {
+                var purgeTime = _timeProvider.GetUtcNow();
+                foreach (var (uploadId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
+                {
+                    totalPurged += await db.PendingAvatarUploads
+                        .Where(p => p.Id == uploadId && p.State == MediaState.Failed && p.PurgedAtUtc == null)
+                        .ExecuteUpdateAsync(
+                            s => s
+                                .SetProperty(p => p.VerifiedSizeBytes, p => p.VerifiedSizeBytes ?? stagedBytes)
+                                .SetProperty(p => p.PurgedAtUtc, purgeTime),
+                            ct);
+                }
+
+                var remainingIds = measuredStagedSizes.Count == 0
+                    ? deletedIds
+                    : deletedIds.Where(id => !measuredStagedSizes.ContainsKey(id)).ToList();
+
+                if (remainingIds.Count > 0)
+                {
+                    totalPurged += await db.PendingAvatarUploads
+                        .Where(p => remainingIds.Contains(p.Id)
+                                    && (p.State == MediaState.Deleted || p.State == MediaState.Failed)
+                                    && p.PurgedAtUtc == null)
+                        .ExecuteUpdateAsync(s => s.SetProperty(p => p.PurgedAtUtc, purgeTime), ct);
+                }
+            }
+
+            if (batch.Count < BatchSize)
+            {
+                break;
+            }
+        }
+
+        return totalPurged;
+    }
+
+    private async Task<int> PurgeFailedAndUnreferencedArchivedStickersAsync(ApplicationDbContext db, CancellationToken ct)
+    {
+        var totalPurged = 0;
+        var failedIds = new HashSet<StickerId>();
+
+        while (!ct.IsCancellationRequested && failedIds.Count < MaxFailedDeletesPerPass)
+        {
+            var batch = await db.Stickers
+                .AsNoTracking()
+                .Where(s => s.UploaderId != null
+                            && s.ObjectKey != null
+                            && s.PurgedAtUtc == null
+                            && !failedIds.Contains(s.Id)
+                            && (s.State == StickerState.Failed
+                                || (s.State == StickerState.Archived
+                                    && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone))))
+                .OrderBy(s => s.Id)
+                .Take(BatchSize)
+                .Select(s => new { s.Id, s.ObjectKey, s.State, s.VerifiedSizeBytes })
+                .ToListAsync(ct);
+
+            if (batch.Count == 0)
+            {
+                break;
+            }
+
+            var deletedIds = new List<StickerId>(batch.Count);
+            var measuredStagedSizes = new Dictionary<StickerId, long>();
+            foreach (var item in batch)
+            {
+                try
+                {
+                    var key = item.ObjectKey!;
+                    if (item.State == StickerState.Failed
+                        && item.VerifiedSizeBytes is null
+                        && key.StartsWith(MediaConstraints.PendingKeyPrefix, StringComparison.Ordinal))
+                    {
+                        var stagedMeta = await _mediaStorage.GetObjectMetadataAsync(key, ct);
+                        if (stagedMeta is not null)
+                        {
+                            if (stagedMeta.ContentLength > 0)
+                            {
+                                measuredStagedSizes[item.Id] = stagedMeta.ContentLength;
+                            }
+
+                            await _mediaStorage.DeleteObjectAsync(key, ct);
+                        }
+                    }
+                    else
+                    {
+                        await _mediaStorage.DeleteObjectAsync(key, ct);
+                    }
+
+                    deletedIds.Add(item.Id);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    failedIds.Add(item.Id);
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to delete storage object for sticker {StickerId} during cleanup.",
+                        item.Id.Value);
+                }
+            }
+
+            if (deletedIds.Count > 0)
+            {
+                var purgeTime = _timeProvider.GetUtcNow();
+                foreach (var (stickerId, stagedBytes) in measuredStagedSizes.Where(pair => deletedIds.Contains(pair.Key)))
+                {
+                    totalPurged += await db.Stickers
+                        .Where(s => s.Id == stickerId && s.State == StickerState.Failed && s.PurgedAtUtc == null)
+                        .ExecuteUpdateAsync(
+                            s => s
+                                .SetProperty(st => st.VerifiedSizeBytes, st => st.VerifiedSizeBytes ?? stagedBytes)
+                                .SetProperty(st => st.PurgedAtUtc, purgeTime),
+                            ct);
+                }
+
+                var remainingIds = measuredStagedSizes.Count == 0
+                    ? deletedIds
+                    : deletedIds.Where(id => !measuredStagedSizes.ContainsKey(id)).ToList();
+
+                if (remainingIds.Count > 0)
+                {
+                    totalPurged += await db.Stickers
+                        .Where(s => remainingIds.Contains(s.Id)
+                                    && (s.State == StickerState.Failed || s.State == StickerState.Archived)
+                                    && s.PurgedAtUtc == null)
+                        .ExecuteUpdateAsync(s => s.SetProperty(st => st.PurgedAtUtc, purgeTime), ct);
+                }
+            }
+
+            if (batch.Count < BatchSize)
+            {
+                break;
+            }
+        }
+
+        return totalPurged;
+    }
+
     private async Task<int> SweepOrphanPrefixAsync(
         ApplicationDbContext db,
         string prefix,
@@ -276,14 +542,14 @@ public sealed class MediaCleanupService : BackgroundService
             chunk.Add(item);
             if (chunk.Count >= BatchSize)
             {
-                deletedCount += await DeleteUnreferencedChunkAsync(db, chunk, ct);
+                deletedCount += await DeleteUnreferencedChunkAsync(db, prefix, chunk, ct);
                 chunk.Clear();
             }
         }
 
         if (chunk.Count > 0)
         {
-            deletedCount += await DeleteUnreferencedChunkAsync(db, chunk, ct);
+            deletedCount += await DeleteUnreferencedChunkAsync(db, prefix, chunk, ct);
         }
 
         return deletedCount;
@@ -291,17 +557,81 @@ public sealed class MediaCleanupService : BackgroundService
 
     private async Task<int> DeleteUnreferencedChunkAsync(
         ApplicationDbContext db,
+        string prefix,
         List<StoredObjectInfo> chunk,
         CancellationToken ct)
     {
         var chunkKeys = chunk.Select(c => c.ObjectKey).Distinct(StringComparer.Ordinal).ToList();
-        var activeKeys = await db.Media
-            .AsNoTracking()
-            .Where(m => chunkKeys.Contains(m.ObjectKey) && m.PurgedAtUtc == null)
-            .Select(m => m.ObjectKey)
-            .ToListAsync(ct);
+        var activeSet = new HashSet<string>(StringComparer.Ordinal);
 
-        var activeSet = activeKeys.ToHashSet(StringComparer.Ordinal);
+        if (string.Equals(prefix, MediaConstraints.PendingKeyPrefix, StringComparison.Ordinal))
+        {
+            var activeMedia = await db.Media
+                .AsNoTracking()
+                .Where(m => chunkKeys.Contains(m.ObjectKey) && m.PurgedAtUtc == null)
+                .Select(m => m.ObjectKey)
+                .ToListAsync(ct);
+            var activeAvatars = await db.PendingAvatarUploads
+                .AsNoTracking()
+                .Where(p => chunkKeys.Contains(p.ObjectKey) && p.PurgedAtUtc == null && p.State != MediaState.Uploaded)
+                .Select(p => p.ObjectKey)
+                .ToListAsync(ct);
+            var activeStickers = await db.Stickers
+                .AsNoTracking()
+                .Where(s => s.ObjectKey != null && chunkKeys.Contains(s.ObjectKey) && s.PurgedAtUtc == null)
+                .Select(s => s.ObjectKey!)
+                .ToListAsync(ct);
+
+            foreach (var k in activeMedia) activeSet.Add(k);
+            foreach (var k in activeAvatars) activeSet.Add(k);
+            foreach (var k in activeStickers) activeSet.Add(k);
+        }
+        else if (string.Equals(prefix, MediaConstraints.MediaKeyPrefix, StringComparison.Ordinal))
+        {
+            var activeMedia = await db.Media
+                .AsNoTracking()
+                .Where(m => chunkKeys.Contains(m.ObjectKey) && m.PurgedAtUtc == null)
+                .Select(m => m.ObjectKey)
+                .ToListAsync(ct);
+            foreach (var k in activeMedia) activeSet.Add(k);
+        }
+        else if (string.Equals(prefix, MediaConstraints.ThumbnailKeyPrefix, StringComparison.Ordinal))
+        {
+            var activeThumbs = await db.Media
+                .AsNoTracking()
+                .Where(m => m.ThumbnailObjectKey != null && chunkKeys.Contains(m.ThumbnailObjectKey) && m.PurgedAtUtc == null)
+                .Select(m => m.ThumbnailObjectKey!)
+                .ToListAsync(ct);
+            foreach (var k in activeThumbs) activeSet.Add(k);
+        }
+        else if (string.Equals(prefix, MediaConstraints.AvatarKeyPrefix, StringComparison.Ordinal))
+        {
+            // Intentionally query ALL users including soft-deleted accounts within the 30-day recovery window.
+            var activeFull = await db.Users
+                .AsNoTracking()
+                .Where(u => u.AvatarObjectKey != null && chunkKeys.Contains(u.AvatarObjectKey))
+                .Select(u => u.AvatarObjectKey!)
+                .ToListAsync(ct);
+            var activeThumb = await db.Users
+                .AsNoTracking()
+                .Where(u => u.AvatarThumbnailObjectKey != null && chunkKeys.Contains(u.AvatarThumbnailObjectKey))
+                .Select(u => u.AvatarThumbnailObjectKey!)
+                .ToListAsync(ct);
+
+            foreach (var k in activeFull) activeSet.Add(k);
+            foreach (var k in activeThumb) activeSet.Add(k);
+        }
+        else if (string.Equals(prefix, MediaConstraints.StickerKeyPrefix, StringComparison.Ordinal))
+        {
+            var activeStickers = await db.Stickers
+                .AsNoTracking()
+                .Where(s => s.ObjectKey != null && chunkKeys.Contains(s.ObjectKey) && s.PurgedAtUtc == null)
+                .Select(s => s.ObjectKey!)
+                .ToListAsync(ct);
+
+            foreach (var k in activeStickers) activeSet.Add(k);
+        }
+
         var deletedCount = 0;
 
         foreach (var item in chunk)

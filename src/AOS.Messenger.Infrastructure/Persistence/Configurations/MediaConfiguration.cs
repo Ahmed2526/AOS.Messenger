@@ -25,6 +25,9 @@ public sealed class MediaConfiguration : IEntityTypeConfiguration<Media>
             t.HasCheckConstraint(
                 "CK_Media_Sizes_Positive",
                 "[DeclaredSizeBytes] > 0 AND ([VerifiedSizeBytes] IS NULL OR [VerifiedSizeBytes] > 0)");
+            t.HasCheckConstraint(
+                "CK_Media_ThumbnailObjectKey",
+                "([ThumbnailObjectKey] IS NULL OR [ThumbnailObjectKey] LIKE N'thumbs/%')");
         });
 
         builder.HasKey(m => m.Id).IsClustered();
@@ -61,6 +64,14 @@ public sealed class MediaConfiguration : IEntityTypeConfiguration<Media>
         builder.Property(m => m.ObjectKey)
             .HasMaxLength(256)
             .IsRequired();
+
+        builder.Property(m => m.ThumbnailObjectKey)
+            .HasMaxLength(256);
+
+        builder.Property(m => m.ThumbnailContentType)
+            .HasMaxLength(64);
+
+        builder.Property(m => m.ThumbnailSizeBytes);
 
         builder.Property(m => m.SanitizedFileName)
             .HasMaxLength(255)
@@ -104,6 +115,10 @@ public sealed class MediaConfiguration : IEntityTypeConfiguration<Media>
         // Unique object key and storage object identifier indexes
         builder.HasIndex(m => m.ObjectKey)
             .IsUnique();
+
+        builder.HasIndex(m => m.ThumbnailObjectKey)
+            .IsUnique()
+            .HasFilter("[ThumbnailObjectKey] IS NOT NULL");
 
         builder.HasIndex(m => m.StorageObjectId)
             .IsUnique();

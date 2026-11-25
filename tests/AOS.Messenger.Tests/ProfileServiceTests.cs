@@ -296,4 +296,76 @@ public sealed class ProfileServiceTests : IClassFixture<SqlTestDatabaseFixture>
 
         Assert.False(success);
     }
+
+    [Fact]
+    public async Task UpdateProfileAsync_WhenRealtimeNotifierThrows_LogsWarningWithUserIdOnly_AndReturnsTrue()
+    {
+        var (provider, _, userManager) = CreateTestEnvironment();
+        var user = new ApplicationUser
+        {
+            Id = Guid.NewGuid(),
+            UserName = $"notifwarn_{Guid.NewGuid():N}",
+            Email = $"notifwarn_{Guid.NewGuid():N}@example.com",
+            DisplayName = "Original Sensitive Name",
+            Bio = "Original Sensitive Bio",
+            IsDeleted = false
+        };
+        await userManager.CreateAsync(user, "Password123!");
+
+        var logger = new RecordingProfileLogger();
+        var service = new ProfileService(
+            provider.GetRequiredService<IUserReader>(),
+            provider.GetRequiredService<IUserWriter>(),
+            provider.GetRequiredService<IBlockPersistence>(),
+            new ThrowingProfileNotifier(),
+            logger);
+
+        const string secretDisplayName = "SuperSecretUpdatedDisplayName";
+        var success = await service.UpdateProfileAsync(
+            user.ToDomainUserId(),
+            new UpdateProfileDto(secretDisplayName, "SecretUpdatedBio"));
+
+        Assert.True(success);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(LogLevel.Warning, entry.Level);
+        Assert.Contains(user.Id.ToString(), entry.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(secretDisplayName, entry.Message, StringComparison.Ordinal);
+    }
+
+    private sealed class ThrowingProfileNotifier : IRealtimeNotifier
+    {
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) =>
+            throw new InvalidOperationException("Simulated SignalR profile broadcast failure");
+    }
+
+    private sealed class RecordingProfileLogger : ILogger<ProfileService>
+    {
+        public List<(LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            LogLevel logLevel,
+            EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((logLevel, formatter(state, exception)));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
+        }
+    }
 }

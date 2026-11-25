@@ -1,3 +1,4 @@
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Domain.ValueObjects;
@@ -9,6 +10,7 @@ using Microsoft.AspNetCore.RateLimiting;
 namespace AOS.Messenger.Web.Controllers;
 
 [Authorize]
+[RequestSizeLimit(16 * 1024)]
 public sealed class ChatController : Controller
 {
     private readonly IConversationService _conversationService;
@@ -25,6 +27,8 @@ public sealed class ChatController : Controller
         _currentUser = currentUser;
     }
 
+    internal const string SidebarConversationsHttpContextKey = "AOS.Messenger.SidebarConversations";
+
     // Screen 1: A♡S Desktop App Shell - Light Theme (Main active messenger view)
     [HttpGet]
     public async Task<IActionResult> Index(CancellationToken ct = default)
@@ -38,6 +42,11 @@ public sealed class ChatController : Controller
             _currentUser.Id,
             includeArchived: false,
             ct);
+
+        if (HttpContext is not null)
+        {
+            HttpContext.Items[SidebarConversationsHttpContextKey] = (_currentUser.Id, conversations);
+        }
 
         return View(new ChatIndexViewModel
         {
@@ -65,7 +74,11 @@ public sealed class ChatController : Controller
         var conversationId = new ConversationId(id);
         var conversation = await _conversationService.GetConversationAsync(_currentUser.Id, conversationId, ct);
         var conversations = await _conversationService.GetConversationListAsync(_currentUser.Id, includeArchived: false, ct);
-        var messagesPage = await _messageService.GetMessagesAsync(_currentUser.Id, conversationId, null, 30, ct);
+        if (HttpContext is not null)
+        {
+            HttpContext.Items[SidebarConversationsHttpContextKey] = (_currentUser.Id, conversations);
+        }
+        var messagesPage = await _messageService.GetMessagesAsync(_currentUser.Id, conversationId, null, PaginationDefaults.DefaultMessagePageSize, ct);
 
         return View(new ChatConversationViewModel
         {
@@ -132,6 +145,7 @@ public sealed class ChatController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Pin([FromForm] Guid conversationId, [FromForm] bool isPinned, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)
@@ -150,6 +164,7 @@ public sealed class ChatController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Archive([FromForm] Guid conversationId, [FromForm] bool isArchived, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)
@@ -173,6 +188,7 @@ public sealed class ChatController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Mute([FromForm] Guid conversationId, [FromForm] bool isMuted, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)
@@ -191,6 +207,7 @@ public sealed class ChatController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Clear([FromForm] Guid conversationId, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)
@@ -208,6 +225,7 @@ public sealed class ChatController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Delete([FromForm] Guid conversationId, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)

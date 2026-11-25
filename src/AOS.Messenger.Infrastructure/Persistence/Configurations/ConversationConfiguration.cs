@@ -41,5 +41,7 @@ public sealed class ConversationConfiguration : IEntityTypeConfiguration<Convers
 
         builder.HasIndex(c => new { c.Participant1Id, c.Participant2Id })
             .IsUnique();
+
+        builder.HasIndex(c => c.Participant2Id);
     }
 }

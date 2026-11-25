@@ -471,6 +471,51 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         var startLimiter = chatStartMethod.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(startLimiter);
         Assert.Equal("messages", startLimiter.PolicyName);
+
+        // 5. All authenticated mutation/lookup & API endpoints carry RequestSizeLimit and EnableRateLimiting ([W12])
+        foreach (var controllerType in new[]
+        {
+            typeof(AccountController),
+            typeof(ChatController),
+            typeof(ProfileController),
+            typeof(SettingsController),
+            typeof(UsersController),
+            typeof(MessagesController),
+            typeof(ConversationsController),
+            typeof(ReceiptsController),
+            typeof(PresenceController)
+        })
+        {
+            var sizeAttr = controllerType.GetCustomAttribute<RequestSizeLimitAttribute>();
+            Assert.NotNull(sizeAttr);
+            var meta = Assert.IsAssignableFrom<Microsoft.AspNetCore.Http.Metadata.IRequestSizeLimitMetadata>(sizeAttr);
+            Assert.Equal(16 * 1024, meta.MaxRequestBodySize);
+        }
+
+        foreach (var (type, methodName, expectedPolicy) in new (Type, string, string)[]
+        {
+            (typeof(UsersController), nameof(UsersController.GetById), "search"),
+            (typeof(ProfileController), nameof(ProfileController.Index), "messages"),
+            (typeof(SettingsController), nameof(SettingsController.BlockUser), "messages"),
+            (typeof(SettingsController), nameof(SettingsController.UnblockUser), "messages"),
+            (typeof(ChatController), nameof(ChatController.Pin), "messages"),
+            (typeof(ChatController), nameof(ChatController.Archive), "messages"),
+            (typeof(ChatController), nameof(ChatController.Mute), "messages"),
+            (typeof(ChatController), nameof(ChatController.Clear), "messages"),
+            (typeof(ChatController), nameof(ChatController.Delete), "messages"),
+            (typeof(AccountController), nameof(AccountController.Logout), "messages"),
+            (typeof(AccountController), nameof(AccountController.RevokeSession), "messages"),
+            (typeof(AccountController), nameof(AccountController.RevokeOtherSessions), "messages"),
+            (typeof(AccountController), nameof(AccountController.DeleteAccount), "messages")
+        })
+        {
+            var method = type.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == methodName && (m.GetCustomAttribute<HttpPostAttribute>() != null || m.GetCustomAttribute<HttpGetAttribute>() != null && type == typeof(UsersController)));
+            Assert.NotNull(method);
+            var attr = method.GetCustomAttribute<EnableRateLimitingAttribute>();
+            Assert.NotNull(attr);
+            Assert.Equal(expectedPolicy, attr.PolicyName);
+        }
     }
 
     // =========================================================================
@@ -620,9 +665,10 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         Assert.DoesNotContain("cursor=${encodeURIComponent(latestReceivedCursor)}", signalrClientContent);
         Assert.DoesNotContain("cursor=${encodeURIComponent(latestReceivedCursor)}", apiClientContent);
 
-        // Must query latest messages page with pageSize 30
-        Assert.Contains("pageSize: 30", signalrClientContent);
-        Assert.Contains("pageSize = 30", apiClientContent);
+        // Must query latest messages page with DEFAULT_MESSAGE_PAGE_SIZE (20)
+        Assert.Contains("pageSize: DEFAULT_MESSAGE_PAGE_SIZE", signalrClientContent);
+        Assert.Contains("DEFAULT_MESSAGE_PAGE_SIZE = 20", apiClientContent);
+        Assert.Contains("pageSize = DEFAULT_MESSAGE_PAGE_SIZE", apiClientContent);
     }
 
     [Fact]
@@ -760,6 +806,7 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
             public Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message) => Task.CompletedTask;
             public Task ReceiveMessageDeletedForMe(MessageDeletedForMeDto message) => Task.CompletedTask;
             public Task ReceiveReactionUpdated(ReactionUpdatedDto reaction) => Task.CompletedTask;
+            public Task ReceiveUserProfileUpdated(UserProfileUpdatedDto profile) => Task.CompletedTask;
         }
     }
 }

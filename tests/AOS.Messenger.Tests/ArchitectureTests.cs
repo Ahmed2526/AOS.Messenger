@@ -27,6 +27,8 @@ public class ArchitectureTests
         typeof(IConversationService),
         typeof(IMessageService),
         typeof(IMediaService),
+        typeof(IAvatarService),
+        typeof(IStickerService),
         typeof(IBlockService),
         typeof(IProfileService),
         typeof(IUserDiscoveryService),

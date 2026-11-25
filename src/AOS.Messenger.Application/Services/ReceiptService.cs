@@ -33,8 +33,14 @@ public sealed class ReceiptService : IReceiptService
     }
 
     public async Task<ReceiptUpdateDto?> MarkDeliveredAsync(Guid conversationId, long upToMessageId, CancellationToken ct = default)
+        => (await MarkDeliveredWithRecipientAsync(conversationId, upToMessageId, ct))?.Receipt;
+
+    public async Task<ReceiptUpdateDto?> MarkReadAsync(Guid conversationId, long upToMessageId, CancellationToken ct = default)
+        => (await MarkReadWithRecipientAsync(conversationId, upToMessageId, ct))?.Receipt;
+
+    public async Task<ReceiptCommandResult?> MarkDeliveredWithRecipientAsync(Guid conversationId, long upToMessageId, CancellationToken ct = default)
     {
-        var (conversation, callerId, message) = await ValidateReceiptTargetAsync(conversationId, upToMessageId, ct);
+        var (conversation, callerId, peerId, message) = await ValidateReceiptTargetAsync(conversationId, upToMessageId, ct);
 
         var changed = await _conversationPersistence.AdvanceDeliveredWatermarkAsync(
             conversation.Id,
@@ -44,13 +50,15 @@ public sealed class ReceiptService : IReceiptService
             ct);
 
         return changed
-            ? new ReceiptUpdateDto(conversationId, callerId.Value, upToMessageId, _timeProvider.GetUtcNow(), "delivered")
+            ? new ReceiptCommandResult(
+                new ReceiptUpdateDto(conversationId, callerId.Value, upToMessageId, _timeProvider.GetUtcNow(), "delivered"),
+                peerId)
             : null;
     }
 
-    public async Task<ReceiptUpdateDto?> MarkReadAsync(Guid conversationId, long upToMessageId, CancellationToken ct = default)
+    public async Task<ReceiptCommandResult?> MarkReadWithRecipientAsync(Guid conversationId, long upToMessageId, CancellationToken ct = default)
     {
-        var (conversation, callerId, message) = await ValidateReceiptTargetAsync(conversationId, upToMessageId, ct);
+        var (conversation, callerId, peerId, message) = await ValidateReceiptTargetAsync(conversationId, upToMessageId, ct);
 
         var changed = await _conversationPersistence.AdvanceReadWatermarkAsync(
             conversation.Id,
@@ -60,11 +68,13 @@ public sealed class ReceiptService : IReceiptService
             ct);
 
         return changed
-            ? new ReceiptUpdateDto(conversationId, callerId.Value, upToMessageId, _timeProvider.GetUtcNow(), "read")
+            ? new ReceiptCommandResult(
+                new ReceiptUpdateDto(conversationId, callerId.Value, upToMessageId, _timeProvider.GetUtcNow(), "read"),
+                peerId)
             : null;
     }
 
-    private async Task<(Conversation Conversation, UserId CallerId, Message Message)> ValidateReceiptTargetAsync(
+    private async Task<(Conversation Conversation, UserId CallerId, UserId PeerId, Message Message)> ValidateReceiptTargetAsync(
         Guid conversationId,
         long upToMessageId,
         CancellationToken ct)
@@ -118,6 +128,6 @@ public sealed class ReceiptService : IReceiptService
             throw new ForbiddenException("Cannot mark receipts for own outgoing messages.");
         }
 
-        return (conversation, callerId, message);
+        return (conversation, callerId, peerId, message);
     }
 }

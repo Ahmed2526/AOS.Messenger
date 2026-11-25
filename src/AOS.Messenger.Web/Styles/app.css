@@ -354,6 +354,14 @@
   .dark .custom-scroll::-webkit-scrollbar-thumb:hover {
     background: rgba(216, 192, 128, 0.45);
   }
+
+  /* Prevent iOS/Android native long-press callout from fighting the WhatsApp-style mobile message action sheet */
+  @media (max-width: 639px) {
+    .message-bubble {
+      -webkit-touch-callout: none;
+      user-select: none;
+    }
+  }
 }
 
 @utility icon-filled {

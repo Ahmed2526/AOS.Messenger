@@ -1,3 +1,4 @@
+using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Domain.ValueObjects;
@@ -12,7 +13,8 @@ namespace AOS.Messenger.Web.Controllers;
 [Route("api/conversations")]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [AutoValidateAntiforgeryToken]
-[EnableRateLimiting("messages")]
+[EnableRateLimiting("messages-read")]
+[RequestSizeLimit(16 * 1024)]
 public sealed class ConversationsController : ControllerBase
 {
     private readonly IConversationService _conversationService;
@@ -54,7 +56,7 @@ public sealed class ConversationsController : ControllerBase
     [HttpGet("{conversationId:guid}/bundle")]
     public async Task<IActionResult> GetConversationBundle(
         Guid conversationId,
-        [FromQuery] int pageSize = 30,
+        [FromQuery] int pageSize = PaginationDefaults.DefaultMessagePageSize,
         CancellationToken ct = default)
     {
         if (_currentUser.Id is null)

@@ -334,6 +334,7 @@ public sealed class ZeroRefreshShellIntegrationTests
                 setDocumentBaseTitle,
                 setSidebarUnreadCount,
                 updateSidebarLastMessage,
+                renderSidebarConversations,
                 createSidebarConversationItemElement,
                 closeSidebarBroadcastChannel
             } = await import('{{JsUrl("conversation-list.js")}}');
@@ -406,6 +407,96 @@ public sealed class ZeroRefreshShellIntegrationTests
             assert.equal(dom.document.title, '(2) <script>alert(1)</script> - A♡S Messenger');
             setSidebarUnreadCount('conv-a', 0);
             assert.equal(dom.document.title, '<script>alert(1)</script> - A♡S Messenger');
+
+            // [S5] renderSidebarConversations patches matching items in-place instead of recreating nodes
+            renderSidebarConversations([
+                {
+                    id: 'conv-b',
+                    otherParticipantId: 'u-b',
+                    otherParticipantName: 'Bob Patched',
+                    otherParticipantHandle: 'bob',
+                    lastMessagePreview: 'Patched preview',
+                    unreadCount: 3,
+                    isPinned: false,
+                    isOnline: true
+                },
+                {
+                    id: 'conv-pinned',
+                    otherParticipantId: 'u-pin',
+                    otherParticipantName: 'Pinned Peer',
+                    otherParticipantHandle: 'pinned',
+                    lastMessagePreview: 'Still pinned',
+                    unreadCount: 0,
+                    isPinned: true
+                }
+            ], 'conv-b');
+            assert.equal(itemsWrap.children.length, 2, 'Removed conversation must be removed cleanly');
+            assert.equal(itemsWrap.children[0], elB, 'Existing element node for conv-b must be patched and reordered in-place');
+            assert.equal(itemsWrap.children[1], elPinned, 'Existing element node for conv-pinned must be reused in-place');
+            assert.equal(elB.querySelector('.conversation-last-message').textContent, 'Patched preview');
+            assert.equal(elB.getAttribute('data-unread-count'), '3');
+
+            // [S4] Shared #chat-action-error timer clears prior module error timers instead of truncating newer alerts
+            const errEl = dom.document.createElement('div');
+            errEl.id = 'chat-action-error';
+            errEl.className = 'hidden';
+            dom.document.body.appendChild(errEl);
+            const { showChatActionError, hideChatActionError } = await import('{{JsUrl("chat-action-error.js")}}');
+            const scheduledTimers = [];
+            const clearedTimers = [];
+            const origSetTimeout = globalThis.setTimeout;
+            const origClearTimeout = globalThis.clearTimeout;
+            globalThis.setTimeout = (fn, ms) => {
+                const id = scheduledTimers.length + 1;
+                scheduledTimers.push({ id, fn, ms });
+                return id;
+            };
+            globalThis.clearTimeout = (id) => { clearedTimers.push(id); };
+            try {
+                showChatActionError('Reaction failed', 4000);
+                assert.equal(errEl.classList.contains('hidden'), false);
+                showChatActionError('Send failed', 5000);
+                assert.deepEqual(clearedTimers, [1], 'Newer error must cancel earlier module hide timer');
+                assert.equal(errEl.textContent, 'Send failed');
+                scheduledTimers[1].fn();
+                assert.equal(errEl.classList.contains('hidden'), true);
+                hideChatActionError();
+            } finally {
+                globalThis.setTimeout = origSetTimeout;
+                globalThis.clearTimeout = origClearTimeout;
+            }
+
+            // [S5] Shared IntersectionObserver across multiple rendered <video> elements
+            const { hydrateMediaElements, disconnectActiveMediaObservers } = await import('{{JsUrl("message-renderer.js")}}');
+            let observerCreateCount = 0;
+            const observedTargets = [];
+            const origIO = globalThis.IntersectionObserver;
+            globalThis.IntersectionObserver = class {
+                constructor(cb) {
+                    observerCreateCount++;
+                    this.cb = cb;
+                }
+                observe(el) { observedTargets.push(el); }
+                unobserve() {}
+                disconnect() {}
+            };
+            try {
+                const mediaWrap = dom.document.createElement('div');
+                for (let i = 0; i < 3; i++) {
+                    const v = dom.document.createElement('video');
+                    v.setAttribute('data-media-video', 'true');
+                    v.setAttribute('data-conversation-id', 'conv-b');
+                    v.setAttribute('data-message-id', String(10 + i));
+                    v.setAttribute('data-media-id', `00000000-0000-0000-0000-00000000000${i}`);
+                    mediaWrap.appendChild(v);
+                }
+                hydrateMediaElements(mediaWrap);
+                assert.equal(observerCreateCount, 1, 'Multiple videos must share a single IntersectionObserver instance');
+                assert.equal(observedTargets.length, 3);
+                disconnectActiveMediaObservers();
+            } finally {
+                globalThis.IntersectionObserver = origIO;
+            }
 
             closeSidebarBroadcastChannel();
             console.log('OK');
@@ -628,7 +719,7 @@ public sealed class ZeroRefreshShellIntegrationTests
                 onSessionExpired: () => { sessionExpiredCalls++; },
                 fetchImpl: async (url) => {
                     fetchLog.push(url);
-                    if (url.includes('/bundle?pageSize=30') || url.includes('/messages?pageSize=30')) {
+                    if (url.includes('/bundle?pageSize=20') || url.includes('/messages?pageSize=20')) {
                         return {
                             status: 200,
                             ok: true,
@@ -738,7 +829,7 @@ public sealed class ZeroRefreshShellIntegrationTests
             // AND reconciles tombstones (499), edits + reactions (500), receipt watermarks (501), and conversation policy!
             await onReconnectedCb();
             assert.deepEqual(invocations[2], ['JoinConversation', 'conv-2']);
-            assert.ok(fetchLog.some(u => u.includes('/api/conversations/conv-2/bundle?pageSize=30')));
+            assert.ok(fetchLog.some(u => u.includes('/api/conversations/conv-2/bundle?pageSize=20')));
             assert.deepEqual(container.children.map(n => n.getAttribute('data-message-id')), ['499', '500', '501', '503']);
 
             const row499 = dom.document.getElementById('msg-499');
@@ -1201,6 +1292,127 @@ public sealed class ZeroRefreshShellIntegrationTests
                 assert.deepEqual(replacedUrls, ['/Account/Login?sessionExpired=true']);
 
                 shell.destroy();
+                closeSidebarBroadcastChannel();
+            }
+
+            // 3. [W13] Backed-off start() retry, onclose recovery, online trigger, and onreconnected catch reset
+            {
+                const dom = createMockDom();
+                mountMinimalShell(dom);
+                const { createChatState } = await import('{{JsUrl("chat-state.js")}}');
+                const { configureApiClient } = await import('{{JsUrl("api-client.js")}}');
+                const { createSignalRClient } = await import('{{JsUrl("signalr-client.js")}}');
+                const { closeSidebarBroadcastChannel } = await import('{{JsUrl("conversation-list.js")}}');
+
+                const state = createChatState();
+                state.activeConversationId = 'conv-recover';
+                state.currentUserId = 'u1';
+
+                const onlineListeners = [];
+                const origAddEvt = globalThis.window.addEventListener?.bind(globalThis.window);
+                const origRemEvt = globalThis.window.removeEventListener?.bind(globalThis.window);
+                globalThis.window.addEventListener = (type, fn) => {
+                    if (type === 'online') onlineListeners.push(fn);
+                    else origAddEvt?.(type, fn);
+                };
+                globalThis.window.removeEventListener = (type, fn) => {
+                    if (type === 'online') {
+                        const idx = onlineListeners.indexOf(fn);
+                        if (idx >= 0) onlineListeners.splice(idx, 1);
+                    } else origRemEvt?.(type, fn);
+                };
+
+                let startAttempts = 0;
+                let failStart = true;
+                let failJoin = false;
+                let onCloseCallback = null;
+                let onReconnectedCallback = null;
+                const joinCalls = [];
+                const reconcileCalls = [];
+
+                configureApiClient({
+                    onSessionExpired: () => {},
+                    fetchImpl: async (url) => {
+                        reconcileCalls.push(url);
+                        return {
+                            status: 200,
+                            ok: true,
+                            redirected: false,
+                            headers: { get: () => 'application/json' },
+                            text: async () => JSON.stringify(
+                                url.includes('/api/conversations') && !url.includes('bundle')
+                                    ? []
+                                    : { viewerUserId: 'u1', conversation: { id: 'conv-recover', otherParticipantName: 'Peer', otherParticipantHandle: 'peer' }, messages: [] }
+                            )
+                        };
+                    }
+                });
+
+                const fakeConn = {
+                    state: 'Disconnected',
+                    start: async () => {
+                        startAttempts++;
+                        if (failStart) throw new Error('Transient start failure');
+                        fakeConn.state = 'Connected';
+                    },
+                    stop: async () => { fakeConn.state = 'Disconnected'; },
+                    invoke: async (method, arg) => {
+                        if (method === 'JoinConversation') {
+                            joinCalls.push(arg);
+                            if (failJoin) throw new Error('Transient JoinConversation error');
+                        }
+                    },
+                    on: () => {},
+                    onreconnecting: () => {},
+                    onreconnected: (fn) => { onReconnectedCallback = fn; },
+                    onclose: (fn) => { onCloseCallback = fn; }
+                };
+
+                const client = createSignalRClient({
+                    state,
+                    onSessionExpired: () => {},
+                    retryDelaysMs: [10, 20],
+                    signalRLib: {
+                        HubConnectionState: { Connected: 'Connected' },
+                        HubConnectionBuilder: class {
+                            withUrl() { return this; }
+                            withAutomaticReconnect() { return this; }
+                            build() { return fakeConn; }
+                        }
+                    }
+                });
+
+                const firstOk = await client.start();
+                assert.equal(firstOk, false);
+                assert.equal(startAttempts, 1);
+
+                // Backoff timer recovers automatically
+                failStart = false;
+                await new Promise(r => setTimeout(r, 35));
+                assert.equal(startAttempts, 2);
+                assert.equal(fakeConn.state, 'Connected');
+                assert.ok(reconcileCalls.some(u => u.includes('/conv-recover/')));
+
+                // onclose followed by browser 'online' event triggers immediate reconnect
+                fakeConn.state = 'Disconnected';
+                onCloseCallback(new Error('Idle close'));
+                assert.equal(onlineListeners.length, 1);
+                onlineListeners[0]();
+                await new Promise(r => setTimeout(r, 20));
+                assert.equal(startAttempts, 3);
+                assert.equal(fakeConn.state, 'Connected');
+
+                // onreconnected JoinConversation error resets requestedConversationId so retry succeeds
+                joinCalls.length = 0;
+                failJoin = true;
+                await onReconnectedCallback();
+                assert.equal(joinCalls.length, 1);
+                failJoin = false;
+                await client.notifyActiveConversation('conv-recover');
+                assert.equal(joinCalls.length, 2);
+
+                client.destroy();
+                assert.equal(onlineListeners.length, 0);
                 closeSidebarBroadcastChannel();
             }
 

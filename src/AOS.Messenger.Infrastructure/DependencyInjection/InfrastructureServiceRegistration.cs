@@ -171,6 +171,8 @@ public static class InfrastructureServiceRegistration
         services.AddScoped<IMessagePersistence, MessagePersistence>();
         services.AddScoped<IReactionPersistence, ReactionPersistence>();
         services.AddScoped<IMediaPersistence, MediaPersistence>();
+        services.AddScoped<IAvatarPersistence, AvatarPersistence>();
+        services.AddScoped<IStickerPersistence, StickerPersistence>();
 
         services.AddOptions<MediaOptions>()
             .Bind(configuration.GetSection(MediaOptions.SectionName))
@@ -213,7 +215,10 @@ public static class InfrastructureServiceRegistration
             return sp.GetRequiredService<LocalDiskMediaStorage>();
         });
 
+        services.AddSingleton<ImageProcessingGate>();
         services.AddSingleton<IMediaVerifier, MediaVerifier>();
+        services.AddSingleton<IAvatarProcessor, AvatarProcessor>();
+        services.AddSingleton<IStickerProcessor, StickerProcessor>();
 
         services.AddTransient<IStartupFilter>(sp =>
             new DevMediaStartupFilter(

@@ -8,8 +8,15 @@
  * - Zero HTML string injection into live DOM.
  */
 
+import { hydrateAllAvatars } from './avatar-loader.js';
+
 (() => {
     'use strict';
+
+    const archivedList = document.getElementById('archivedList');
+    if (archivedList) {
+        hydrateAllAvatars(archivedList);
+    }
 
     const searchInput = document.getElementById('archivedSearchInput');
     if (searchInput) {

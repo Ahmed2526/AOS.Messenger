@@ -4,10 +4,12 @@ using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Web.Models;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace AOS.Messenger.Web.Controllers;
 
 [Authorize]
+[RequestSizeLimit(16 * 1024)]
 public sealed class ProfileController : Controller
 {
     private readonly IProfileService _profileService;
@@ -43,6 +45,7 @@ public sealed class ProfileController : Controller
             DisplayName = profile.DisplayName,
             Bio = profile.Bio,
             Email = email,
+            AvatarVersion = profile.AvatarVersion,
             StatusMessage = TempData["StatusMessage"] as string
         };
 
@@ -51,6 +54,7 @@ public sealed class ProfileController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Index(UpdateProfileViewModel model, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)

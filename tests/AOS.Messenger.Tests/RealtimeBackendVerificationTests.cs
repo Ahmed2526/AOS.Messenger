@@ -965,6 +965,7 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class ThrowingRealtimeNotifier : IRealtimeNotifier
@@ -999,6 +1000,9 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
 
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) =>
             throw _exception;
+
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) =>
+            throw _exception;
     }
 
     private sealed class CapturingRealtimeNotifier : IRealtimeNotifier
@@ -1023,6 +1027,7 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class StubConversationPersistence : IConversationPersistence
@@ -1053,6 +1058,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
         public Task<IReadOnlyList<UserConversationState>> GetUserStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
+        public Task<IReadOnlyList<UserConversationState>> GetPeerStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, UserId callerId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
         public Task<Message?> GetLastMessageAsync(ConversationId conversationId, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default) =>
             Task.FromResult<Message?>(null);
         public Task<int> GetUnreadCountAsync(ConversationId conversationId, UserId userId, MessageId? lastReadMessageId = null, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default) =>
@@ -1075,6 +1082,10 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             Task.FromResult(false);
         public Task<IReadOnlyList<UserId>> GetPeerUserIdsWithExistingConversationAsync(UserId userId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserId>>(Array.Empty<UserId>());
+        public Task<UserId?> GetVerifiedTypingRecipientAsync(UserId senderId, ConversationId conversationId, CancellationToken ct = default) =>
+            Task.FromResult<UserId?>(_conversation.Id == conversationId && _conversation.HasParticipant(senderId)
+                ? _conversation.GetOtherParticipant(senderId)
+                : null);
     }
 
     private sealed class StubBlockPersistence : IBlockPersistence
@@ -1104,6 +1115,9 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             Task.FromResult<UserProfileDto?>(null);
 
         public Task<bool> ExistsAsync(UserId userId, CancellationToken ct = default) => Task.FromResult(true);
+
+        public Task<IReadOnlySet<UserId>> GetActiveUserIdsAsync(IEnumerable<UserId> userIds, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlySet<UserId>>(userIds.ToHashSet());
 
         public Task<IReadOnlyList<UserSearchResultDto>> SearchUsersAsync(
             UserId currentUserId,

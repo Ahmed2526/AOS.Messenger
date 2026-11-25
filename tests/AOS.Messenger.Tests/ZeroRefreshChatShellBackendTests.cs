@@ -581,14 +581,14 @@ public sealed class ZeroRefreshChatShellBackendTests : IClassFixture<SqlTestData
 
         await LoginWithCookieAsync(client, isolatedUsername);
 
-        // Exhaust the 60 req/min "messages" rate-limiter partition for this dedicated test user
-        for (int i = 0; i < 60; i++)
+        // Exhaust the 120 req/min "messages-read" rate-limiter partition for this dedicated test user
+        for (int i = 0; i < 120; i++)
         {
             var okResp = await client.GetAsync($"/api/conversations/{convId}/bundle");
             Assert.Equal(HttpStatusCode.OK, okResp.StatusCode);
         }
 
-        // 61st request on /api route -> 429 ProblemDetails with no-store
+        // 121st request on /api route -> 429 ProblemDetails with no-store
         var rejectedApiResp = await client.GetAsync($"/api/conversations/{convId}/bundle");
         Assert.Equal(HttpStatusCode.TooManyRequests, rejectedApiResp.StatusCode);
         AssertNoStoreHeaders(rejectedApiResp);
@@ -602,13 +602,183 @@ public sealed class ZeroRefreshChatShellBackendTests : IClassFixture<SqlTestData
             Assert.False(string.IsNullOrWhiteSpace(doc.RootElement.GetProperty("traceId").GetString()));
         }
 
-        // 62nd request using X-Requested-With: XMLHttpRequest without Accept: application/json -> also 429 ProblemDetails with no-store
-        using var xhrReq = new HttpRequestMessage(HttpMethod.Get, "/api/presence");
-        xhrReq.Headers.Add("X-Requested-With", "XMLHttpRequest");
-        var rejectedXhrResp = await client.SendAsync(xhrReq);
-        Assert.Equal(HttpStatusCode.TooManyRequests, rejectedXhrResp.StatusCode);
-        AssertNoStoreHeaders(rejectedXhrResp);
-        Assert.Equal("application/problem+json", rejectedXhrResp.Content.Headers.ContentType?.MediaType);
+        // 122nd request on /messages read endpoint (same messages-read partition) -> also 429 ProblemDetails with no-store
+        var rejectedMessagesResp = await client.GetAsync($"/api/conversations/{convId}/messages");
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejectedMessagesResp.StatusCode);
+        AssertNoStoreHeaders(rejectedMessagesResp);
+        Assert.Equal("application/problem+json", rejectedMessagesResp.Content.Headers.ContentType?.MediaType);
+
+        // Exhaust the 180 req/min "presence" rate-limiter partition without burning "messages" write quota ([S7])
+        for (int i = 0; i < 180; i++)
+        {
+            var presenceOk = await client.GetAsync("/api/presence");
+            Assert.Equal(HttpStatusCode.OK, presenceOk.StatusCode);
+        }
+
+        using (var xhrApiReq = new HttpRequestMessage(HttpMethod.Get, "/api/presence"))
+        {
+            xhrApiReq.Headers.Add("X-Requested-With", "XMLHttpRequest");
+            var xhrApiResp = await client.SendAsync(xhrApiReq);
+            Assert.Equal(HttpStatusCode.TooManyRequests, xhrApiResp.StatusCode);
+            AssertNoStoreHeaders(xhrApiResp);
+            Assert.Equal("application/problem+json", xhrApiResp.Content.Headers.ContentType?.MediaType);
+
+            using var doc = JsonDocument.Parse(await xhrApiResp.Content.ReadAsStringAsync());
+            Assert.Equal(429, doc.RootElement.GetProperty("status").GetInt32());
+            Assert.Contains("Rate limit exceeded", doc.RootElement.GetProperty("detail").GetString());
+        }
+
+        // Now verify the separate 60 req/min "messages" partition still has full headroom and rejects at the 61st request with 429 ProblemDetails + no-store ([B3])
+        var chatPageResp = await client.GetAsync("/Chat");
+        Assert.Equal(HttpStatusCode.OK, chatPageResp.StatusCode);
+        var chatHtml = await chatPageResp.Content.ReadAsStringAsync();
+        var csrfMatch = Regex.Match(chatHtml, @"<input[^>]*name=""__RequestVerificationToken""[^>]*value=""([^""]+)""", RegexOptions.IgnoreCase);
+        Assert.True(csrfMatch.Success, "Authenticated /Chat page must render an antiforgery token.");
+        var csrfToken = csrfMatch.Groups[1].Value;
+
+        for (int i = 0; i < 60; i++)
+        {
+            using var form = new FormUrlEncodedContent(new Dictionary<string, string>
+            {
+                ["id"] = convId.ToString(),
+                ["__RequestVerificationToken"] = csrfToken
+            });
+            var pinOk = await client.PostAsync("/Chat/Pin", form);
+            Assert.NotEqual(HttpStatusCode.TooManyRequests, pinOk.StatusCode);
+        }
+
+        using (var xhrMvcReq = new HttpRequestMessage(HttpMethod.Post, "/Chat/Pin"))
+        {
+            xhrMvcReq.Headers.Add("X-Requested-With", "XMLHttpRequest");
+            xhrMvcReq.Headers.Add("Accept", "text/html");
+            var xhrMvcResp = await client.SendAsync(xhrMvcReq);
+            Assert.Equal(HttpStatusCode.TooManyRequests, xhrMvcResp.StatusCode);
+            AssertNoStoreHeaders(xhrMvcResp);
+            Assert.Equal("application/problem+json", xhrMvcResp.Content.Headers.ContentType?.MediaType);
+        }
+    }
+
+    [Fact]
+    public async Task PaginationDefault20_SsrBundleAndSequentialCursors_ReturnExact55MessagesWithoutGapsOrDuplicates()
+    {
+        using var factory = CreateFactory();
+        using var client = CreateHttpsClient(factory);
+
+        Guid convId;
+        string aliceUsername;
+
+        using (var scope = factory.Services.CreateScope())
+        {
+            var alice = await SeedConfirmedUserAsync(scope.ServiceProvider, "pg_a", "Alice Page");
+            var bob = await SeedConfirmedUserAsync(scope.ServiceProvider, "pg_b", "Bob Page");
+            aliceUsername = alice.UserName!;
+
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var startUtc = new DateTimeOffset(2026, 11, 20, 10, 0, 0, TimeSpan.Zero);
+            var conv = Conversation.CreateDirect(new UserId(alice.Id), new UserId(bob.Id), startUtc);
+            db.Conversations.Add(conv);
+            await db.SaveChangesAsync();
+            convId = conv.Id.Value;
+
+            // Seed 55 messages including identical CreatedAtUtc pair (messages 30 & 31) to verify deterministic (CreatedAtUtc, Id) tie-breaking
+            var messages = new List<Message>(55);
+            for (int i = 1; i <= 55; i++)
+            {
+                var sender = i % 2 == 0 ? alice.Id : bob.Id;
+                var ts = i == 31 ? startUtc.AddMinutes(30) : startUtc.AddMinutes(i);
+                messages.Add(Message.Create(
+                    conv.Id,
+                    new UserId(sender),
+                    $"seed-page-{convId}-{i}",
+                    $"Message #{i:D2}",
+                    ts));
+            }
+            db.Messages.AddRange(messages);
+            await db.SaveChangesAsync();
+        }
+
+        await LoginWithCookieAsync(client, aliceUsername);
+
+        // 1. SSR GET /chat/{id} preloads 20 newest messages & bootstrap hasMore = true
+        var ssrResp = await client.GetAsync($"/chat/{convId}");
+        Assert.Equal(HttpStatusCode.OK, ssrResp.StatusCode);
+        var ssrHtml = await ssrResp.Content.ReadAsStringAsync();
+
+        var bootstrapMatch = Regex.Match(
+            ssrHtml,
+            @"<script\s+id=""chat-bootstrap""\s+type=""application/json"">([\s\S]*?)</script>",
+            RegexOptions.IgnoreCase);
+        Assert.True(bootstrapMatch.Success);
+        using (var bootDoc = JsonDocument.Parse(bootstrapMatch.Groups[1].Value))
+        {
+            Assert.True(bootDoc.RootElement.GetProperty("hasMore").GetBoolean());
+            Assert.False(string.IsNullOrWhiteSpace(bootDoc.RootElement.GetProperty("nextCursor").GetString()));
+        }
+
+        var rowMatches = Regex.Matches(ssrHtml, @"class=""[^""]*\bmessage-bubble-row\b[^""]*""");
+        Assert.Equal(20, rowMatches.Count);
+
+        // 2. Default /bundle returns 20 newest messages (55 -> 36)
+        var bundleResp = await client.GetAsync($"/api/conversations/{convId}/bundle");
+        Assert.Equal(HttpStatusCode.OK, bundleResp.StatusCode);
+        var bundleJson = JsonDocument.Parse(await bundleResp.Content.ReadAsStringAsync()).RootElement;
+        var page1 = bundleJson.GetProperty("messages");
+        Assert.Equal(20, page1.GetArrayLength());
+        Assert.True(bundleJson.GetProperty("hasMore").GetBoolean());
+        var cursor1 = bundleJson.GetProperty("nextCursor").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(cursor1));
+
+        var seenIds = new HashSet<long>();
+        var collected = new List<(long Id, string Content, DateTimeOffset CreatedAtUtc)>();
+        foreach (var m in page1.EnumerateArray())
+        {
+            var id = m.GetProperty("id").GetInt64();
+            Assert.True(seenIds.Add(id));
+            collected.Add((id, m.GetProperty("content").GetString()!, m.GetProperty("createdAtUtc").GetDateTimeOffset()));
+        }
+        Assert.Equal("Message #36", collected[0].Content);
+        Assert.Equal("Message #55", collected[^1].Content);
+
+        // 3. Page 2 (GET /messages?cursor=...) returns next 20 messages (crosses identical-timestamp tie at #30/#31)
+        var page2Resp = await client.GetAsync($"/api/conversations/{convId}/messages?cursor={Uri.EscapeDataString(cursor1!)}");
+        Assert.Equal(HttpStatusCode.OK, page2Resp.StatusCode);
+        var page2Json = JsonDocument.Parse(await page2Resp.Content.ReadAsStringAsync()).RootElement;
+        var page2 = page2Json.GetProperty("messages");
+        Assert.Equal(20, page2.GetArrayLength());
+        Assert.True(page2Json.GetProperty("hasMore").GetBoolean());
+        var cursor2 = page2Json.GetProperty("nextCursor").GetString();
+        Assert.False(string.IsNullOrWhiteSpace(cursor2));
+
+        foreach (var m in page2.EnumerateArray())
+        {
+            var id = m.GetProperty("id").GetInt64();
+            Assert.True(seenIds.Add(id), $"Duplicate message ID {id} across pages!");
+            collected.Add((id, m.GetProperty("content").GetString()!, m.GetProperty("createdAtUtc").GetDateTimeOffset()));
+        }
+
+        // 4. Page 3 returns remaining 15 messages with hasMore = false and nextCursor = null
+        var page3Resp = await client.GetAsync($"/api/conversations/{convId}/messages?cursor={Uri.EscapeDataString(cursor2!)}");
+        Assert.Equal(HttpStatusCode.OK, page3Resp.StatusCode);
+        var page3Json = JsonDocument.Parse(await page3Resp.Content.ReadAsStringAsync()).RootElement;
+        var page3 = page3Json.GetProperty("messages");
+        Assert.Equal(15, page3.GetArrayLength());
+        Assert.False(page3Json.GetProperty("hasMore").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, page3Json.GetProperty("nextCursor").ValueKind);
+
+        foreach (var m in page3.EnumerateArray())
+        {
+            var id = m.GetProperty("id").GetInt64();
+            Assert.True(seenIds.Add(id), $"Duplicate message ID {id} across pages!");
+            collected.Add((id, m.GetProperty("content").GetString()!, m.GetProperty("createdAtUtc").GetDateTimeOffset()));
+        }
+
+        // Verify all 55 unique messages recovered cleanly in strict (CreatedAtUtc, Id) order
+        Assert.Equal(55, seenIds.Count);
+        var ordered = collected.OrderBy(x => x.CreatedAtUtc).ThenBy(x => x.Id).ToList();
+        Assert.Equal("Message #01", ordered[0].Content);
+        Assert.Equal("Message #30", ordered[29].Content);
+        Assert.Equal("Message #31", ordered[30].Content);
+        Assert.Equal("Message #55", ordered[54].Content);
     }
 
     [Fact]

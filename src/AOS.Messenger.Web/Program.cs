@@ -75,7 +75,13 @@ builder.Services.AddControllersWithViews(options =>
         options.JsonSerializerOptions.Converters.Add(new UserIdJsonConverter());
         options.JsonSerializerOptions.Converters.Add(new ConversationIdJsonConverter());
         options.JsonSerializerOptions.Converters.Add(new MediaIdJsonConverter());
+        options.JsonSerializerOptions.Converters.Add(new AvatarUploadIdJsonConverter());
+        options.JsonSerializerOptions.Converters.Add(new StickerPackIdJsonConverter());
+        options.JsonSerializerOptions.Converters.Add(new StickerIdJsonConverter());
     });
+
+var dualEmailPolicy = new DualIpAndEmailRateLimiterPolicy();
+builder.Services.AddSingleton(dualEmailPolicy);
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -132,12 +138,10 @@ builder.Services.AddRateLimiter(options =>
             }));
 
     // Dual IP + normalized-target-email rate limiting for email-triggering endpoints
-    var dualEmailPolicy = new DualIpAndEmailRateLimiterPolicy();
-    options.AddPolicy("email-endpoint-limiter", dualEmailPolicy);
-    options.AddPolicy("email-limiter", dualEmailPolicy);
-    options.AddPolicy("register-limiter", dualEmailPolicy);
-    options.AddPolicy("forgot-password-limiter", dualEmailPolicy);
-    options.AddPolicy("recover-account-limiter", dualEmailPolicy);
+    foreach (var policyName in DualIpAndEmailRateLimiterPolicy.RegisteredPolicyNames)
+    {
+        options.AddPolicy(policyName, dualEmailPolicy);
+    }
 
     options.AddPolicy("search", httpContext =>
         System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
@@ -160,6 +164,45 @@ builder.Services.AddRateLimiter(options =>
             _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
             {
                 PermitLimit = 60,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("messages-read", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 120,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("receipts", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 180,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
+
+    options.AddPolicy("presence", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 180,
                 Window = TimeSpan.FromMinutes(1),
                 QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
                 QueueLimit = 0
@@ -203,6 +246,19 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
                 QueueLimit = 0
             }));
+
+    options.AddPolicy("avatar-download", httpContext =>
+        System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value
+                ?? httpContext.Connection.RemoteIpAddress?.ToString()
+                ?? "anonymous",
+            _ => new System.Threading.RateLimiting.FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 300,
+                Window = TimeSpan.FromMinutes(1),
+                QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
+                QueueLimit = 0
+            }));
 });
 
 builder.Services.AddSignalR(options =>
@@ -216,6 +272,9 @@ builder.Services.AddSignalR(options =>
         options.PayloadSerializerOptions.Converters.Add(new UserIdJsonConverter());
         options.PayloadSerializerOptions.Converters.Add(new ConversationIdJsonConverter());
         options.PayloadSerializerOptions.Converters.Add(new MediaIdJsonConverter());
+        options.PayloadSerializerOptions.Converters.Add(new AvatarUploadIdJsonConverter());
+        options.PayloadSerializerOptions.Converters.Add(new StickerPackIdJsonConverter());
+        options.PayloadSerializerOptions.Converters.Add(new StickerIdJsonConverter());
     });
 builder.Services.AddSingleton<SessionAndThrottleHubFilter>(sp =>
     new SessionAndThrottleHubFilter(
@@ -251,21 +310,33 @@ if (!app.Environment.IsDevelopment())
 app.UseHttpsRedirection();
 app.UseRouting();
 
-// Buffer form asynchronously if needed so RateLimiter can inspect form fields without sync I/O exceptions
+app.UseAuthentication();
+app.UseMiddleware<RequestSizeLimitEnforcementMiddleware>();
+
+// Buffer small forms asynchronously only for dual IP+Email rate-limited POST endpoints after RequestSizeLimit
+// enforcement and when the IP isn't already exhausted, avoiding global pre-auth/unbounded form buffering.
 app.Use(async (context, next) =>
 {
-    if (context.Request.HasFormContentType && HttpMethods.IsPost(context.Request.Method))
+    if (HttpMethods.IsPost(context.Request.Method)
+        && context.Request.HasFormContentType
+        && DualIpAndEmailRateLimiterPolicy.RequiresFormEmailExtraction(context.GetEndpoint())
+        && !dualEmailPolicy.IsIpCurrentlyExhausted(context))
     {
-        _ = await context.Request.ReadFormAsync(context.RequestAborted);
+        try
+        {
+            _ = await context.Request.ReadFormAsync(DualIpAndEmailRateLimiterPolicy.AuthFormParsingOptions, context.RequestAborted);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new BadHttpRequestException("Invalid form data.", StatusCodes.Status400BadRequest, ex);
+        }
     }
+
     await next();
 });
 
-app.UseAuthentication();
 app.UseRateLimiter();
 app.UseAuthorization();
-
-app.UseMiddleware<RequestSizeLimitEnforcementMiddleware>();
 
 // CSWSH protection: Enforce same-origin Origin header validation on SignalR endpoints
 app.UseMiddleware<SignalROriginValidationMiddleware>();

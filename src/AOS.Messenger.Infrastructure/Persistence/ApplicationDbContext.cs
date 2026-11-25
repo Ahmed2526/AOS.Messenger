@@ -25,6 +25,11 @@ public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityR
     public DbSet<UserMessageDeletion> UserMessageDeletions => Set<UserMessageDeletion>();
     public DbSet<MessageReaction> MessageReactions => Set<MessageReaction>();
     public DbSet<Media> Media => Set<Media>();
+    public DbSet<PendingAvatarUpload> PendingAvatarUploads => Set<PendingAvatarUpload>();
+    public DbSet<StickerPack> StickerPacks => Set<StickerPack>();
+    public DbSet<Sticker> Stickers => Set<Sticker>();
+    public DbSet<UserFavoriteSticker> UserFavoriteStickers => Set<UserFavoriteSticker>();
+    public DbSet<UserRecentSticker> UserRecentStickers => Set<UserRecentSticker>();
 
     protected override void OnModelCreating(ModelBuilder builder)
     {

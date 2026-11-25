@@ -70,13 +70,13 @@ public sealed class ConversationService : IConversationService
         var existing = await _conversationPersistence.GetByParticipantsAsync(currentUserId, targetUserId, ct);
         if (existing is not null)
         {
-            return await BuildConversationDetailDtoAsync(existing, currentUserId, ct);
+            return await BuildConversationDetailDtoAsync(existing, currentUserId, ct, preloadedIsBlocked: isBlocked);
         }
 
         var newConversation = Conversation.Create(currentUserId, targetUserId, _timeProvider.GetUtcNow());
         var created = await _conversationPersistence.AddAsync(newConversation, ct);
 
-        return await BuildConversationDetailDtoAsync(created, currentUserId, ct);
+        return await BuildConversationDetailDtoAsync(created, currentUserId, ct, preloadedIsBlocked: isBlocked);
     }
 
     public async Task<ConversationDetailDto> GetConversationAsync(
@@ -213,8 +213,8 @@ public sealed class ConversationService : IConversationService
             ? await _userPresencePersistence.GetLastSeenBatchAsync(offlineEligiblePeerIds, ct)
             : new Dictionary<UserId, DateTimeOffset?>();
 
-        var allConversationStates = await _conversationPersistence.GetUserStatesForConversationsAsync(activeConvIds, ct);
-        var stateByConvAndUser = allConversationStates.ToDictionary(s => (s.ConversationId, s.UserId));
+        var peerConversationStates = await _conversationPersistence.GetPeerStatesForConversationsAsync(activeConvIds, currentUserId, ct);
+        var stateByConvAndUser = peerConversationStates.ToDictionary(s => (s.ConversationId, s.UserId));
 
         var mediaLookupKeys = new List<(ConversationId ConversationId, MessageId MessageId)>();
         foreach (var conversation in activeConversations)
@@ -262,6 +262,10 @@ public sealed class ConversationService : IConversationService
                 if (lastMessage.IsDeletedForEveryone)
                 {
                     lastMessagePreview = "This message was deleted";
+                }
+                else if (lastMessage.StickerId is not null)
+                {
+                    lastMessagePreview = MediaPreviewFormatter.FormatStickerPreview();
                 }
                 else if (lastMessage.HasAttachments)
                 {
@@ -327,7 +331,8 @@ public sealed class ConversationService : IConversationService
                 lastSeen,
                 peerDelivered,
                 peerRead,
-                lastMessage?.Id));
+                lastMessage?.Id,
+                OtherParticipantAvatarVersion: (!isBlocked && !isPeerDeleted) ? profile?.AvatarVersion : null));
         }
 
         // Deterministic ordering: Pinned first (IsPinned DESC), then by LastActivityAtUtc DESC, then Id DESC
@@ -505,7 +510,8 @@ public sealed class ConversationService : IConversationService
     private async Task<ConversationDetailDto> BuildConversationDetailDtoAsync(
         Conversation conversation,
         UserId currentUserId,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool? preloadedIsBlocked = null)
     {
         var otherParticipantId = conversation.GetOtherParticipant(currentUserId);
         var profile = await _userReader.GetByIdAsync(otherParticipantId, ct);
@@ -528,7 +534,7 @@ public sealed class ConversationService : IConversationService
         }
 
         var isPeerDeleted = profile is null || profile.IsDeleted;
-        var isBlocked = await _blockService.IsBlockedBidirectionalAsync(currentUserId, otherParticipantId, ct);
+        var isBlocked = preloadedIsBlocked ?? await _blockService.IsBlockedBidirectionalAsync(currentUserId, otherParticipantId, ct);
         var canSend = !isBlocked;
         var state = await _conversationPersistence.GetUserStateAsync(conversation.Id, currentUserId, ct);
 
@@ -571,7 +577,8 @@ public sealed class ConversationService : IConversationService
             peerDelivered,
             peerRead,
             isPeerDeleted,
-            canSend);
+            canSend,
+            OtherParticipantAvatarVersion: (!isBlocked && !isPeerDeleted) ? profile?.AvatarVersion : null);
     }
 
     private static DateTimeOffset? ComputeEffectiveCutoffUtc(UserConversationState? state)

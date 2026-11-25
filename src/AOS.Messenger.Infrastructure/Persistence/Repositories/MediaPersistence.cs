@@ -60,21 +60,39 @@ public sealed class MediaPersistence : IMediaPersistence
                 throw new ConflictException("Too many concurrent media upload requests. Please try again.");
             }
 
-            var pendingCount = await _db.Media
+            var mediaPendingCount = await _db.Media
                 .CountAsync(m => m.UploaderId == media.UploaderId && m.State == MediaState.Pending, ct);
+            var avatarPendingCount = await _db.PendingAvatarUploads
+                .CountAsync(p => p.UserId == media.UploaderId && p.State == MediaState.Pending, ct);
+            var stickerPendingCount = await _db.Stickers
+                .CountAsync(s => s.UploaderId == media.UploaderId && s.State == StickerState.Pending, ct);
 
-            if (pendingCount >= maxConcurrentPending)
+            if (mediaPendingCount + avatarPendingCount + stickerPendingCount >= maxConcurrentPending)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException(
                     $"You have reached the maximum of {maxConcurrentPending} concurrent pending uploads.");
             }
 
-            var usedBytes = await _db.Media
+            var mediaUsedBytes = await _db.Media
                 .Where(m => m.UploaderId == media.UploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
                 .SumAsync(m => m.State == MediaState.Failed
                     ? (long?)(m.VerifiedSizeBytes ?? 0L)
                     : (long?)(m.VerifiedSizeBytes ?? m.DeclaredSizeBytes), ct) ?? 0L;
+
+            var avatarUsedBytes = await _db.PendingAvatarUploads
+                .Where(p => p.UserId == media.UploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
+                .SumAsync(p => p.State == MediaState.Failed
+                    ? (long?)(p.VerifiedSizeBytes ?? 0L)
+                    : (long?)(p.VerifiedSizeBytes ?? p.DeclaredSizeBytes), ct) ?? 0L;
+
+            var stickerUsedBytes = await _db.Stickers
+                .Where(s => s.UploaderId == media.UploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
+                .SumAsync(s => s.State == StickerState.Failed
+                    ? (long?)(s.VerifiedSizeBytes ?? 0L)
+                    : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
+
+            var usedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
 
             if (media.DeclaredSizeBytes > dailyQuotaBytes - usedBytes)
             {
@@ -82,9 +100,19 @@ public sealed class MediaPersistence : IMediaPersistence
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
             }
 
-            var initiatedBytes = await _db.Media
+            var mediaInitiatedBytes = await _db.Media
                 .Where(m => m.UploaderId == media.UploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
                 .SumAsync(m => (long?)m.DeclaredSizeBytes, ct) ?? 0L;
+
+            var avatarInitiatedBytes = await _db.PendingAvatarUploads
+                .Where(p => p.UserId == media.UploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
+                .SumAsync(p => (long?)p.DeclaredSizeBytes, ct) ?? 0L;
+
+            var stickerInitiatedBytes = await _db.Stickers
+                .Where(s => s.UploaderId == media.UploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
+                .SumAsync(s => (long?)s.DeclaredSizeBytes, ct) ?? 0L;
+
+            var initiatedBytes = mediaInitiatedBytes + avatarInitiatedBytes + stickerInitiatedBytes;
 
             var maxInitiatedBytes = dailyQuotaBytes <= long.MaxValue / 2
                 ? dailyQuotaBytes * 2

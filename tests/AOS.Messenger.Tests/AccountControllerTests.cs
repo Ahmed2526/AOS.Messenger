@@ -67,6 +67,7 @@ public sealed class AccountControllerTests
     private sealed class FakeSessionService : ISessionService
     {
         public List<UserSessionDto> Sessions { get; } = new();
+        public List<(UserId UserId, Guid CurrentSessionId)> RevokeOtherSessionsCalls { get; } = new();
 
         public Task<IReadOnlyList<UserSessionDto>> GetActiveSessionsAsync(UserId userId, Guid? currentSessionId = null, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserSessionDto>>(Sessions);
@@ -77,8 +78,11 @@ public sealed class AccountControllerTests
         public Task<bool> RevokeSessionAsync(UserId userId, Guid sessionId, CancellationToken ct = default) =>
             Task.FromResult(true);
 
-        public Task RevokeOtherSessionsAsync(UserId userId, Guid currentSessionId, CancellationToken ct = default) =>
-            Task.CompletedTask;
+        public Task RevokeOtherSessionsAsync(UserId userId, Guid currentSessionId, CancellationToken ct = default)
+        {
+            RevokeOtherSessionsCalls.Add((userId, currentSessionId));
+            return Task.CompletedTask;
+        }
 
         public Task<bool> IsSessionActiveAsync(Guid sessionId, CancellationToken ct = default) =>
             Task.FromResult(true);
@@ -517,5 +521,106 @@ public sealed class AccountControllerTests
         var recLink = emailSender.SentLinks.Last();
         Assert.StartsWith("https://localhost:7001/Account/ConfirmRecovery", recLink);
         Assert.DoesNotContain("attacker.evil.com", recLink);
+    }
+
+    [Fact]
+    public async Task RevokeOtherSessions_UsesAuthoritativeSessionIdClaim_WithoutBindableCurrentIdParameter()
+    {
+        var method = typeof(AccountController).GetMethod(nameof(AccountController.RevokeOtherSessions));
+        Assert.NotNull(method);
+        Assert.Empty(method.GetParameters());
+
+        var userId = UserId.New();
+        var claimSessionId = Guid.NewGuid();
+        var (controller, _, sessionService, _) = CreateController(isAuthenticated: true, userId: userId);
+        controller.ControllerContext.HttpContext.User = new System.Security.Claims.ClaimsPrincipal(
+            new System.Security.Claims.ClaimsIdentity(
+                new[] { new System.Security.Claims.Claim("SessionId", claimSessionId.ToString()) },
+                "TestAuth"));
+
+        var result = await controller.RevokeOtherSessions() as RedirectToActionResult;
+
+        Assert.NotNull(result);
+        Assert.Equal("Sessions", result.ActionName);
+        var call = Assert.Single(sessionService.RevokeOtherSessionsCalls);
+        Assert.Equal(userId, call.UserId);
+        Assert.Equal(claimSessionId, call.CurrentSessionId);
+    }
+
+    [Fact]
+    public async Task RevokeOtherSessions_WhenSessionIdClaimMissing_ReturnsUnauthorized()
+    {
+        var userId = UserId.New();
+        var (controller, _, sessionService, _) = CreateController(isAuthenticated: true, userId: userId);
+
+        var result = await controller.RevokeOtherSessions();
+
+        Assert.IsType<UnauthorizedResult>(result);
+        Assert.Empty(sessionService.RevokeOtherSessionsCalls);
+    }
+
+    [Fact]
+    public async Task DeleteAccount_WhenRealtimeNotifierThrows_LogsWarningWithUserIdOnly_AndRedirects()
+    {
+        var userId = UserId.New();
+        var httpContext = new DefaultHttpContext();
+        var logger = new RecordingAccountLogger();
+        var controller = new AccountController(
+            new FakeIdentityService(),
+            new FakeSessionService(),
+            new FakeCurrentUser { IsAuthenticated = true, Id = userId },
+            new FakeEmailSender(),
+            new ThrowingRealtimeNotifier(),
+            logger)
+        {
+            ControllerContext = new ControllerContext { HttpContext = httpContext },
+            Url = new TestUrlHelper(),
+            TempData = new Microsoft.AspNetCore.Mvc.ViewFeatures.TempDataDictionary(httpContext, new FakeTempDataProvider())
+        };
+
+        var result = await controller.DeleteAccount() as RedirectToActionResult;
+
+        Assert.NotNull(result);
+        Assert.Equal("Login", result.ActionName);
+        var entry = Assert.Single(logger.Entries);
+        Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, entry.Level);
+        Assert.Contains(userId.Value.ToString(), entry.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private sealed class ThrowingRealtimeNotifier : IRealtimeNotifier
+    {
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) =>
+            throw new InvalidOperationException("Simulated SignalR failure");
+    }
+
+    private sealed class RecordingAccountLogger : Microsoft.Extensions.Logging.ILogger<AccountController>
+    {
+        public List<(Microsoft.Extensions.Logging.LogLevel Level, string Message)> Entries { get; } = new();
+        public IDisposable BeginScope<TState>(TState state) where TState : notnull => NullScope.Instance;
+        public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel logLevel) => true;
+
+        public void Log<TState>(
+            Microsoft.Extensions.Logging.LogLevel logLevel,
+            Microsoft.Extensions.Logging.EventId eventId,
+            TState state,
+            Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            Entries.Add((logLevel, formatter(state, exception)));
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            public static readonly NullScope Instance = new();
+            public void Dispose() { }
+        }
     }
 }

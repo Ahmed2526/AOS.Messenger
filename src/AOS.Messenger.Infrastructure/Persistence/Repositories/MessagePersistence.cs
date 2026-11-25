@@ -79,20 +79,12 @@ public sealed class MessagePersistence : IMessagePersistence
         var existing = await GetByIdempotencyKeyAsync(message.SenderId, message.IdempotencyKey, ct);
         if (existing is not null)
         {
-            if (existing.IsDeletedForEveryone)
-            {
-                throw new ConflictException("This message was already deleted.");
-            }
+            return ValidateExistingIdempotentMessage(existing, message);
+        }
 
-            if (existing.ConversationId == message.ConversationId
-                && existing.Content == message.Content
-                && existing.ParentMessageId == message.ParentMessageId
-                && existing.HasAttachments == message.HasAttachments)
-            {
-                return new PersistMessageResult(existing, IsNewlyCreated: false);
-            }
-
-            throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content or attachments.");
+        if (message.StickerId is not null)
+        {
+            return await AddWithVerifiedStickerAsync(message, ct);
         }
 
         try
@@ -108,24 +100,107 @@ public sealed class MessagePersistence : IMessagePersistence
             var existingAfterRace = await GetByIdempotencyKeyAsync(message.SenderId, message.IdempotencyKey, ct);
             if (existingAfterRace is not null)
             {
-                if (existingAfterRace.IsDeletedForEveryone)
-                {
-                    throw new ConflictException("This message was already deleted.");
-                }
-
-                if (existingAfterRace.ConversationId == message.ConversationId
-                    && existingAfterRace.Content == message.Content
-                    && existingAfterRace.ParentMessageId == message.ParentMessageId
-                    && existingAfterRace.HasAttachments == message.HasAttachments)
-                {
-                    return new PersistMessageResult(existingAfterRace, IsNewlyCreated: false);
-                }
-
-                throw new Application.Common.ConflictException("An existing message already exists with this idempotency key in a different context or with different content or attachments.");
+                return ValidateExistingIdempotentMessage(existingAfterRace, message);
             }
 
             throw;
         }
+    }
+
+    private async Task<PersistMessageResult> AddWithVerifiedStickerAsync(Message message, CancellationToken ct)
+    {
+        var stickerId = message.StickerId!;
+        PersistMessageResult? persistedResult = null;
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+
+            var attemptMessage = Message.Create(
+                message.ConversationId,
+                message.SenderId,
+                message.IdempotencyKey,
+                message.Content,
+                message.CreatedAtUtc,
+                message.ParentMessageId,
+                id: null,
+                hasAttachments: message.HasAttachments,
+                stickerId: stickerId);
+
+            // Re-verify Ready + active pack + sender authorization under RepeatableRead so shared locks
+            // prevent concurrent archive/pack-deletion from committing mid-flight before the message insert.
+            await using var tx = await _db.Database.BeginTransactionAsync(
+                System.Data.IsolationLevel.RepeatableRead,
+                ct);
+
+            var isStickerSendable = await (
+                from s in _db.Stickers.AsNoTracking()
+                join p in _db.StickerPacks.AsNoTracking() on s.PackId equals p.Id
+                where s.Id == stickerId
+                      && s.State == StickerState.Ready
+                      && s.PurgedAtUtc == null
+                      && !p.IsDeleted
+                      && (p.IsSystemPack
+                          || (!string.IsNullOrEmpty(s.ObjectKey)
+                              && (s.UploaderId == attemptMessage.SenderId
+                                  || _db.UserFavoriteStickers.Any(f => f.UserId == attemptMessage.SenderId && f.StickerId == stickerId)
+                                  || _db.UserRecentStickers.Any(r => r.UserId == attemptMessage.SenderId && r.StickerId == stickerId))))
+                select s.Id).AnyAsync(ct);
+
+            if (!isStickerSendable)
+            {
+                await tx.RollbackAsync(ct);
+                _db.ChangeTracker.Clear();
+                throw new NotFoundException("Sticker", stickerId.Value);
+            }
+
+            try
+            {
+                _db.Messages.Add(attemptMessage);
+                await _db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+                persistedResult = new PersistMessageResult(attemptMessage, IsNewlyCreated: true);
+            }
+            catch (DbUpdateException)
+            {
+                await tx.RollbackAsync(ct);
+                _db.ChangeTracker.Clear();
+
+                var existingAfterRace = await GetByIdempotencyKeyAsync(
+                    attemptMessage.SenderId,
+                    attemptMessage.IdempotencyKey,
+                    ct);
+                if (existingAfterRace is not null)
+                {
+                    persistedResult = ValidateExistingIdempotentMessage(existingAfterRace, attemptMessage);
+                    return;
+                }
+
+                throw;
+            }
+        });
+
+        return persistedResult!;
+    }
+
+    private static PersistMessageResult ValidateExistingIdempotentMessage(Message existing, Message candidate)
+    {
+        if (existing.IsDeletedForEveryone)
+        {
+            throw new ConflictException("This message was already deleted.");
+        }
+
+        if (existing.ConversationId == candidate.ConversationId
+            && existing.Content == candidate.Content
+            && existing.ParentMessageId == candidate.ParentMessageId
+            && existing.HasAttachments == candidate.HasAttachments
+            && existing.StickerId == candidate.StickerId)
+        {
+            return new PersistMessageResult(existing, IsNewlyCreated: false);
+        }
+
+        throw new Application.Common.ConflictException(
+            "An existing message already exists with this idempotency key in a different context or with different content or attachments.");
     }
 
     public async Task<PersistMessageResult> AddWithMediaAsync(
@@ -290,7 +365,7 @@ public sealed class MessagePersistence : IMessagePersistence
         DateTimeOffset? cursorCreatedAtUtc,
         MessageId? cursorId,
         DateTimeOffset? clearedAtUtc,
-        int pageSize = 30,
+        int pageSize = Application.Common.PaginationDefaults.DefaultMessagePageSize,
         CancellationToken ct = default)
     {
         return await GetKeysetMessagesAsync(conversationId, callerId: null, cursorCreatedAtUtc, cursorId, clearedAtUtc, pageSize, ct);
@@ -302,14 +377,14 @@ public sealed class MessagePersistence : IMessagePersistence
         DateTimeOffset? cursorCreatedAtUtc,
         MessageId? cursorId,
         DateTimeOffset? clearedAtUtc,
-        int pageSize = 30,
+        int pageSize = Application.Common.PaginationDefaults.DefaultMessagePageSize,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(conversationId);
 
         if (pageSize <= 0)
         {
-            pageSize = 30;
+            pageSize = Application.Common.PaginationDefaults.DefaultMessagePageSize;
         }
 
         var query = _db.Messages
@@ -517,6 +592,7 @@ public sealed class MessagePersistence : IMessagePersistence
             && existing.Content == candidate.Content
             && existing.ParentMessageId == candidate.ParentMessageId
             && existing.HasAttachments == candidate.HasAttachments
+            && existing.StickerId == candidate.StickerId
             && existingMedia.Count == requestedMediaIds.Count
             && existingMedia.Select(m => m.Id).SequenceEqual(requestedMediaIds);
 

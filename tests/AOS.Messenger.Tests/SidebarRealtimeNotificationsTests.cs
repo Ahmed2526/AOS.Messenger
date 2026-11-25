@@ -185,7 +185,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
 
         var rateLimit = type.GetCustomAttribute<EnableRateLimitingAttribute>();
         Assert.NotNull(rateLimit);
-        Assert.Equal("messages", rateLimit.PolicyName);
+        Assert.Equal("messages-read", rateLimit.PolicyName);
 
         var getMethod = type.GetMethod(nameof(ConversationsController.GetConversations));
         Assert.NotNull(getMethod);

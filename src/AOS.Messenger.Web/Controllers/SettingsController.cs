@@ -2,10 +2,12 @@ using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.ValueObjects;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 
 namespace AOS.Messenger.Web.Controllers;
 
 [Authorize]
+[RequestSizeLimit(16 * 1024)]
 public sealed class SettingsController : Controller
 {
     private readonly IBlockService _blockService;
@@ -38,6 +40,7 @@ public sealed class SettingsController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> BlockUser(Guid targetUserId, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)
@@ -55,6 +58,7 @@ public sealed class SettingsController : Controller
 
     [HttpPost]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> UnblockUser(Guid targetUserId, CancellationToken ct = default)
     {
         if (_currentUser.Id is null)

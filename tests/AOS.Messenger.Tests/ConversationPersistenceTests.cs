@@ -322,4 +322,48 @@ public sealed class ConversationPersistenceTests : IClassFixture<SqlTestDatabase
         Assert.Equal(2, unreadCounts[conv2]);
         Assert.Equal(0, unreadCounts[conv3]);
     }
+
+    [Fact]
+    public async Task GetConversationsForUserAsync_SortsByRecentMessageActivity_AndUnreadHandlesClearedAndStaleWatermarks()
+    {
+        var (provider, db) = CreateTestEnvironment();
+        var repo = provider.GetRequiredService<IConversationPersistence>();
+
+        var userA = new UserId(Guid.NewGuid());
+        var userB = new UserId(Guid.NewGuid());
+        var userC = new UserId(Guid.NewGuid());
+        var baseTime = new DateTimeOffset(2026, 6, 1, 10, 0, 0, TimeSpan.Zero);
+
+        var olderConvWithRecentMsg = Conversation.CreateDirect(userA, userB, baseTime);
+        var newerIdleConv = Conversation.CreateDirect(userA, userC, baseTime.AddHours(1));
+        db.Conversations.AddRange(olderConvWithRecentMsg, newerIdleConv);
+        await db.SaveChangesAsync();
+
+        var staleOtherConvMsg = Message.Create(newerIdleConv.Id, userC, "sort-idle-1", "Early", baseTime.AddMinutes(5));
+        db.Messages.Add(staleOtherConvMsg);
+        await db.SaveChangesAsync();
+
+        var recentMsg = Message.Create(olderConvWithRecentMsg.Id, userB, "sort-active-1", "Recent bump", baseTime.AddHours(5));
+        var tieSameTsMsg = Message.Create(olderConvWithRecentMsg.Id, userB, "sort-active-2", "Same ts 2", baseTime.AddHours(5));
+        db.Messages.AddRange(recentMsg, tieSameTsMsg);
+        await db.SaveChangesAsync();
+
+        var orderedConvs = await repo.GetConversationsForUserAsync(userA);
+        Assert.Equal(2, orderedConvs.Count);
+        Assert.Equal(olderConvWithRecentMsg.Id, orderedConvs[0].Id);
+        Assert.Equal(newerIdleConv.Id, orderedConvs[1].Id);
+
+        // Unread checks:
+        // - Cross-conversation LastReadMessageId (staleOtherConvMsg passed for olderConv) must not suppress messages in olderConv
+        // - Exact timestamp tie-breaker counts tieSameTsMsg after recentMsg
+        // - ClearedAtUtc threshold >= filters out earlier message cleanly
+        var counts = await repo.GetUnreadCountsForConversationsAsync(
+            userA,
+            [
+                (olderConvWithRecentMsg.Id, recentMsg.Id, (DateTimeOffset?)null),
+                (newerIdleConv.Id, recentMsg.Id, baseTime.AddMinutes(10))
+            ]);
+        Assert.Equal(1, counts[olderConvWithRecentMsg.Id]);
+        Assert.Equal(0, counts[newerIdleConv.Id]);
+    }
 }

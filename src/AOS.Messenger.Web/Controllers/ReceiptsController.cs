@@ -12,11 +12,11 @@ namespace AOS.Messenger.Web.Controllers;
 [Route("api/conversations/{conversationId:guid}")]
 [ResponseCache(NoStore = true, Location = ResponseCacheLocation.None)]
 [AutoValidateAntiforgeryToken]
-[EnableRateLimiting("messages")]
+[EnableRateLimiting("receipts")]
+[RequestSizeLimit(16 * 1024)]
 public sealed class ReceiptsController : ControllerBase
 {
     private readonly IReceiptService _receiptService;
-    private readonly IConversationService _conversationService;
     private readonly IRealtimeNotifier _realtimeNotifier;
     private readonly ICurrentUser _currentUser;
     private readonly TimeProvider _timeProvider;
@@ -24,14 +24,12 @@ public sealed class ReceiptsController : ControllerBase
 
     public ReceiptsController(
         IReceiptService receiptService,
-        IConversationService conversationService,
         IRealtimeNotifier realtimeNotifier,
         ICurrentUser currentUser,
         ILogger<ReceiptsController> logger,
         TimeProvider? timeProvider = null)
     {
         _receiptService = receiptService;
-        _conversationService = conversationService;
         _realtimeNotifier = realtimeNotifier;
         _currentUser = currentUser;
         _logger = logger;
@@ -49,13 +47,12 @@ public sealed class ReceiptsController : ControllerBase
             return Unauthorized();
         }
 
-        var result = await _receiptService.MarkDeliveredAsync(conversationId, dto.UpToMessageId, ct);
-        if (result is not null)
+        var outcome = await _receiptService.MarkDeliveredWithRecipientAsync(conversationId, dto.UpToMessageId, ct);
+        if (outcome is not null)
         {
             try
             {
-                var conv = await _conversationService.GetConversationAsync(_currentUser.Id, new ConversationId(conversationId), ct);
-                await _realtimeNotifier.NotifyReceiptUpdatedAsync(conv.OtherParticipantId, result, ct);
+                await _realtimeNotifier.NotifyReceiptUpdatedAsync(outcome.RecipientUserId, outcome.Receipt, ct);
             }
             catch (Exception ex)
             {
@@ -63,7 +60,7 @@ public sealed class ReceiptsController : ControllerBase
             }
         }
 
-        return Ok(result ?? new ReceiptUpdateDto(conversationId, _currentUser.Id.Value, dto.UpToMessageId, _timeProvider.GetUtcNow(), "delivered"));
+        return Ok(outcome?.Receipt ?? new ReceiptUpdateDto(conversationId, _currentUser.Id.Value, dto.UpToMessageId, _timeProvider.GetUtcNow(), "delivered"));
     }
 
     [HttpPost("read")]
@@ -77,13 +74,12 @@ public sealed class ReceiptsController : ControllerBase
             return Unauthorized();
         }
 
-        var result = await _receiptService.MarkReadAsync(conversationId, dto.UpToMessageId, ct);
-        if (result is not null)
+        var outcome = await _receiptService.MarkReadWithRecipientAsync(conversationId, dto.UpToMessageId, ct);
+        if (outcome is not null)
         {
             try
             {
-                var conv = await _conversationService.GetConversationAsync(_currentUser.Id, new ConversationId(conversationId), ct);
-                await _realtimeNotifier.NotifyReceiptUpdatedAsync(conv.OtherParticipantId, result, ct);
+                await _realtimeNotifier.NotifyReceiptUpdatedAsync(outcome.RecipientUserId, outcome.Receipt, ct);
             }
             catch (Exception ex)
             {
@@ -91,6 +87,6 @@ public sealed class ReceiptsController : ControllerBase
             }
         }
 
-        return Ok(result ?? new ReceiptUpdateDto(conversationId, _currentUser.Id.Value, dto.UpToMessageId, _timeProvider.GetUtcNow(), "read"));
+        return Ok(outcome?.Receipt ?? new ReceiptUpdateDto(conversationId, _currentUser.Id.Value, dto.UpToMessageId, _timeProvider.GetUtcNow(), "read"));
     }
 }

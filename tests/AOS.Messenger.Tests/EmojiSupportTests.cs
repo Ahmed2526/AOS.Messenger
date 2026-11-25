@@ -152,6 +152,7 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Theory]
@@ -462,6 +463,9 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
                         fn(ev);
                         if (stoppedImmediate) return !ev.defaultPrevented;
                     }
+                    if (!isNativeEvent && !ev.cancelBubble && (ev.bubbles === true || ev.type === 'click' || ev.type === 'mousedown') && this.parentNode && typeof this.parentNode.dispatchEvent === 'function') {
+                        this.parentNode.dispatchEvent(ev);
+                    }
                     return !ev.defaultPrevented;
                 }
                 querySelectorAll(sel) {
@@ -630,6 +634,7 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
             const firstPick = panel.querySelector('[data-emoji-pick]');
             assert.ok(firstPick);
             assert.equal(firstPick.getAttribute('data-emoji-pick'), '👍🏽');
+            assert.equal(firstPick._bubble.size, 0, '[S5] Emoji grid must delegate clicks rather than attaching per-button listeners');
 
             firstPick.dispatchEvent({ type: 'click' });
             assert.equal(picker.isOpen(), true, 'Picker must remain open for multi-pick');

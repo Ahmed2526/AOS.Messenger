@@ -183,7 +183,13 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
 
     public void AbortSession(Guid sessionId)
     {
+        AbortSession(sessionId, out _);
+    }
+
+    public void AbortSession(Guid sessionId, out IReadOnlyCollection<UserId> wentOfflineUsers)
+    {
         List<Action> abortHandles = new();
+        HashSet<UserId>? offlineUsers = null;
 
         lock (_syncRoot)
         {
@@ -197,10 +203,12 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
 
                 if (_userConnections.TryGetValue(conn.UserId, out var userConns))
                 {
-                    userConns.Remove(conn.ConnectionId);
-                    if (userConns.Count == 0)
+                    bool wasOnline = userConns.Count > 0;
+                    if (userConns.Remove(conn.ConnectionId) && wasOnline && userConns.Count == 0)
                     {
                         _userConnections.Remove(conn.UserId);
+                        offlineUsers ??= new HashSet<UserId>();
+                        offlineUsers.Add(conn.UserId);
                     }
                 }
 
@@ -212,6 +220,10 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
                 }
             }
         }
+
+        wentOfflineUsers = offlineUsers is { Count: > 0 }
+            ? offlineUsers.ToArray()
+            : Array.Empty<UserId>();
 
         // Execute abort handles outside the lock to prevent deadlock
         foreach (var abort in abortHandles)
@@ -229,14 +241,21 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
 
     public void AbortUser(UserId userId)
     {
+        AbortUser(userId, out _);
+    }
+
+    public void AbortUser(UserId userId, out bool wentOffline)
+    {
         ArgumentNullException.ThrowIfNull(userId);
 
         List<Action> abortHandles = new();
 
         lock (_syncRoot)
         {
+            wentOffline = false;
             if (_userConnections.TryGetValue(userId, out var userConns))
             {
+                bool wasOnline = userConns.Count > 0;
                 foreach (var conn in userConns.Values)
                 {
                     _connections.Remove(conn.ConnectionId);
@@ -249,6 +268,7 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
                 }
 
                 _userConnections.Remove(userId);
+                wentOffline = wasOnline;
             }
         }
 

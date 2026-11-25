@@ -1,3 +1,4 @@
+using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -10,20 +11,33 @@ namespace AOS.Messenger.Infrastructure.Identity;
 public sealed class UnverifiedAccountCleanupService : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IMediaStorage? _mediaStorage;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<UnverifiedAccountCleanupService> _logger;
     private readonly TimeSpan _period;
+
+    [ActivatorUtilitiesConstructor]
+    public UnverifiedAccountCleanupService(
+        IServiceScopeFactory scopeFactory,
+        IMediaStorage? mediaStorage = null,
+        TimeProvider? timeProvider = null,
+        ILogger<UnverifiedAccountCleanupService>? logger = null,
+        TimeSpan? period = null)
+    {
+        _scopeFactory = scopeFactory;
+        _mediaStorage = mediaStorage;
+        _timeProvider = timeProvider ?? TimeProvider.System;
+        _logger = logger ?? NullLogger<UnverifiedAccountCleanupService>.Instance;
+        _period = period ?? TimeSpan.FromHours(1);
+    }
 
     public UnverifiedAccountCleanupService(
         IServiceScopeFactory scopeFactory,
         TimeProvider? timeProvider = null,
         ILogger<UnverifiedAccountCleanupService>? logger = null,
         TimeSpan? period = null)
+        : this(scopeFactory, null, timeProvider, logger, period)
     {
-        _scopeFactory = scopeFactory;
-        _timeProvider = timeProvider ?? TimeProvider.System;
-        _logger = logger ?? NullLogger<UnverifiedAccountCleanupService>.Instance;
-        _period = period ?? TimeSpan.FromHours(1);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -73,8 +87,30 @@ public sealed class UnverifiedAccountCleanupService : BackgroundService
                 break;
             }
 
+            var avatarKeysToDelete = batch
+                .SelectMany(u => new[] { u.AvatarObjectKey, u.AvatarThumbnailObjectKey })
+                .Where(k => !string.IsNullOrWhiteSpace(k))
+                .Cast<string>()
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
             db.Users.RemoveRange(batch);
             await db.SaveChangesAsync(ct);
+
+            if (_mediaStorage is not null && avatarKeysToDelete.Count > 0)
+            {
+                foreach (var key in avatarKeysToDelete)
+                {
+                    try
+                    {
+                        await _mediaStorage.DeleteObjectAsync(key, ct);
+                    }
+                    catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                    {
+                        _logger.LogWarning(ex, "Best-effort avatar storage delete failed during unverified account cleanup.");
+                    }
+                }
+            }
 
             totalPurged += batch.Count;
         }

@@ -508,4 +508,32 @@ public sealed class SqlServerConstraintsIntegrationTests : IClassFixture<SqlTest
         Assert.Equal(MediaState.Attached, media.State);
         Assert.Equal(msgInConv1.Id, media.MessageId);
     }
+
+    [Fact]
+    public async Task StickerAndStickerPack_InsertPopulatesIdViaNewSequentialId()
+    {
+        await using var db = _fixture.CreateDbContext();
+        var ownerId = UserId.New();
+        var now = DateTimeOffset.UtcNow;
+
+        var pack = StickerPack.CreateCustom(ownerId, "Sequential Pack", "Tester", 1, now);
+        Assert.True(pack.IsTransient());
+
+        db.StickerPacks.Add(pack);
+        await db.SaveChangesAsync();
+
+        Assert.False(pack.IsTransient());
+        Assert.NotNull(pack.Id);
+        Assert.NotEqual(Guid.Empty, pack.Id.Value);
+
+        var sticker = Sticker.CreatePendingCustom(pack.Id, ownerId, "image/png", 1024, "✨", 1, now);
+        Assert.True(sticker.IsTransient());
+
+        db.Stickers.Add(sticker);
+        await db.SaveChangesAsync();
+
+        Assert.False(sticker.IsTransient());
+        Assert.NotNull(sticker.Id);
+        Assert.NotEqual(Guid.Empty, sticker.Id.Value);
+    }
 }

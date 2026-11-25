@@ -64,6 +64,8 @@ export function createChatState() {
         nextCursor: null,
         hasMore: false,
         isLoadingOlder: false,
+        paginationRetryAfterMs: 0,
+        hasPaginatedOlder: false,
         messagesById: new Map(),
         drafts: new Map(),
         pendingRealtimeBuffer: new Map(),
@@ -90,6 +92,8 @@ export function createChatState() {
                 state.hasMore = false;
             }
             state.isLoadingOlder = false;
+            state.paginationRetryAfterMs = 0;
+            state.hasPaginatedOlder = false;
         },
 
         /**
@@ -165,6 +169,8 @@ export function createChatState() {
             state.nextCursor = null;
             state.hasMore = false;
             state.isLoadingOlder = false;
+            state.paginationRetryAfterMs = 0;
+            state.hasPaginatedOlder = false;
             state.messagesById.clear();
             state.pendingRealtimeBuffer.clear();
 
@@ -197,6 +203,8 @@ export function createChatState() {
             state.nextCursor = nextCursor ?? null;
             state.hasMore = !!hasMore;
             state.isLoadingOlder = false;
+            state.paginationRetryAfterMs = 0;
+            state.hasPaginatedOlder = false;
 
             state.messagesById.clear();
             if (Array.isArray(messages)) {
@@ -223,6 +231,8 @@ export function createChatState() {
             state.pendingConversationId = null;
             state.activeAbortController = null;
             state.isLoadingOlder = false;
+            state.paginationRetryAfterMs = 0;
+            state.hasPaginatedOlder = false;
             state.pendingRealtimeBuffer.clear();
         },
 
@@ -274,6 +284,8 @@ export function createChatState() {
             state.nextCursor = null;
             state.hasMore = false;
             state.isLoadingOlder = false;
+            state.paginationRetryAfterMs = 0;
+            state.hasPaginatedOlder = false;
             state.messagesById.clear();
             state.pendingRealtimeBuffer.clear();
         },

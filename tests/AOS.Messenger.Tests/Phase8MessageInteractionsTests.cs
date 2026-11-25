@@ -108,6 +108,7 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     // ==========================================
@@ -641,6 +642,8 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             ReactionUpdates.Add(reaction);
             return Task.CompletedTask;
         }
+
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Fact]

@@ -106,3 +106,81 @@ public sealed class NullableMediaIdConverter : ValueConverter<MediaId?, Guid?>
     {
     }
 }
+
+/// <summary>
+/// EF Core ValueConverter for domain-neutral strongly-typed AvatarUploadId to Guid.
+/// </summary>
+public sealed class AvatarUploadIdConverter : ValueConverter<AvatarUploadId, Guid>
+{
+    public AvatarUploadIdConverter()
+        : base(
+            id => id == null ? Guid.Empty : id.Value,
+            value => AvatarUploadId.From(value))
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for nullable AvatarUploadId to nullable Guid.
+/// </summary>
+public sealed class NullableAvatarUploadIdConverter : ValueConverter<AvatarUploadId?, Guid?>
+{
+    public NullableAvatarUploadIdConverter()
+        : base(
+            id => id == null ? null : id.Value,
+            value => value.HasValue ? AvatarUploadId.From(value.Value) : null)
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for domain-neutral strongly-typed StickerPackId to Guid.
+/// </summary>
+public sealed class StickerPackIdConverter : ValueConverter<StickerPackId, Guid>
+{
+    public StickerPackIdConverter()
+        : base(
+            id => id == null ? Guid.Empty : id.Value,
+            value => StickerPackId.From(value))
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for nullable StickerPackId to nullable Guid.
+/// </summary>
+public sealed class NullableStickerPackIdConverter : ValueConverter<StickerPackId?, Guid?>
+{
+    public NullableStickerPackIdConverter()
+        : base(
+            id => id == null ? null : id.Value,
+            value => value.HasValue ? StickerPackId.From(value.Value) : null)
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for domain-neutral strongly-typed StickerId to Guid.
+/// </summary>
+public sealed class StickerIdConverter : ValueConverter<StickerId, Guid>
+{
+    public StickerIdConverter()
+        : base(
+            id => id == null ? Guid.Empty : id.Value,
+            value => StickerId.From(value))
+    {
+    }
+}
+
+/// <summary>
+/// EF Core ValueConverter for nullable StickerId to nullable Guid.
+/// </summary>
+public sealed class NullableStickerIdConverter : ValueConverter<StickerId?, Guid?>
+{
+    public NullableStickerIdConverter()
+        : base(
+            id => id == null ? null : id.Value,
+            value => value.HasValue ? StickerId.From(value.Value) : null)
+    {
+    }
+}

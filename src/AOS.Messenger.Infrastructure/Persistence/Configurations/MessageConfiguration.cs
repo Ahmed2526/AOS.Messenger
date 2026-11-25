@@ -18,7 +18,7 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
     {
         builder.ToTable("Messages", t => t.HasCheckConstraint(
             "CK_Messages_Content_Tombstone",
-            "([IsDeletedForEveryone] = 1 AND [Content] IS NULL) OR ([IsDeletedForEveryone] = 0 AND ([Content] IS NOT NULL OR [HasAttachments] = 1))"));
+            "([IsDeletedForEveryone] = 1 AND [Content] IS NULL AND [StickerId] IS NULL) OR ([IsDeletedForEveryone] = 0 AND (([StickerId] IS NOT NULL AND [Content] IS NULL AND [HasAttachments] = 0) OR ([StickerId] IS NULL AND ([Content] IS NOT NULL OR [HasAttachments] = 1))))"));
 
         builder.HasKey(m => m.Id).IsClustered();
 
@@ -60,6 +60,9 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
             .HasDefaultValue(false)
             .IsRequired();
 
+        builder.Property(m => m.StickerId)
+            .HasConversion<NullableStickerIdConverter>();
+
         builder.Property(m => m.RowVersion)
             .IsRowVersion();
 
@@ -80,6 +83,17 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
             .WithMany()
             .HasForeignKey(m => m.ConversationId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        // Filtered index for sticker reference lookups (MediaCleanupService purge check)
+        builder.HasIndex(m => m.StickerId)
+            .HasDatabaseName("IX_Messages_StickerId")
+            .HasFilter("[StickerId] IS NOT NULL");
+
+        // Foreign key to Stickers (restrict delete; reusable assets outlive deleted messages)
+        builder.HasOne<Sticker>()
+            .WithMany()
+            .HasForeignKey(m => m.StickerId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         // Composite self-referencing foreign key for reply hierarchy (restrict delete)
         builder.HasOne<Message>()

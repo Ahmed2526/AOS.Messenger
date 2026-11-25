@@ -53,7 +53,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
         TimeSpan expiresIn,
         DateTimeOffset nowUtc)
     {
-        MediaStorageKeyValidator.ValidateObjectKey(objectKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(objectKey);
         ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(expiresIn, TimeSpan.Zero);
 
         var token = _signingService.CreateGetToken(
@@ -207,7 +207,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
         CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidateObjectKey(stagingKey, MediaConstraints.PendingKeyPrefix);
-        MediaStorageKeyValidator.ValidateObjectKey(permanentKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(permanentKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(verifiedContentType);
         _ = contentDisposition;
 
@@ -262,7 +262,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
         CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidateObjectKey(stagingKey, MediaConstraints.PendingKeyPrefix);
-        MediaStorageKeyValidator.ValidateObjectKey(permanentKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(permanentKey);
         ArgumentNullException.ThrowIfNull(content);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(contentLength);
         ArgumentException.ThrowIfNullOrWhiteSpace(verifiedContentType);

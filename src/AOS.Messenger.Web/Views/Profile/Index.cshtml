@@ -40,28 +40,51 @@
                         </div>
 
                         <!-- Foreground content row -->
-                        <div class="relative z-10 flex items-center gap-4 sm:gap-5">
-                            <!-- Avatar Circle Container -->
-                            <div class="relative shrink-0">
-                                <div id="profile-hero-avatar" class="w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 flex items-center justify-center text-xl font-semibold bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 select-none shadow-xs">
-                                    @initials
+                        <div class="relative z-10 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                            <div class="relative z-10 flex items-center gap-4 sm:gap-5 min-w-0 sm:flex-1">
+                                <!-- Avatar Circle Container -->
+                                <div class="relative shrink-0">
+                                    <div id="profile-hero-avatar"
+                                         data-avatar-slot="true"
+                                         data-avatar-clickable="true"
+                                         data-avatar-user-id="@(Model?.Id?.Value.ToString() ?? "")"
+                                         data-avatar-version="@(Model?.AvatarVersion ?? "")"
+                                         data-avatar-name="@(Model?.DisplayName ?? "")"
+                                         data-avatar-handle="@(Model?.UserName ?? "")"
+                                         class="w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 flex items-center justify-center text-xl font-semibold overflow-hidden bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/40 dark:border-[#B3929D]/50 select-none shadow-xs">
+                                        <span data-avatar-initials="true">@initials</span>
+                                    </div>
+                                    <!-- Online status indicator -->
+                                    <span class="pointer-events-none absolute bottom-0 right-0 w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 rounded-full bg-[#6F9473] ring-2 ring-white dark:ring-[#3A3835]" title="Active now"></span>
                                 </div>
-                                <!-- Online status indicator -->
-                                <span class="absolute bottom-0 right-0 w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0 rounded-full bg-[#6F9473] ring-2 ring-white dark:ring-[#3A3835]" title="Active now"></span>
+
+                                <!-- Identity Details -->
+                                <div class="flex-1 min-w-0">
+                                    <div class="flex flex-wrap items-center gap-2 mb-1">
+                                        <h1 data-avatar-user-display-name="@(Model?.Id?.Value.ToString() ?? "")" class="text-xl sm:text-2xl font-bold text-[#2B2725] dark:text-[#F0E9E2] tracking-tight truncate">@(Model?.DisplayName ?? "My Profile")</h1>
+                                        <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F0E9DF] dark:bg-[#45423E] text-[#6E6560] dark:text-[#C9C0B9] text-xs font-medium shrink-0">
+                                            <span class="w-1.5 h-1.5 rounded-full bg-[#6F9473]"></span>
+                                            Active now
+                                        </span>
+                                    </div>
+                                    <p class="text-xs sm:text-sm text-[#6E6560] dark:text-[#C9C0B9] truncate">@@@(Model?.UserName ?? "username")</p>
+                                </div>
                             </div>
 
-                            <!-- Identity Details -->
-                            <div class="flex-1 min-w-0">
-                                <div class="flex flex-wrap items-center gap-2 mb-1">
-                                    <h1 class="text-xl sm:text-2xl font-bold text-[#2B2725] dark:text-[#F0E9E2] tracking-tight truncate">@(Model?.DisplayName ?? "My Profile")</h1>
-                                    <span class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[#F0E9DF] dark:bg-[#45423E] text-[#6E6560] dark:text-[#C9C0B9] text-xs font-medium shrink-0">
-                                        <span class="w-1.5 h-1.5 rounded-full bg-[#6F9473]"></span>
-                                        Active now
-                                    </span>
-                                </div>
-                                <p class="text-xs sm:text-sm text-[#6E6560] dark:text-[#C9C0B9] truncate">@@@(Model?.UserName ?? "username")</p>
+                            <!-- Profile Photo Actions -->
+                            <div class="flex flex-wrap items-center gap-2 shrink-0">
+                                <input id="profile-avatar-file-input" type="file" accept="image/jpeg,image/png,image/webp" class="hidden" aria-label="Choose profile photo" />
+                                <button type="button" id="profile-avatar-upload-btn" class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#F0E9DF] dark:bg-[#45423E] hover:bg-[#E3DCD7] dark:hover:bg-[#514D48] text-[#2B2725] dark:text-[#F0E9E2] border border-[#E3DCD7] dark:border-[#5B5752] text-xs font-semibold transition-colors cursor-pointer">
+                                    <span class="material-symbols-outlined text-[16px]">photo_camera</span>
+                                    <span>Change Photo</span>
+                                </button>
+                                <button type="button" id="profile-avatar-remove-btn" class="@(string.IsNullOrEmpty(Model?.AvatarVersion) ? "hidden" : "inline-flex") items-center gap-1 px-3 py-1.5 rounded-lg border border-red-200 dark:border-red-900/50 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 text-xs font-semibold transition-colors cursor-pointer">
+                                    <span class="material-symbols-outlined text-[16px]">delete</span>
+                                    <span>Remove Photo</span>
+                                </button>
                             </div>
                         </div>
+                        <p id="profile-avatar-status" role="status" class="hidden relative z-10 mt-3 text-xs font-medium"></p>
                     </div>
 
                     <!-- Edit Profile Form -->
@@ -76,9 +99,9 @@
                             <div class="flex flex-col gap-4">
                                 <div class="flex flex-col gap-1.5">
                                     <label asp-for="DisplayName" class="font-label-md text-label-md text-on-surface font-semibold">Display Name</label>
-                                    <input asp-for="DisplayName" maxlength="100" class="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-low border border-[#E3DCD7] dark:border-[#5B5752] text-on-surface font-body-md focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] transition-all" placeholder="Enter your display name" required />
+                                    <input asp-for="DisplayName" maxlength="64" class="w-full px-3.5 py-2.5 rounded-lg bg-surface-container-low border border-[#E3DCD7] dark:border-[#5B5752] text-on-surface font-body-md focus:outline-none focus:border-[#B3929D] focus:ring-1 focus:ring-[#B3929D] transition-all" placeholder="Enter your display name" required />
                                     <span asp-validation-for="DisplayName" class="text-error text-xs"></span>
-                                    <p class="text-[11px] text-on-surface-variant">The name displayed to contacts. Maximum 100 characters.</p>
+                                    <p class="text-[11px] text-on-surface-variant">The name displayed to contacts. Maximum 64 characters.</p>
                                 </div>
                                 <div class="flex flex-col gap-1.5">
                                     <label asp-for="Bio" class="font-label-md text-label-md text-on-surface font-semibold">About / Bio</label>

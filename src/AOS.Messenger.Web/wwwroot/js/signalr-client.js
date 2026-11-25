@@ -8,7 +8,7 @@
  * sensitive state on true session revocation.
  */
 
-import { getConversationBundle } from './api-client.js';
+import { DEFAULT_MESSAGE_PAGE_SIZE, getConversationBundle } from './api-client.js';
 import {
     compareMessages,
     formatMessagePreview,
@@ -17,6 +17,8 @@ import {
     isMessageRendered,
     isLatestRenderedMessage,
     insertMessageOrdered,
+    renderMessages,
+    syncPaginationAttributes,
     scrollToBottom,
     applyMessageEditedToRow,
     applyMessageDeletedForEveryone,
@@ -62,6 +64,7 @@ function isDocumentVisibleAndFocused() {
 }
 
 export const MAX_SEEN_INCOMING_IDS = 500;
+const DEFAULT_RECONNECT_RETRY_DELAYS_MS = [2000, 5000, 10000, 30000, 60000];
 
 /**
  * Classifies whether a SignalR negotiate/invoke error indicates a revoked or expired session.
@@ -116,7 +119,10 @@ export function createSignalRClient({
     onRefreshPresence = null,
     onIncomingMessage = null,
     onMessageDeleted = null,
-    signalRLib = null
+    onReconciledWindowReplaced = null,
+    onUserProfileUpdated = null,
+    signalRLib = null,
+    retryDelaysMs = null
 }) {
     const lib = signalRLib || (typeof signalR !== 'undefined' ? signalR : null);
     if (!lib || typeof lib.HubConnectionBuilder !== 'function') {
@@ -138,10 +144,37 @@ export function createSignalRClient({
         .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
         .build();
 
+    const reconnectBackoffDelays = Array.isArray(retryDelaysMs) && retryDelaysMs.length > 0
+        ? retryDelaysMs
+        : DEFAULT_RECONNECT_RETRY_DELAYS_MS;
     let isTerminated = false;
     let joinedConversationId = null;
     let requestedConversationId = null;
+    let retryTimerId = null;
+    let retryAttempt = 0;
+    let startInFlight = null;
+    let needsReconcileOnStart = false;
     const seenIncomingIds = new Set();
+
+    function clearRetryTimer() {
+        if (retryTimerId !== null) {
+            clearTimeout(retryTimerId);
+            retryTimerId = null;
+        }
+    }
+
+    function scheduleReconnect() {
+        if (isTerminated || retryTimerId !== null || startInFlight || isConnected()) return;
+        const idx = Math.min(retryAttempt, reconnectBackoffDelays.length - 1);
+        const delayMs = Math.max(0, Number(reconnectBackoffDelays[idx]) || 0);
+        retryAttempt++;
+        retryTimerId = setTimeout(() => {
+            retryTimerId = null;
+            if (!isTerminated && !isConnected()) {
+                start();
+            }
+        }, delayMs);
+    }
 
     function trackSeenIncomingId(msgId) {
         const key = String(msgId);
@@ -166,6 +199,9 @@ export function createSignalRClient({
     function triggerSessionExpired() {
         if (isTerminated) return;
         isTerminated = true;
+        clearRetryTimer();
+        retryAttempt = 0;
+        needsReconcileOnStart = false;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();
@@ -316,7 +352,7 @@ export function createSignalRClient({
         if (isTerminated || !convId) return;
 
         try {
-            const bundle = await getConversationBundle(convId, { pageSize: 30 });
+            const bundle = await getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE });
             if (isTerminated || expectedEpoch !== state.switchEpoch || !sameId(state.activeConversationId, convId)) {
                 return;
             }
@@ -365,6 +401,39 @@ export function createSignalRClient({
             if (!containerEl || !Array.isArray(messages) || messages.length === 0) return;
 
             const newestRendered = getNewestRenderedMessageInfo(containerEl);
+            const bundleHasMore = Boolean(bundle?.hasMore ?? bundle?.HasMore);
+            const bundleNextCursor = bundle?.nextCursor ?? bundle?.NextCursor ?? null;
+            const sortedBundle = [...messages].sort(compareMessages);
+            const oldestBundle = sortedBundle[0];
+            const oldestBundleId = getMessageId(oldestBundle);
+            const oldestBundleTime = Date.parse(oldestBundle?.createdAtUtc ?? oldestBundle?.CreatedAtUtc ?? '');
+            if (newestRendered && bundleHasMore && oldestBundleId && !isMessageRendered(oldestBundleId) && Number.isFinite(oldestBundleTime)) {
+                const oldestIdBig = parseBigIntSafe(oldestBundleId);
+                if (oldestBundleTime > newestRendered.time ||
+                    (oldestBundleTime === newestRendered.time && oldestIdBig > newestRendered.id)) {
+                    renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true });
+                    if (state.messagesById && typeof state.messagesById.clear === 'function') {
+                        state.messagesById.clear();
+                        for (const msg of sortedBundle) {
+                            const msgId = getMessageId(msg);
+                            if (msgId) state.messagesById.set(msgId, msg);
+                        }
+                    }
+                    state.nextCursor = bundleNextCursor;
+                    state.hasMore = bundleHasMore;
+                    state.hasPaginatedOlder = false;
+                    syncPaginationAttributes(containerEl, state.nextCursor, state.hasMore);
+                    if (typeof onReconciledWindowReplaced === 'function') {
+                        onReconciledWindowReplaced();
+                    }
+                    const latestReplaced = sortedBundle[sortedBundle.length - 1];
+                    if (latestReplaced) {
+                        updateSidebarLastMessage(convId, formatMessagePreview(latestReplaced), getMessageId(latestReplaced), false, false, true);
+                    }
+                    return;
+                }
+            }
+
             const missingNewer = [];
 
             for (const msg of messages) {
@@ -678,7 +747,9 @@ export function createSignalRClient({
         }
 
         const isActive = sameId(eventConvId, state.activeConversationId);
-        applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, isActive);
+        applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, isActive, {
+            hasMore: Boolean(state.hasMore && state.nextCursor)
+        });
         if (isActive && typeof onMessageDeleted === 'function') {
             onMessageDeleted(msgId);
         }
@@ -801,16 +872,21 @@ export function createSignalRClient({
 
     connection.onreconnected(async () => {
         if (isTerminated) return;
+        clearRetryTimer();
+        retryAttempt = 0;
+        needsReconcileOnStart = false;
         requestedConversationId = null;
         joinedConversationId = null;
         setStatus('connected');
 
         const activeId = state.activeConversationId;
         const epoch = state.switchEpoch;
+        let attemptedTarget = null;
 
         try {
             if (activeId && epoch === state.switchEpoch) {
                 const target = normalizeId(activeId).trim();
+                attemptedTarget = target;
                 requestedConversationId = target;
                 await connection.invoke('JoinConversation', target);
                 if (isTerminated) return;
@@ -835,6 +911,9 @@ export function createSignalRClient({
                 }
             }
         } catch (err) {
+            if (attemptedTarget && sameId(requestedConversationId, attemptedTarget) && !sameId(joinedConversationId, attemptedTarget)) {
+                requestedConversationId = null;
+            }
             if (isSessionRevokedSignalRError(err)) {
                 triggerSessionExpired();
             } else {
@@ -847,11 +926,14 @@ export function createSignalRClient({
         requestedConversationId = null;
         joinedConversationId = null;
         if (isSessionRevokedSignalRError(error)) {
+            clearRetryTimer();
             triggerSessionExpired();
             return;
         }
         if (!isTerminated) {
-            setStatus('disconnected', 'Disconnected from chat.');
+            needsReconcileOnStart = true;
+            setStatus('disconnected', 'Disconnected from chat. Reconnecting...');
+            scheduleReconnect();
         }
     });
 
@@ -872,6 +954,11 @@ export function createSignalRClient({
             onPresenceChanged(presence);
         }
     });
+    connection.on('ReceiveUserProfileUpdated', (profile) => {
+        if (!isTerminated && typeof onUserProfileUpdated === 'function') {
+            onUserProfileUpdated(profile);
+        }
+    });
 
     const handlePageLeave = () => {
         const current = state.activeConversationId || requestedConversationId || joinedConversationId;
@@ -880,49 +967,94 @@ export function createSignalRClient({
         }
     };
 
+    const handleOnline = () => {
+        if (isTerminated || isConnected()) return;
+        clearRetryTimer();
+        retryAttempt = 0;
+        start();
+    };
+
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('beforeunload', handlePageLeave);
         window.addEventListener('pagehide', handlePageLeave);
+        window.addEventListener('online', handleOnline);
     }
 
-    async function start() {
-        if (isTerminated) return false;
-        try {
-            await connection.start();
-            if (isTerminated) return false;
-            setStatus('connected');
+    function start() {
+        if (isTerminated) return Promise.resolve(false);
+        if (startInFlight) return startInFlight;
 
-            const activeId = state.activeConversationId;
-            if (activeId) {
-                await notifyActiveConversation(activeId);
-            }
+        const runStart = (async () => {
+            let shouldScheduleRetry = false;
+            try {
+                await connection.start();
+                if (isTerminated) return false;
 
-            if (typeof onRefreshPresence === 'function') {
-                onRefreshPresence();
-            }
+                clearRetryTimer();
+                retryAttempt = 0;
+                const shouldReconcile = needsReconcileOnStart;
+                needsReconcileOnStart = false;
 
-            if (state.activeConversationId && state.pendingConversationId === null && !isTerminated) {
-                const containerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
-                    ? (document.getElementById('messages-container') || document)
-                    : null;
-                if (containerEl) {
-                    checkAndMarkIncoming(containerEl, state.activeConversationId, state.currentUserId);
+                setStatus('connected');
+
+                const activeId = state.activeConversationId;
+                const epoch = state.switchEpoch;
+                if (activeId) {
+                    await notifyActiveConversation(activeId);
+                    if (shouldReconcile && !isTerminated && epoch === state.switchEpoch && sameId(state.activeConversationId, activeId)) {
+                        await reconcileActiveConversation(activeId, epoch);
+                    }
+                }
+
+                if (shouldReconcile && !isTerminated) {
+                    await syncSidebarConversations(() => state.activeConversationId);
+                }
+
+                if (typeof onRefreshPresence === 'function') {
+                    onRefreshPresence();
+                }
+
+                if (state.activeConversationId && state.pendingConversationId === null && !isTerminated) {
+                    const containerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+                        ? (document.getElementById('messages-container') || document)
+                        : null;
+                    if (containerEl) {
+                        checkAndMarkIncoming(containerEl, state.activeConversationId, state.currentUserId);
+                    }
+                }
+                return true;
+            } catch (err) {
+                if (isSessionRevokedSignalRError(err)) {
+                    clearRetryTimer();
+                    triggerSessionExpired();
+                    return false;
+                }
+                if (!isTerminated) {
+                    needsReconcileOnStart = true;
+                    setStatus('disconnected', 'Disconnected from chat. Retrying...');
+                    shouldScheduleRetry = true;
+                }
+                return false;
+            } finally {
+                if (startInFlight === runStart) {
+                    startInFlight = null;
+                }
+                if (shouldScheduleRetry) {
+                    scheduleReconnect();
                 }
             }
-            return true;
-        } catch (err) {
-            if (isSessionRevokedSignalRError(err)) {
-                triggerSessionExpired();
-                return false;
-            }
-            setStatus('disconnected', 'Failed to connect to chat.');
-            return false;
-        }
+        })();
+
+        startInFlight = runStart;
+        return runStart;
     }
 
     async function stop() {
         if (isTerminated) return;
         isTerminated = true;
+        clearRetryTimer();
+        retryAttempt = 0;
+        needsReconcileOnStart = false;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();
@@ -937,6 +1069,7 @@ export function createSignalRClient({
         if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
             window.removeEventListener('beforeunload', handlePageLeave);
             window.removeEventListener('pagehide', handlePageLeave);
+            window.removeEventListener('online', handleOnline);
         }
         stop();
     }

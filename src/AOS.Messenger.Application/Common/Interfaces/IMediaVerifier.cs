@@ -10,6 +10,9 @@ public sealed class VerifiedMediaResult : IDisposable, IAsyncDisposable
     public int? Height { get; }
     public int? DurationMs { get; }
     public Stream? ProcessedStream { get; }
+    public Stream? ThumbnailStream { get; }
+    public string? ThumbnailContentType { get; }
+    public long? ThumbnailSizeBytes { get; }
 
     public VerifiedMediaResult(
         string verifiedContentType,
@@ -17,7 +20,10 @@ public sealed class VerifiedMediaResult : IDisposable, IAsyncDisposable
         int? width = null,
         int? height = null,
         int? durationMs = null,
-        Stream? processedStream = null)
+        Stream? processedStream = null,
+        Stream? thumbnailStream = null,
+        string? thumbnailContentType = null,
+        long? thumbnailSizeBytes = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(verifiedContentType);
 
@@ -27,18 +33,28 @@ public sealed class VerifiedMediaResult : IDisposable, IAsyncDisposable
         Height = height;
         DurationMs = durationMs;
         ProcessedStream = processedStream;
+        ThumbnailStream = thumbnailStream;
+        ThumbnailContentType = thumbnailContentType;
+        ThumbnailSizeBytes = thumbnailSizeBytes;
     }
 
     public void Dispose()
     {
         ProcessedStream?.Dispose();
+        ThumbnailStream?.Dispose();
     }
 
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        return ProcessedStream is not null
-            ? ProcessedStream.DisposeAsync()
-            : ValueTask.CompletedTask;
+        if (ProcessedStream is not null)
+        {
+            await ProcessedStream.DisposeAsync();
+        }
+
+        if (ThumbnailStream is not null)
+        {
+            await ThumbnailStream.DisposeAsync();
+        }
     }
 }
 

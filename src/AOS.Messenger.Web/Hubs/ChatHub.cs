@@ -103,6 +103,7 @@ public sealed class ChatHub : Hub<IChatClient>
         }
 
         // 1 & 2. Register connection in tracker with abort callback and enforce 10-connection cap
+        var callerContext = Context;
         bool becameOnline = false;
         bool registered;
         if (_connectionTracker is InMemoryConnectionTracker memoryTracker)
@@ -110,8 +111,8 @@ public sealed class ChatHub : Hub<IChatClient>
             registered = memoryTracker.TryAddConnection(
                 userId,
                 sessionId,
-                Context.ConnectionId,
-                () => Context.Abort(),
+                callerContext.ConnectionId,
+                () => callerContext.Abort(),
                 out becameOnline);
         }
         else
@@ -119,8 +120,8 @@ public sealed class ChatHub : Hub<IChatClient>
             registered = _connectionTracker.TryAddConnection(
                 userId,
                 sessionId,
-                Context.ConnectionId,
-                () => Context.Abort());
+                callerContext.ConnectionId,
+                () => callerContext.Abort());
         }
 
         if (!registered)

@@ -161,12 +161,14 @@ export function createEmojiPicker(options = {}) {
     const getUserId = typeof options.getUserId === 'function' ? options.getUserId : () => null;
     const loadCatalog = typeof options.loadCatalog === 'function' ? options.loadCatalog : loadDefaultEmojiCatalog;
     const onEmojiInserted = typeof options.onEmojiInserted === 'function' ? options.onEmojiInserted : null;
+    const stickerPicker = options.stickerPicker || null;
 
     let catalog = null;
     let isOpenState = false;
     let activeTriggerEl = null;
     let activeTargetEl = null;
     let activeSurface = 'composer';
+    let activeMode = 'emoji'; // 'emoji' | 'stickers'
     let activeCategoryKey = 'smileys';
     let searchQuery = '';
     let selectedSkinTone = '';
@@ -175,6 +177,11 @@ export function createEmojiPicker(options = {}) {
 
     // DOM refs created lazily once
     let panelEl = null;
+    let modeSwitcherEl = null;
+    let emojiModeBtn = null;
+    let stickersModeBtn = null;
+    let emojiPaneEl = null;
+    let stickersPaneEl = null;
     let searchInputEl = null;
     let clearSearchBtn = null;
     let skinToneToggleBtn = null;
@@ -326,28 +333,6 @@ export function createEmojiPicker(options = {}) {
         btn.title = label || renderedEmoji;
         btn.className = 'emoji-font w-full h-10 rounded-lg flex items-center justify-center text-[22px] leading-none hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] active:scale-90 transition-transform cursor-pointer select-none';
         btn.textContent = renderedEmoji;
-
-        btn.addEventListener('mousedown', (e) => {
-            // Keep textarea selection/caret intact when clicking emoji buttons
-            e.preventDefault();
-        });
-        btn.addEventListener('click', (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            if (!activeTargetEl || activeTargetEl.disabled) return;
-
-            const inserted = insertTextAtCaret(activeTargetEl, renderedEmoji, {
-                focus: shouldFocusTextareaAfterPick()
-            });
-
-            if (inserted) {
-                recordRecentEmoji(getUserId(), renderedEmoji);
-                if (onEmojiInserted) {
-                    onEmojiInserted(renderedEmoji, activeTargetEl, activeSurface);
-                }
-            }
-        });
-
         return btn;
     }
 
@@ -425,6 +410,54 @@ export function createEmojiPicker(options = {}) {
         gridContainerEl.appendChild(frag);
     }
 
+    function syncModeUi() {
+        const allowStickers = Boolean(stickerPicker && activeSurface === 'composer');
+        if (!allowStickers && activeMode === 'stickers') {
+            activeMode = 'emoji';
+        }
+        if (modeSwitcherEl && modeSwitcherEl.classList) {
+            if (allowStickers) modeSwitcherEl.classList.remove('hidden');
+            else modeSwitcherEl.classList.add('hidden');
+        }
+        if (emojiModeBtn) {
+            const isEmoji = activeMode === 'emoji';
+            emojiModeBtn.setAttribute('aria-selected', isEmoji ? 'true' : 'false');
+            emojiModeBtn.className = isEmoji
+                ? 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-[#B3929D] text-white shadow-2xs transition-colors cursor-pointer'
+                : 'flex-1 py-1.5 rounded-lg text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors cursor-pointer';
+        }
+        if (stickersModeBtn) {
+            const isStickers = activeMode === 'stickers';
+            stickersModeBtn.setAttribute('aria-selected', isStickers ? 'true' : 'false');
+            stickersModeBtn.className = isStickers
+                ? 'flex-1 py-1.5 rounded-lg text-xs font-bold bg-[#B3929D] text-white shadow-2xs transition-colors cursor-pointer'
+                : 'flex-1 py-1.5 rounded-lg text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors cursor-pointer';
+        }
+        if (emojiPaneEl && emojiPaneEl.classList) {
+            if (activeMode === 'emoji') emojiPaneEl.classList.remove('hidden');
+            else emojiPaneEl.classList.add('hidden');
+        }
+        if (stickersPaneEl && stickersPaneEl.classList) {
+            if (activeMode === 'stickers') stickersPaneEl.classList.remove('hidden');
+            else stickersPaneEl.classList.add('hidden');
+        }
+        if (panelEl) {
+            panelEl.setAttribute('aria-label', activeMode === 'stickers' ? 'Sticker picker' : 'Emoji picker');
+        }
+    }
+
+    function switchMode(nextMode) {
+        const allowStickers = Boolean(stickerPicker && activeSurface === 'composer');
+        const resolved = nextMode === 'stickers' && allowStickers ? 'stickers' : 'emoji';
+        activeMode = resolved;
+        skinToneMenuOpen = false;
+        syncSkinToneButton();
+        syncModeUi();
+        if (resolved === 'stickers' && stickerPicker && typeof stickerPicker.ensureLoaded === 'function') {
+            stickerPicker.ensureLoaded();
+        }
+    }
+
     function ensurePanelBuilt() {
         if (panelEl || typeof document === 'undefined' || !document.body) return panelEl;
 
@@ -441,6 +474,45 @@ export function createEmojiPicker(options = {}) {
         panelEl.setAttribute('aria-label', 'Emoji picker');
         panelEl.setAttribute('tabindex', '-1');
         panelEl.className = 'hidden fixed z-[60] bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-xl text-[#2B2725] dark:text-[#F0E9E2] flex flex-col overflow-hidden select-none';
+
+        // Top Mode Switcher: [Emoji | Stickers] (composer only)
+        modeSwitcherEl = document.createElement('div');
+        modeSwitcherEl.id = 'picker-mode-switcher';
+        modeSwitcherEl.setAttribute('role', 'tablist');
+        modeSwitcherEl.setAttribute('aria-label', 'Picker mode');
+        modeSwitcherEl.className = 'hidden px-2.5 pt-2 pb-1.5 border-b border-[#E3DCD7] dark:border-[#514D48] bg-[#F8F6F3]/80 dark:bg-[#302F2C]/80 flex items-center gap-1 shrink-0';
+
+        emojiModeBtn = document.createElement('button');
+        emojiModeBtn.type = 'button';
+        emojiModeBtn.setAttribute('role', 'tab');
+        emojiModeBtn.setAttribute('data-picker-mode', 'emoji');
+        emojiModeBtn.textContent = 'Emoji';
+        emojiModeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        emojiModeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            switchMode('emoji');
+        });
+        modeSwitcherEl.appendChild(emojiModeBtn);
+
+        stickersModeBtn = document.createElement('button');
+        stickersModeBtn.type = 'button';
+        stickersModeBtn.setAttribute('role', 'tab');
+        stickersModeBtn.setAttribute('data-picker-mode', 'stickers');
+        stickersModeBtn.textContent = 'Stickers';
+        stickersModeBtn.addEventListener('mousedown', (e) => e.preventDefault());
+        stickersModeBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            switchMode('stickers');
+        });
+        modeSwitcherEl.appendChild(stickersModeBtn);
+        panelEl.appendChild(modeSwitcherEl);
+
+        // Emoji Pane Wrapper
+        emojiPaneEl = document.createElement('div');
+        emojiPaneEl.setAttribute('data-emoji-pane', 'true');
+        emojiPaneEl.className = 'flex flex-col flex-1 min-h-0';
 
         // Header: Search input + Skin tone button
         const headerEl = document.createElement('div');
@@ -528,28 +600,82 @@ export function createEmojiPicker(options = {}) {
         skinToneMenuEl.className = 'hidden flex items-center justify-between px-1.5 py-1 rounded-xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48]';
         headerEl.appendChild(skinToneMenuEl);
 
-        panelEl.appendChild(headerEl);
+        emojiPaneEl.appendChild(headerEl);
 
         // Category tab strip
         tabsBarEl = document.createElement('div');
         tabsBarEl.setAttribute('role', 'tablist');
         tabsBarEl.setAttribute('aria-label', 'Emoji categories');
         tabsBarEl.className = 'flex items-center border-b border-[#E3DCD7] dark:border-[#514D48] bg-[#F8F6F3]/60 dark:bg-[#302F2C]/60 px-1 shrink-0';
-        panelEl.appendChild(tabsBarEl);
+        emojiPaneEl.appendChild(tabsBarEl);
 
         // Active section label
         statusHeadingEl = document.createElement('div');
         statusHeadingEl.className = 'px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-wider text-[#6E6560] dark:text-[#C9C0B9] shrink-0';
         statusHeadingEl.textContent = 'Emojis';
-        panelEl.appendChild(statusHeadingEl);
+        emojiPaneEl.appendChild(statusHeadingEl);
 
-        // Scrollable 8-column grid
+        // Scrollable 8-column grid with single delegated listeners
         gridContainerEl = document.createElement('div');
         gridContainerEl.setAttribute('data-emoji-grid', 'true');
         gridContainerEl.className = 'grid grid-cols-8 gap-0.5 px-2 pb-2.5 flex-1 min-h-0 overflow-y-auto custom-scroll content-start';
-        panelEl.appendChild(gridContainerEl);
+        const findPickedButton = (target) => {
+            if (!target) return null;
+            if (typeof target.closest === 'function') {
+                const matched = target.closest('[data-emoji-pick]');
+                return matched && gridContainerEl && gridContainerEl.contains(matched) ? matched : null;
+            }
+            let cur = target;
+            while (cur && cur !== gridContainerEl) {
+                if (typeof cur.getAttribute === 'function' && cur.getAttribute('data-emoji-pick') !== null) {
+                    return cur;
+                }
+                cur = cur.parentNode;
+            }
+            return null;
+        };
+        gridContainerEl.addEventListener('mousedown', (e) => {
+            if (findPickedButton(e?.target) && e && typeof e.preventDefault === 'function') {
+                // Keep textarea selection/caret intact when clicking emoji buttons
+                e.preventDefault();
+            }
+        });
+        gridContainerEl.addEventListener('click', (e) => {
+            const btn = findPickedButton(e?.target);
+            if (!btn) return;
+            if (e && typeof e.preventDefault === 'function') e.preventDefault();
+            if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
+            if (!activeTargetEl || activeTargetEl.disabled) return;
+
+            const renderedEmoji = btn.getAttribute('data-emoji-pick');
+            if (!renderedEmoji) return;
+
+            const inserted = insertTextAtCaret(activeTargetEl, renderedEmoji, {
+                focus: shouldFocusTextareaAfterPick()
+            });
+
+            if (inserted) {
+                recordRecentEmoji(getUserId(), renderedEmoji);
+                if (onEmojiInserted) {
+                    onEmojiInserted(renderedEmoji, activeTargetEl, activeSurface);
+                }
+            }
+        });
+        emojiPaneEl.appendChild(gridContainerEl);
+
+        panelEl.appendChild(emojiPaneEl);
+
+        // Stickers Pane Wrapper (lazy-mounted)
+        stickersPaneEl = document.createElement('div');
+        stickersPaneEl.setAttribute('data-stickers-pane', 'true');
+        stickersPaneEl.className = 'hidden flex flex-col flex-1 min-h-0';
+        if (stickerPicker && typeof stickerPicker.mount === 'function') {
+            stickerPicker.mount(stickersPaneEl);
+        }
+        panelEl.appendChild(stickersPaneEl);
 
         document.body.appendChild(panelEl);
+        syncModeUi();
         return panelEl;
     }
 
@@ -581,8 +707,8 @@ export function createEmojiPicker(options = {}) {
         }
 
         const margin = 8;
-        const panelWidth = Math.min(352, Math.max(260, vw - margin * 2));
-        const panelHeight = Math.min(392, Math.max(240, vh - margin * 2));
+        const panelWidth = Math.min(368, Math.max(260, vw - margin * 2));
+        const panelHeight = Math.min(416, Math.max(240, vh - margin * 2));
 
         panelEl.className = 'fixed z-[60] bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl text-[#2B2725] dark:text-[#F0E9E2] flex flex-col overflow-hidden select-none';
 
@@ -629,12 +755,29 @@ export function createEmojiPicker(options = {}) {
         syncSkinToneButton();
     }
 
+    function isTopLayerStickerModalOpen() {
+        if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return false;
+        for (const id of ['sticker-confirm-modal', 'sticker-creator-modal', 'sticker-info-modal']) {
+            const modal = document.getElementById(id);
+            if (modal && modal.classList && !modal.classList.contains('hidden')) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     const onOutsidePointerDown = (e) => {
         if (!isOpenState || !panelEl) return;
+        if (isTopLayerStickerModalOpen()) return;
         const target = e.target;
         if (panelEl.contains(target)) return;
         if (activeTriggerEl && (target === activeTriggerEl || (typeof activeTriggerEl.contains === 'function' && activeTriggerEl.contains(target)))) {
             return;
+        }
+        if (activeSurface === 'composer' && target && typeof target.closest === 'function') {
+            if (target.closest('[data-emoji-trigger="composer"]')) {
+                return;
+            }
         }
         close();
     };
@@ -642,6 +785,7 @@ export function createEmojiPicker(options = {}) {
     const onDocumentKeyDown = (e) => {
         if (!isOpenState) return;
         if (e.key === 'Escape') {
+            if (isTopLayerStickerModalOpen()) return;
             e.preventDefault();
             if (typeof e.stopImmediatePropagation === 'function') {
                 e.stopImmediatePropagation();
@@ -696,9 +840,23 @@ export function createEmojiPicker(options = {}) {
             return false;
         }
 
-        if (isOpenState && activeTriggerEl === triggerEl && activeTargetEl === targetEl) {
-            close();
-            return false;
+        const requestedSurface = openOptions.surface || 'composer';
+        const allowStickers = Boolean(stickerPicker && requestedSurface === 'composer');
+        const requestedMode = openOptions.initialMode === 'stickers' && allowStickers ? 'stickers' : 'emoji';
+
+        if (isOpenState && activeTargetEl === targetEl && activeSurface === requestedSurface) {
+            if (activeTriggerEl === triggerEl) {
+                close();
+                return false;
+            }
+            if (activeTriggerEl && activeTriggerEl !== triggerEl) {
+                updateTriggerAria(activeTriggerEl, false);
+            }
+            activeTriggerEl = triggerEl;
+            updateTriggerAria(triggerEl, true);
+            switchMode(requestedMode);
+            positionPanel();
+            return true;
         }
 
         if (activeTriggerEl && activeTriggerEl !== triggerEl) {
@@ -708,7 +866,8 @@ export function createEmojiPicker(options = {}) {
         const myToken = ++openRequestToken;
         activeTriggerEl = triggerEl;
         activeTargetEl = targetEl;
-        activeSurface = openOptions.surface || 'composer';
+        activeSurface = requestedSurface;
+        activeMode = requestedMode;
         isOpenState = true;
         skinToneMenuOpen = false;
         searchQuery = '';
@@ -722,12 +881,20 @@ export function createEmojiPicker(options = {}) {
         if (searchInputEl) searchInputEl.value = '';
         if (clearSearchBtn && clearSearchBtn.classList) clearSearchBtn.classList.add('hidden');
 
+        syncModeUi();
         updateTriggerAria(triggerEl, true);
         if (panelEl && panelEl.classList) {
             panelEl.classList.remove('hidden');
         }
         positionPanel();
         renderGrid();
+
+        if (activeMode === 'stickers' && stickerPicker && typeof stickerPicker.ensureLoaded === 'function') {
+            await stickerPicker.ensureLoaded();
+            if (myToken !== openRequestToken || !isOpenState) {
+                return false;
+            }
+        }
 
         try {
             const loaded = await loadCatalog();
@@ -757,6 +924,11 @@ export function createEmojiPicker(options = {}) {
             panelEl.remove();
         }
         panelEl = null;
+        modeSwitcherEl = null;
+        emojiModeBtn = null;
+        stickersModeBtn = null;
+        emojiPaneEl = null;
+        stickersPaneEl = null;
         searchInputEl = null;
         clearSearchBtn = null;
         skinToneToggleBtn = null;
@@ -770,6 +942,8 @@ export function createEmojiPicker(options = {}) {
     return {
         toggle,
         close,
+        switchMode,
+        getMode: () => activeMode,
         resetForSwitch: close,
         isOpen: () => isOpenState,
         reposition: positionPanel,

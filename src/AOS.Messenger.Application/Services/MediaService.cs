@@ -305,6 +305,9 @@ public sealed class MediaService : IMediaService
 
         // Generate a fresh, per-attempt permanent key so concurrent/retried completions never overwrite committed objects.
         var permanentKey = $"{MediaConstraints.MediaKeyPrefix}{MediaConstraints.GenerateStorageObjectId()}";
+        string? thumbnailKey = null;
+        string? thumbnailContentType = null;
+        long? thumbnailSizeBytes = null;
         var contentDisposition = MediaConstraints.BuildContentDisposition(
             media.SanitizedFileName,
             isAttachment: media.Kind == MediaKind.Document);
@@ -334,12 +337,42 @@ public sealed class MediaService : IMediaService
                         stagingMeta.ETag,
                         ct);
                 }
+
+                if (verified.ThumbnailStream is not null
+                    && !string.IsNullOrWhiteSpace(verified.ThumbnailContentType)
+                    && verified.ThumbnailSizeBytes is > 0)
+                {
+                    thumbnailKey = $"{MediaConstraints.ThumbnailKeyPrefix}{MediaConstraints.GenerateStorageObjectId()}";
+                    thumbnailContentType = verified.ThumbnailContentType;
+                    thumbnailSizeBytes = verified.ThumbnailSizeBytes.Value;
+                    await _mediaStorage.PromoteFromStreamAsync(
+                        stagingKey,
+                        thumbnailKey,
+                        verified.ThumbnailStream,
+                        thumbnailSizeBytes.Value,
+                        thumbnailContentType,
+                        contentDisposition,
+                        ct);
+                }
             }
         }
         catch (Exception ex) when (ex is NotFoundException or ConflictException)
         {
             await BestEffortDeleteStorageAsync(permanentKey, mediaId, CancellationToken.None);
+            if (thumbnailKey is not null)
+            {
+                await BestEffortDeleteStorageAsync(thumbnailKey, mediaId, CancellationToken.None);
+            }
             return await HandleConcurrentCompletionConflictAsync(mediaId, ct);
+        }
+        catch
+        {
+            await BestEffortDeleteStorageAsync(permanentKey, mediaId, CancellationToken.None);
+            if (thumbnailKey is not null)
+            {
+                await BestEffortDeleteStorageAsync(thumbnailKey, mediaId, CancellationToken.None);
+            }
+            throw;
         }
 
         var uploadedAtUtc = _timeProvider.GetUtcNow();
@@ -350,7 +383,10 @@ public sealed class MediaService : IMediaService
             verified.Width,
             verified.Height,
             verified.DurationMs,
-            uploadedAtUtc);
+            uploadedAtUtc,
+            thumbnailKey,
+            thumbnailContentType,
+            thumbnailSizeBytes);
 
         try
         {
@@ -360,6 +396,10 @@ public sealed class MediaService : IMediaService
         {
             // Delete this losing attempt's disjoint permanent object; never touch the winning permanent object.
             await BestEffortDeleteStorageAsync(permanentKey, mediaId, CancellationToken.None);
+            if (thumbnailKey is not null)
+            {
+                await BestEffortDeleteStorageAsync(thumbnailKey, mediaId, CancellationToken.None);
+            }
 
             var reloaded = await _mediaPersistence.GetByIdNoTrackingAsync(mediaId, ct);
             if (reloaded is not null && reloaded.State == MediaState.Uploaded)
@@ -428,11 +468,16 @@ public sealed class MediaService : IMediaService
         }
 
         var objectKeyToDelete = media.ObjectKey;
+        var thumbKeyToDelete = media.ThumbnailObjectKey;
 
         if (media.State == MediaState.Failed)
         {
             if (media.PurgedAtUtc is null && await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, ct))
             {
+                if (thumbKeyToDelete is not null)
+                {
+                    await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, ct);
+                }
                 media.MarkPurged(_timeProvider.GetUtcNow());
                 try
                 {
@@ -466,6 +511,10 @@ public sealed class MediaService : IMediaService
         }
 
         var deleted = await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, ct);
+        if (thumbKeyToDelete is not null)
+        {
+            await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, ct);
+        }
         if (deleted)
         {
             media.MarkPurged(_timeProvider.GetUtcNow());
@@ -492,6 +541,7 @@ public sealed class MediaService : IMediaService
         MessageId messageId,
         MediaId mediaId,
         bool forceDownload = false,
+        bool thumbnail = false,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(callerId);
@@ -541,15 +591,21 @@ public sealed class MediaService : IMediaService
             throw new NotFoundException("Media", mediaId.Value);
         }
 
+        var useThumbnail = thumbnail && !forceDownload && !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey);
         var isAttachment = forceDownload || media.Kind == MediaKind.Document;
         var contentDisposition = MediaConstraints.BuildContentDisposition(media.SanitizedFileName, isAttachment);
-        var contentType = media.VerifiedContentType ?? media.DeclaredContentType;
-        var sizeBytes = media.VerifiedSizeBytes ?? media.DeclaredSizeBytes;
+        var targetKey = useThumbnail ? media.ThumbnailObjectKey! : media.ObjectKey;
+        var contentType = useThumbnail
+            ? (media.ThumbnailContentType ?? "image/webp")
+            : (media.VerifiedContentType ?? media.DeclaredContentType);
+        var sizeBytes = useThumbnail
+            ? (media.ThumbnailSizeBytes ?? media.VerifiedSizeBytes ?? media.DeclaredSizeBytes)
+            : (media.VerifiedSizeBytes ?? media.DeclaredSizeBytes);
 
         var nowUtc = _timeProvider.GetUtcNow();
         var expiresIn = TimeSpan.FromMinutes(Math.Max(1, _options.PresignedGetTtlMinutes));
         var downloadUrl = _mediaStorage.GeneratePresignedGetUrl(
-            media.ObjectKey,
+            targetKey,
             contentType,
             contentDisposition,
             expiresIn,
@@ -687,6 +743,7 @@ public sealed class MediaService : IMediaService
             media.Width,
             media.Height,
             media.DurationMs,
-            media.DisplayOrder);
+            media.DisplayOrder,
+            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey));
     }
 }

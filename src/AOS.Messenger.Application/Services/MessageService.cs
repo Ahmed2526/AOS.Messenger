@@ -28,6 +28,7 @@ public sealed class MessageService : IMessageService
     private readonly IRealtimeNotifier _realtimeNotifier;
     private readonly IReactionPersistence _reactionPersistence;
     private readonly IMediaPersistence _mediaPersistence;
+    private readonly IStickerPersistence? _stickerPersistence;
     private readonly ILogger<MessageService> _logger;
     private readonly TimeProvider _timeProvider;
 
@@ -41,7 +42,8 @@ public sealed class MessageService : IMessageService
         IReactionPersistence reactionPersistence,
         ILogger<MessageService> logger,
         TimeProvider? timeProvider = null,
-        IMediaPersistence? mediaPersistence = null)
+        IMediaPersistence? mediaPersistence = null,
+        IStickerPersistence? stickerPersistence = null)
     {
         ArgumentNullException.ThrowIfNull(messagePersistence);
         ArgumentNullException.ThrowIfNull(conversationPersistence);
@@ -58,6 +60,7 @@ public sealed class MessageService : IMessageService
         _realtimeNotifier = realtimeNotifier;
         _reactionPersistence = reactionPersistence;
         _mediaPersistence = mediaPersistence ?? NullMediaPersistence.Instance;
+        _stickerPersistence = stickerPersistence;
         _logger = logger;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
@@ -111,6 +114,14 @@ public sealed class MessageService : IMessageService
 
         var mediaIds = dto.MediaIds;
         var hasAttachments = mediaIds is { Count: > 0 };
+        var stickerId = dto.StickerId;
+        var hasSticker = stickerId is not null;
+
+        if (hasSticker && hasAttachments)
+        {
+            throw new DomainException("Sticker messages cannot include media attachments.");
+        }
+
         if (hasAttachments)
         {
             if (mediaIds!.Count > MediaConstraints.MaxAttachmentsPerMessage)
@@ -137,6 +148,11 @@ public sealed class MessageService : IMessageService
         string? normalizedContent = null;
         if (Message.HasVisibleContent(dto.Content))
         {
+            if (hasSticker)
+            {
+                throw new DomainException("Sticker messages cannot include text content.");
+            }
+
             var trimmedContent = dto.Content!.Trim();
             if (trimmedContent.Length > 4000)
             {
@@ -145,7 +161,7 @@ public sealed class MessageService : IMessageService
 
             normalizedContent = trimmedContent;
         }
-        else if (!hasAttachments)
+        else if (!hasAttachments && !hasSticker)
         {
             throw new DomainException("Message content cannot be empty or whitespace.");
         }
@@ -203,6 +219,15 @@ public sealed class MessageService : IMessageService
             }
         }
 
+        if (hasSticker)
+        {
+            if (_stickerPersistence is null
+                || !await _stickerPersistence.CanUserAccessStickerAsync(senderId, stickerId!, forSending: true, ct))
+            {
+                throw new NotFoundException("Sticker", stickerId!.Value);
+            }
+        }
+
         var nowUtc = _timeProvider.GetUtcNow();
         var message = Message.Create(
             conversationId,
@@ -211,7 +236,8 @@ public sealed class MessageService : IMessageService
             normalizedContent,
             nowUtc,
             dto.ReplyToMessageId,
-            hasAttachments: hasAttachments);
+            hasAttachments: hasAttachments,
+            stickerId: stickerId);
 
         var persistResult = hasAttachments
             ? await _messagePersistence.AddWithMediaAsync(message, mediaIds!, nowUtc, ct)
@@ -221,6 +247,27 @@ public sealed class MessageService : IMessageService
             persistResult.Message,
             persistResult.IsNewlyCreated,
             persistResult.AttachedMedia);
+
+        if (isNewlyCreated && persisted.StickerId is not null && _stickerPersistence is not null)
+        {
+            try
+            {
+                await _stickerPersistence.UpsertRecentStickerAsync(
+                    senderId,
+                    persisted.StickerId,
+                    nowUtc,
+                    StickerConstraints.MaxRecentStickersPerUser,
+                    ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to record recent sticker {StickerId} for user {UserId} after message commit.",
+                    persisted.StickerId.Value,
+                    senderId.Value);
+            }
+        }
 
         MessageReplyDto? replyDto = null;
         if (persisted.ParentMessageId is not null)
@@ -242,9 +289,11 @@ public sealed class MessageService : IMessageService
 
                 var preview = parent.IsDeletedForEveryone
                     ? "This message was deleted."
-                    : parentMedia is { Count: > 0 }
-                        ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
-                        : TruncatePreview(parent.Content ?? string.Empty);
+                    : parent.StickerId is not null
+                        ? MediaPreviewFormatter.FormatStickerPreview()
+                        : parentMedia is { Count: > 0 }
+                            ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
+                            : TruncatePreview(parent.Content ?? string.Empty);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -275,9 +324,29 @@ public sealed class MessageService : IMessageService
             }
         }
 
+        StickerMessageDto? stickerDto = null;
+        StickerMessageDto? broadcastStickerDto = null;
+        if (!persisted.IsDeletedForEveryone && persisted.StickerId is not null && _stickerPersistence is not null)
+        {
+            var stickerRecord = await _stickerPersistence.GetStickerWithPackAsync(persisted.StickerId, ct);
+            if (stickerRecord is not null)
+            {
+                var isFav = await _stickerPersistence.IsStickerFavoritedByUserAsync(senderId, persisted.StickerId, ct);
+                stickerDto = StickerService.ToStickerMessageDto(stickerRecord.Sticker, stickerRecord.Pack, senderId, isFav);
+                broadcastStickerDto = stickerDto with
+                {
+                    PackAuthor = stickerRecord.Pack.IsSystemPack
+                        ? stickerRecord.Pack.AuthorName
+                        : StickerConstraints.NeutralCommunityAuthor,
+                    IsFavoritedByCurrentUser = false
+                };
+            }
+        }
+
         var senderProfile = await _userReader.GetByIdAsync(persisted.SenderId, ct);
         var senderName = FormatDisplayName(senderProfile);
         var senderHandle = FormatUserName(senderProfile);
+        var senderAvatarVersion = senderProfile is { IsDeleted: false } ? senderProfile.AvatarVersion : null;
 
         var messageDto = new MessageDto(
             persisted.Id,
@@ -292,13 +361,18 @@ public sealed class MessageService : IMessageService
             replyDto,
             IsOutgoing: true,
             Reactions: [],
-            Attachments: attachmentDtos);
+            Attachments: attachmentDtos,
+            SenderAvatarVersion: senderAvatarVersion,
+            Sticker: stickerDto);
 
         if (isNewlyCreated)
         {
             try
             {
-                await _realtimeNotifier.NotifyNewMessageAsync(conversationId, messageDto, ct);
+                var broadcastDto = broadcastStickerDto is not null
+                    ? messageDto with { Sticker = broadcastStickerDto }
+                    : messageDto;
+                await _realtimeNotifier.NotifyNewMessageAsync(conversationId, broadcastDto, ct);
             }
             catch (Exception ex)
             {
@@ -313,7 +387,7 @@ public sealed class MessageService : IMessageService
         UserId callerId,
         ConversationId conversationId,
         string? cursor,
-        int pageSize = 30,
+        int pageSize = PaginationDefaults.DefaultMessagePageSize,
         CancellationToken ct = default)
     {
         ArgumentNullException.ThrowIfNull(callerId);
@@ -321,11 +395,11 @@ public sealed class MessageService : IMessageService
 
         if (pageSize <= 0)
         {
-            pageSize = 30;
+            pageSize = PaginationDefaults.DefaultMessagePageSize;
         }
-        else if (pageSize > 100)
+        else if (pageSize > PaginationDefaults.MaxMessagePageSize)
         {
-            pageSize = 100;
+            pageSize = PaginationDefaults.MaxMessagePageSize;
         }
 
         var conversation = await _conversationPersistence.GetByIdAsync(conversationId, ct);
@@ -424,9 +498,28 @@ public sealed class MessageService : IMessageService
             }
         }
 
+        var isConversationBlocked = await _blockPersistence.IsBlockedBidirectionalAsync(
+            callerId,
+            conversation.GetOtherParticipant(callerId),
+            ct);
+
         var mediaByMessage = mediaMessageIds.Count > 0
             ? await _mediaPersistence.GetByMessageIdsAsync(conversationId, mediaMessageIds, ct)
             : new Dictionary<MessageId, IReadOnlyList<Media>>();
+
+        var stickerIds = pageItems
+            .Where(m => !m.IsDeletedForEveryone && m.StickerId is not null)
+            .Select(m => m.StickerId!)
+            .Distinct()
+            .ToList();
+
+        var stickersById = stickerIds.Count > 0 && _stickerPersistence is not null
+            ? await _stickerPersistence.GetStickersWithPacksByIdsAsync(stickerIds, ct)
+            : new Dictionary<StickerId, StickerWithPackRecord>();
+
+        var favoriteStickerIds = stickerIds.Count > 0 && _stickerPersistence is not null
+            ? await _stickerPersistence.GetUserFavoriteStickerIdsAsync(callerId, stickerIds, ct)
+            : [];
 
         var dtos = new List<MessageDto>(pageItems.Count);
         foreach (var m in pageItems)
@@ -434,6 +527,9 @@ public sealed class MessageService : IMessageService
             profiles.TryGetValue(m.SenderId, out var senderProfile);
             var senderName = FormatDisplayName(senderProfile);
             var senderHandle = FormatUserName(senderProfile);
+            var senderAvatarVersion = (!isConversationBlocked && senderProfile is { IsDeleted: false })
+                ? senderProfile.AvatarVersion
+                : null;
 
             MessageReplyDto? replyDto = null;
             if (m.ParentMessageId != null &&
@@ -451,9 +547,11 @@ public sealed class MessageService : IMessageService
 
                 var preview = parent.IsDeletedForEveryone
                     ? "This message was deleted."
-                    : parentMedia is { Count: > 0 }
-                        ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
-                        : TruncatePreview(parent.Content ?? string.Empty);
+                    : parent.StickerId is not null
+                        ? MediaPreviewFormatter.FormatStickerPreview()
+                        : parentMedia is { Count: > 0 }
+                            ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
+                            : TruncatePreview(parent.Content ?? string.Empty);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -474,6 +572,18 @@ public sealed class MessageService : IMessageService
                     .ToList()
                 : [];
 
+            StickerMessageDto? stickerDto = null;
+            if (!m.IsDeletedForEveryone
+                && m.StickerId is not null
+                && stickersById.TryGetValue(m.StickerId, out var stickerRecord))
+            {
+                stickerDto = StickerService.ToStickerMessageDto(
+                    stickerRecord.Sticker,
+                    stickerRecord.Pack,
+                    callerId,
+                    favoriteStickerIds.Contains(m.StickerId));
+            }
+
             dtos.Add(new MessageDto(
                 m.Id,
                 m.ConversationId,
@@ -487,7 +597,9 @@ public sealed class MessageService : IMessageService
                 replyDto,
                 isOutgoing,
                 reactions ?? [],
-                attachments));
+                attachments,
+                senderAvatarVersion,
+                stickerDto));
         }
 
         return new MessagesCursorPageDto(dtos, nextCursor, hasMore);
@@ -537,6 +649,11 @@ public sealed class MessageService : IMessageService
         if (message.IsDeletedForEveryone)
         {
             throw new ForbiddenException("Cannot edit a message that has been deleted for everyone.");
+        }
+
+        if (message.StickerId is not null)
+        {
+            throw new DomainException("Sticker messages cannot be edited.");
         }
 
         await EnsureMessageVisibleToUserAsync(conversationId, message, callerId, ct);
@@ -646,6 +763,10 @@ public sealed class MessageService : IMessageService
             if (lastMessage.IsDeletedForEveryone)
             {
                 newLastMessagePreview = "This message was deleted";
+            }
+            else if (lastMessage.StickerId is not null)
+            {
+                newLastMessagePreview = MediaPreviewFormatter.FormatStickerPreview();
             }
             else if (lastMessage.HasAttachments)
             {
@@ -1027,7 +1148,8 @@ public sealed class MessageService : IMessageService
             media.Width,
             media.Height,
             media.DurationMs,
-            media.DisplayOrder);
+            media.DisplayOrder,
+            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey));
     }
 }
 
@@ -1047,6 +1169,7 @@ internal sealed class NullRealtimeNotifier : IRealtimeNotifier
     public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+    public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
 }
 
 internal sealed class NullReactionPersistence : IReactionPersistence

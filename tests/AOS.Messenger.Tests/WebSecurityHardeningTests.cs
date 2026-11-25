@@ -1,5 +1,6 @@
 using System.Net;
 using System.Security.Claims;
+using System.Threading.RateLimiting;
 using AOS.Messenger.Web.Filters;
 using AOS.Messenger.Web.Middleware;
 using AOS.Messenger.Web.RateLimiting;
@@ -178,6 +179,124 @@ public sealed class WebSecurityHardeningTests
         var limiter11 = partition11.Factory($"{clientIp}:user11@example.com");
         using var lease11 = limiter11.AttemptAcquire(1);
         Assert.False(lease11.IsAcquired, "11th attempt from same IP must be throttled regardless of different target email.");
+    }
+
+    [Fact]
+    public void DualIpAndEmailRateLimiterPolicy_AfterCacheEviction_RecreatesBucketsWithoutObjectDisposedException()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero));
+        using var policy = new DualIpAndEmailRateLimiterPolicy(maxCacheEntries: 4, clock);
+
+        var firstCtx = new DefaultHttpContext();
+        firstCtx.Connection.RemoteIpAddress = IPAddress.Parse("10.50.0.1");
+        firstCtx.Request.ContentType = "application/x-www-form-urlencoded";
+        firstCtx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+        {
+            ["Email"] = "first@example.com"
+        });
+
+        var firstPartition = policy.GetPartition(firstCtx);
+        using var retainedLimiter = firstPartition.Factory(firstPartition.PartitionKey);
+        using (var firstLease = retainedLimiter.AttemptAcquire(1))
+        {
+            Assert.True(firstLease.IsAcquired);
+        }
+
+        // Force cache eviction beyond maxCacheEntries = 4 for both IPs and emails.
+        for (int i = 0; i < 12; i++)
+        {
+            var churnCtx = new DefaultHttpContext();
+            churnCtx.Connection.RemoteIpAddress = IPAddress.Parse($"10.50.1.{i}");
+            churnCtx.Request.ContentType = "application/x-www-form-urlencoded";
+            churnCtx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["Email"] = $"churn{i}@example.com"
+            });
+
+            var part = policy.GetPartition(churnCtx);
+            using var churnLimiter = part.Factory(part.PartitionKey);
+            using var churnLease = churnLimiter.AttemptAcquire(1);
+            Assert.True(churnLease.IsAcquired);
+        }
+
+        // Re-acquiring on the retained DualRateLimiter must NOT throw ObjectDisposedException.
+        using (var postEvictionLease = retainedLimiter.AttemptAcquire(1))
+        {
+            Assert.True(postEvictionLease.IsAcquired);
+        }
+
+        // Advancing beyond 15-minute sliding expiration + 1-minute window also recreates safely.
+        clock.Advance(TimeSpan.FromMinutes(16));
+        using (var afterExpiryLease = retainedLimiter.AttemptAcquire(1))
+        {
+            Assert.True(afterExpiryLease.IsAcquired);
+        }
+    }
+
+    [Fact]
+    public void DualIpAndEmailRateLimiterPolicy_ReportsIdleDuration_AndCollapsesExhaustedIpEmailKeys()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 25, 13, 0, 0, TimeSpan.Zero));
+        using var policy = new DualIpAndEmailRateLimiterPolicy(maxCacheEntries: 100, clock);
+        var clientIp = IPAddress.Parse("172.20.0.9");
+
+        RateLimiter? lastLimiter = null;
+        for (int i = 0; i < DualIpAndEmailRateLimiterPolicy.IpPermitLimitPerMinute; i++)
+        {
+            var ctx = new DefaultHttpContext();
+            ctx.Connection.RemoteIpAddress = clientIp;
+            ctx.Request.ContentType = "application/x-www-form-urlencoded";
+            ctx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["Email"] = $"u{i}@example.com"
+            });
+
+            var part = policy.GetPartition(ctx);
+            var limiter = part.Factory(part.PartitionKey);
+            using var lease = limiter.AttemptAcquire(1);
+            Assert.True(lease.IsAcquired);
+            lastLimiter = limiter;
+        }
+
+        Assert.NotNull(lastLimiter);
+        clock.Advance(TimeSpan.FromSeconds(10));
+        Assert.Equal(TimeSpan.FromSeconds(10), lastLimiter.IdleDuration);
+        lastLimiter.Dispose();
+
+        // Once IP is exhausted in the current window, arbitrary distinct emails map to a single per-IP/window partition key.
+        var spamCtx1 = new DefaultHttpContext();
+        spamCtx1.Connection.RemoteIpAddress = clientIp;
+        spamCtx1.Request.ContentType = "application/x-www-form-urlencoded";
+        spamCtx1.Request.Form = new FormCollection(new Dictionary<string, StringValues> { ["Email"] = "random1@example.com" });
+
+        var spamCtx2 = new DefaultHttpContext();
+        spamCtx2.Connection.RemoteIpAddress = clientIp;
+        spamCtx2.Request.ContentType = "application/x-www-form-urlencoded";
+        spamCtx2.Request.Form = new FormCollection(new Dictionary<string, StringValues> { ["Email"] = "random2@example.com" });
+
+        var spamPart1 = policy.GetPartition(spamCtx1);
+        var spamPart2 = policy.GetPartition(spamCtx2);
+        Assert.Equal(spamPart1.PartitionKey, spamPart2.PartitionKey);
+        Assert.StartsWith("ip-exhausted:", spamPart1.PartitionKey, StringComparison.Ordinal);
+
+        using var rejectedLimiter = spamPart1.Factory(spamPart1.PartitionKey);
+        using var rejectedLease = rejectedLimiter.AttemptAcquire(1);
+        Assert.False(rejectedLease.IsAcquired);
+        Assert.True(rejectedLease.TryGetMetadata(MetadataName.RetryAfter.Name, out _));
+    }
+
+    private sealed class TestTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow;
+
+        public TestTimeProvider(DateTimeOffset initialUtcNow)
+        {
+            _utcNow = initialUtcNow;
+        }
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan delta) => _utcNow = _utcNow.Add(delta);
     }
 
     [Fact]

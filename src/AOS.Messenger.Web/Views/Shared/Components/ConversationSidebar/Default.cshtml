@@ -10,11 +10,18 @@
         && string.Equals(currentAction, "Archived", StringComparison.OrdinalIgnoreCase);
 
     var isAuthenticated = User.Identity?.IsAuthenticated == true;
-    var displayName = User.FindFirst("DisplayName")?.Value;
+    var currentUserId = User.FindFirst(ClaimTypes.NameIdentifier)?.Value ?? "";
+    var displayName = Model.CurrentUserProfile?.DisplayName;
     if (string.IsNullOrWhiteSpace(displayName))
     {
-        displayName = User.Identity?.Name ?? (isAuthenticated ? "User" : "Guest");
+        displayName = User.FindFirst("DisplayName")?.Value;
     }
+    if (string.IsNullOrWhiteSpace(displayName))
+    {
+        displayName = Model.CurrentUserProfile?.UserName ?? User.Identity?.Name ?? (isAuthenticated ? "User" : "Guest");
+    }
+    var currentUserHandle = Model.CurrentUserProfile?.UserName ?? User.Identity?.Name ?? "";
+    var currentUserAvatarVersion = Model.CurrentUserProfile?.AvatarVersion ?? "";
 
     var initials = "U";
     if (!string.IsNullOrWhiteSpace(displayName))
@@ -134,8 +141,13 @@
                        data-search="@conv.OtherParticipantName @conv.OtherParticipantHandle @conv.LastMessagePreview"
                        class="conversation-item group flex items-center gap-3 p-3 rounded-xl transition-all @(isActive ? "bg-[#FFFFFF] dark:bg-[#45423E] shadow-xs border border-[#E3DCD7] dark:border-[#514D48]" : "hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/50 border border-transparent")">
                         <div class="relative flex-shrink-0">
-                            <div class="w-11 h-11 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
-                                @convInitials
+                            <div data-avatar-slot="true"
+                                 data-avatar-user-id="@conv.OtherParticipantId.Value"
+                                 data-avatar-version="@(conv.OtherParticipantAvatarVersion ?? "")"
+                                 data-avatar-name="@conv.OtherParticipantName"
+                                 data-avatar-handle="@conv.OtherParticipantHandle"
+                                 class="w-11 h-11 rounded-full overflow-hidden bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
+                                <span data-avatar-initials="true">@convInitials</span>
                             </div>
                             <span class="presence-indicator-dot absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(conv.IsOnline ? "bg-[#6F9473]" : "bg-stone-400 dark:bg-stone-500") border-2 border-[#F0E9DF] dark:border-[#3A3835]"></span>
                         </div>
@@ -197,13 +209,18 @@
     <div class="p-3 bg-[#F0E9DF] dark:bg-[#3A3835] border-t border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between">
         <a asp-controller="Profile" asp-action="Index" class="flex items-center gap-2.5 min-w-0 hover:opacity-90 transition-opacity">
             <div class="relative flex-shrink-0">
-                <div class="w-9 h-9 rounded-full bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
-                    @initials
+                <div data-avatar-slot="true"
+                     data-avatar-user-id="@currentUserId"
+                     data-avatar-version="@currentUserAvatarVersion"
+                     data-avatar-name="@displayName"
+                     data-avatar-handle="@currentUserHandle"
+                     class="w-9 h-9 rounded-full overflow-hidden bg-[#B3929D] text-white font-bold text-xs flex items-center justify-center shadow-xs">
+                    <span data-avatar-initials="true">@initials</span>
                 </div>
                 <span class="absolute bottom-0 right-0 w-2.5 h-2.5 rounded-full @(isAuthenticated ? "bg-[#6F9473]" : "bg-stone-400") border-2 border-[#F0E9DF] dark:border-[#3A3835]"></span>
             </div>
             <div class="min-w-0">
-                <div class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">@displayName</div>
+                <div data-avatar-user-display-name="@currentUserId" class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">@displayName</div>
                 <div class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">@(isAuthenticated ? "Available" : "Offline")</div>
             </div>
         </a>

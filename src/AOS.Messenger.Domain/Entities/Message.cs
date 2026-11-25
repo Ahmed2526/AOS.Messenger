@@ -22,6 +22,7 @@ public sealed class Message : Entity<MessageId>
     public DateTimeOffset? DeletedForEveryoneAtUtc { get; private set; }
     public MessageId? ParentMessageId { get; private set; }
     public bool HasAttachments { get; private set; }
+    public StickerId? StickerId { get; private set; }
     public byte[] RowVersion { get; private set; } = [];
 
     private Message()
@@ -36,7 +37,8 @@ public sealed class Message : Entity<MessageId>
         DateTimeOffset nowUtc,
         MessageId? parentMessageId = null,
         MessageId? id = null,
-        bool hasAttachments = false)
+        bool hasAttachments = false,
+        StickerId? stickerId = null)
     {
         ArgumentNullException.ThrowIfNull(conversationId);
         ArgumentNullException.ThrowIfNull(senderId);
@@ -53,7 +55,21 @@ public sealed class Message : Entity<MessageId>
         }
 
         string? normalizedContent;
-        if (!hasAttachments)
+        if (stickerId is not null)
+        {
+            if (hasAttachments)
+            {
+                throw new DomainException("A sticker message cannot include file attachments.");
+            }
+
+            if (HasVisibleContent(content))
+            {
+                throw new DomainException("A sticker message cannot include text content.");
+            }
+
+            normalizedContent = null;
+        }
+        else if (!hasAttachments)
         {
             if (!HasVisibleContent(content))
             {
@@ -92,7 +108,8 @@ public sealed class Message : Entity<MessageId>
             Content = normalizedContent,
             CreatedAtUtc = nowUtc,
             ParentMessageId = parentMessageId,
-            HasAttachments = hasAttachments,
+            HasAttachments = stickerId is null && hasAttachments,
+            StickerId = stickerId,
             IsDeletedForEveryone = false,
             RowVersion = []
         };
@@ -126,6 +143,11 @@ public sealed class Message : Entity<MessageId>
         if (IsDeletedForEveryone)
         {
             throw new DomainException("Cannot edit a message that has been deleted for everyone.");
+        }
+
+        if (StickerId is not null)
+        {
+            throw new DomainException("Sticker messages cannot be edited.");
         }
 
         if (!HasAttachments)
@@ -171,6 +193,7 @@ public sealed class Message : Entity<MessageId>
         IsDeletedForEveryone = true;
         DeletedForEveryoneAtUtc = deletedAtUtc;
         Content = null;
+        StickerId = null;
         EditedAtUtc = null;
     }
 

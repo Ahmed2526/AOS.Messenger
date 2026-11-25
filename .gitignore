@@ -51,6 +51,11 @@ coveragereport/
 qa-audit-results.json
 qa-verification-results.json
 
+## Local review & bug notes
+foundbugs.md
+REVIEW_FINDINGS.md
+review_findings.md
+
 ## Stitch design prototypes & local metadata
 stitch-screens/
 

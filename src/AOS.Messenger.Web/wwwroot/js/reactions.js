@@ -14,36 +14,16 @@ import {
     toggleReaction as apiToggleReaction,
     removeReaction as apiRemoveReaction
 } from './api-client.js';
+import { showChatActionError, hideChatActionError } from './chat-action-error.js';
 
 export const ALLOWED_EMOJIS = ['👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉'];
 
-let actionErrorTimer = null;
-
 function showActionError(message) {
-    if (typeof document === 'undefined' || !message) return;
-    const el = document.getElementById('chat-action-error');
-    if (!el) return;
-    el.textContent = message;
-    el.classList.remove('hidden');
-    if (actionErrorTimer) {
-        clearTimeout(actionErrorTimer);
-    }
-    actionErrorTimer = setTimeout(() => {
-        el.classList.add('hidden');
-    }, 4000);
+    showChatActionError(message, 4000);
 }
 
 function hideActionError() {
-    if (actionErrorTimer) {
-        clearTimeout(actionErrorTimer);
-        actionErrorTimer = null;
-    }
-    if (typeof document === 'undefined') return;
-    const el = document.getElementById('chat-action-error');
-    if (el) {
-        el.textContent = '';
-        el.classList.add('hidden');
-    }
+    hideChatActionError();
 }
 
 /**
@@ -143,10 +123,11 @@ export function renderReactionPills(container, reactions, messageId, conversatio
 
     container.classList.remove('hidden');
 
+    const rowForStyle = typeof container.closest === 'function' ? container.closest('.message-bubble-row') : null;
     if (isOutgoing === null) {
-        const row = typeof container.closest === 'function' ? container.closest('.message-bubble-row') : null;
-        isOutgoing = row ? row.getAttribute('data-is-outgoing') === 'true' : false;
+        isOutgoing = rowForStyle ? rowForStyle.getAttribute('data-is-outgoing') === 'true' : false;
     }
+    const isStickerRow = rowForStyle ? rowForStyle.getAttribute('data-is-sticker') === 'true' : false;
 
     for (const r of reactions) {
         if (!r.count || r.count <= 0) continue;
@@ -160,7 +141,7 @@ export function renderReactionPills(container, reactions, messageId, conversatio
         let stateClass;
         let countClass;
 
-        if (isOutgoing) {
+        if (isOutgoing && !isStickerRow) {
             stateClass = r.reactedByCurrentUser
                 ? 'border-white/80 bg-white/20 text-white font-bold'
                 : 'border-white/30 bg-black/10 text-white/90 hover:bg-black/20';
@@ -390,6 +371,7 @@ export function setupEmojiPicker(convIdOrGetter, userIdOrGetter = null, options 
     return {
         resetForSwitch,
         closePopover,
+        toggleReactionForMessage: handleToggle,
         destroy: () => {
             resetForSwitch();
             document.removeEventListener('click', onOutsideClick);

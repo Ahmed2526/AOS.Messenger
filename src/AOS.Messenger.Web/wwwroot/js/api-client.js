@@ -3,7 +3,7 @@
  *
  * Centralizes cookie-authenticated JSON requests with cache: 'no-store',
  * CSRF RequestVerificationToken headers on mutations, distinguishable CSRF 400 recovery,
- * 204 No Content support, and safe 401/login-redirect/HTML session-expiry detection.
+ * 204 No Content support, and safe 401/login-redirect session-expiry detection.
  */
 
 export const ANTIFORGERY_PROBLEM_TYPE = 'https://aos.messenger/errors/antiforgery';
@@ -69,11 +69,6 @@ function isJsonContentType(contentType) {
     return normalized.includes('application/json') ||
            normalized.includes('application/problem+json') ||
            normalized.includes('+json');
-}
-
-function isHtmlContentType(contentType) {
-    if (!contentType) return false;
-    return String(contentType).toLowerCase().includes('text/html');
 }
 
 function isMutatingMethod(method) {
@@ -152,7 +147,7 @@ export async function apiFetch(url, options = {}) {
         : '';
 
     const redirectedToLogin = !!(resp.redirected && resp.url && String(resp.url).toLowerCase().includes('/account/login'));
-    if (resp.status === 401 || redirectedToLogin || isHtmlContentType(contentType)) {
+    if (resp.status === 401 || redirectedToLogin) {
         if (typeof config.onSessionExpired === 'function') {
             config.onSessionExpired();
         }
@@ -219,10 +214,12 @@ export async function apiFetch(url, options = {}) {
     return parsed;
 }
 
+export const DEFAULT_MESSAGE_PAGE_SIZE = 20;
+
 /**
  * Fetches initial metadata, policy flags, and ascending messages for a conversation in one request.
  */
-export function getConversationBundle(conversationId, { pageSize = 30, signal } = {}) {
+export function getConversationBundle(conversationId, { pageSize = DEFAULT_MESSAGE_PAGE_SIZE, signal } = {}) {
     const url = `/api/conversations/${encodeURIComponent(conversationId)}/bundle?pageSize=${encodeURIComponent(pageSize)}`;
     return apiFetch(url, { method: 'GET', signal });
 }
@@ -230,7 +227,7 @@ export function getConversationBundle(conversationId, { pageSize = 30, signal } 
 /**
  * Fetches a descending keyset page of messages for scroll-up pagination or reconciliation.
  */
-export function getMessagesPage(conversationId, { cursor = null, pageSize = 30, signal } = {}) {
+export function getMessagesPage(conversationId, { cursor = null, pageSize = DEFAULT_MESSAGE_PAGE_SIZE, signal } = {}) {
     const params = new URLSearchParams();
     params.set('pageSize', String(pageSize));
     if (cursor) {
@@ -346,16 +343,153 @@ export function cancelMediaUpload(conversationId, mediaId, { signal } = {}) {
 /**
  * Resolves a short-lived signed download URL JSON payload for a message attachment.
  */
-export function getMediaDownloadUrl(conversationId, messageId, mediaId, { download = false, signal } = {}) {
+export function getMediaDownloadUrl(conversationId, messageId, mediaId, { download = false, variant = null, signal } = {}) {
     const base = `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/media/${encodeURIComponent(mediaId)}/url`;
-    const url = download ? `${base}?download=true` : base;
+    const params = new URLSearchParams();
+    if (download) params.set('download', 'true');
+    if (variant) params.set('variant', String(variant));
+    const qs = params.toString();
+    const url = qs ? `${base}?${qs}` : base;
     return apiFetch(url, { method: 'GET', signal });
 }
 
 /**
  * Builds the cookie-authenticated inline/download redirect endpoint URL for images.
  */
-export function buildMediaInlineUrl(conversationId, messageId, mediaId, { download = false } = {}) {
+export function buildMediaInlineUrl(conversationId, messageId, mediaId, { download = false, variant = null } = {}) {
     const base = `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/media/${encodeURIComponent(mediaId)}`;
-    return download ? `${base}?download=true` : base;
+    const params = new URLSearchParams();
+    if (download) params.set('download', 'true');
+    if (variant) params.set('variant', String(variant));
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
+}
+
+/**
+ * Initiates a presigned profile photo upload in private R2 storage.
+ */
+export function initiateAvatarUpload(payload, { signal } = {}) {
+    return apiFetch('/api/profile/avatar/initiate', { method: 'POST', body: payload, signal });
+}
+
+/**
+ * Completes, verifies, and promotes a staged profile photo upload (1024px full + 128px thumb).
+ */
+export function completeAvatarUpload(uploadId, { signal } = {}) {
+    const url = `/api/profile/avatar/${encodeURIComponent(uploadId)}/complete`;
+    return apiFetch(url, { method: 'POST', signal });
+}
+
+/**
+ * Removes the current user's profile photo from R2 storage and SQL Server.
+ */
+export function removeAvatar({ signal } = {}) {
+    return apiFetch('/api/profile/avatar', { method: 'DELETE', signal });
+}
+
+/**
+ * Resolves a short-lived signed GET URL JSON payload for a user's avatar ('thumb' or 'full').
+ */
+export function getUserAvatarUrl(userId, { size = 'thumb', signal } = {}) {
+    const url = `/api/users/${encodeURIComponent(userId)}/avatar/url?size=${encodeURIComponent(size || 'thumb')}`;
+    return apiFetch(url, { method: 'GET', signal });
+}
+
+/**
+ * Builds the cookie-authenticated avatar redirect endpoint URL ('thumb' or 'full').
+ */
+export function buildUserAvatarRedirectUrl(userId, { size = 'thumb', version = null } = {}) {
+    const base = `/api/users/${encodeURIComponent(userId)}/avatar?size=${encodeURIComponent(size || 'thumb')}`;
+    return version ? `${base}&v=${encodeURIComponent(version)}` : base;
+}
+
+/**
+ * Fetches the authenticated caller's sticker catalog (recents, favorites, built-in packs, custom packs).
+ */
+export function getStickerCatalog({ signal } = {}) {
+    return apiFetch('/api/stickers/catalog', { method: 'GET', signal });
+}
+
+/**
+ * Creates a new custom sticker pack owned by the current user.
+ */
+export function createStickerPack(name, { signal } = {}) {
+    return apiFetch('/api/stickers/packs', { method: 'POST', body: { name }, signal });
+}
+
+/**
+ * Renames a custom sticker pack owned by the current user.
+ */
+export function renameStickerPack(packId, name, { signal } = {}) {
+    const url = `/api/stickers/packs/${encodeURIComponent(packId)}`;
+    return apiFetch(url, { method: 'PUT', body: { name }, signal });
+}
+
+/**
+ * Soft-deletes a custom sticker pack and archives its stickers safely.
+ */
+export function deleteStickerPack(packId, { signal } = {}) {
+    const url = `/api/stickers/packs/${encodeURIComponent(packId)}`;
+    return apiFetch(url, { method: 'DELETE', signal });
+}
+
+/**
+ * Initiates a presigned R2 staging upload for a custom static or animated sticker.
+ */
+export function initiateStickerUpload(payload, { signal } = {}) {
+    return apiFetch('/api/stickers/uploads/initiate', { method: 'POST', body: payload, signal });
+}
+
+/**
+ * Verifies, normalizes (512x512 WebP), and promotes a staged custom sticker upload.
+ */
+export function completeStickerUpload(stickerId, { signal } = {}) {
+    const url = `/api/stickers/uploads/${encodeURIComponent(stickerId)}/complete`;
+    return apiFetch(url, { method: 'POST', signal });
+}
+
+/**
+ * Cancels an incomplete custom sticker staging upload.
+ */
+export function cancelStickerUpload(stickerId, { signal } = {}) {
+    const url = `/api/stickers/uploads/${encodeURIComponent(stickerId)}`;
+    return apiFetch(url, { method: 'DELETE', signal });
+}
+
+/**
+ * Archives/removes a ready custom sticker from the owner's pack without breaking sent messages.
+ */
+export function archiveCustomSticker(stickerId, { signal } = {}) {
+    const url = `/api/stickers/${encodeURIComponent(stickerId)}`;
+    return apiFetch(url, { method: 'DELETE', signal });
+}
+
+/**
+ * Stars a built-in, custom, or chat-received sticker into the caller's Favorites.
+ */
+export function addFavoriteSticker(payload, { signal } = {}) {
+    return apiFetch('/api/stickers/favorites', { method: 'POST', body: payload, signal });
+}
+
+/**
+ * Removes a sticker from the caller's Favorites.
+ */
+export function removeFavoriteSticker(stickerId, { signal } = {}) {
+    const url = `/api/stickers/favorites/${encodeURIComponent(stickerId)}`;
+    return apiFetch(url, { method: 'DELETE', signal });
+}
+
+/**
+ * Resolves a short-lived signed GET URL JSON payload for a sticker.
+ */
+export function getStickerImageUrl(stickerId, { signal } = {}) {
+    const url = `/api/stickers/${encodeURIComponent(stickerId)}/url`;
+    return apiFetch(url, { method: 'GET', signal });
+}
+
+/**
+ * Builds the cookie-authenticated redirect endpoint URL for a sticker image.
+ */
+export function buildStickerImageRedirectUrl(stickerId) {
+    return `/api/stickers/${encodeURIComponent(stickerId)}/image`;
 }

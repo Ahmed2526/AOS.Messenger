@@ -292,7 +292,8 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
 
         // Assert keyset state reconciliation query (RT-005: queries latest page without inverted cursor)
         Assert.Contains("async function reconcileActiveConversation", content);
-        Assert.Contains("getConversationBundle(convId, { pageSize: 30 })", content);
+        Assert.Contains("getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE })", content);
+        Assert.Contains("export const DEFAULT_MESSAGE_PAGE_SIZE = 20;", content);
 
         // Assert caller accepts JSON
         Assert.Contains("'Accept': 'application/json'", content);

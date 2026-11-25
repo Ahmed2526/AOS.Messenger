@@ -484,6 +484,9 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
         public Task<bool> ExistsAsync(UserId id, CancellationToken ct = default) =>
             Task.FromResult(_profiles.ContainsKey(id));
 
+        public Task<IReadOnlySet<UserId>> GetActiveUserIdsAsync(IEnumerable<UserId> userIds, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlySet<UserId>>(userIds.Where(_profiles.ContainsKey).ToHashSet());
+
         public Task<IReadOnlyList<UserSearchResultDto>> SearchUsersAsync(
             UserId currentUserId,
             string query,
@@ -516,6 +519,7 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class TestHubCallerContext : HubCallerContext
@@ -570,6 +574,7 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
         public Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message) => Task.CompletedTask;
         public Task ReceiveMessageDeletedForMe(MessageDeletedForMeDto message) => Task.CompletedTask;
         public Task ReceiveReactionUpdated(ReactionUpdatedDto reaction) => Task.CompletedTask;
+        public Task ReceiveUserProfileUpdated(UserProfileUpdatedDto profile) => Task.CompletedTask;
     }
 
     private sealed class TestHubContext : IHubContext<ChatHub, IChatClient>

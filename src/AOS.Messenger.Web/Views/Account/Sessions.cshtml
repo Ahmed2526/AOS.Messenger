@@ -14,7 +14,6 @@
         @if (currentSession is not null && Model.Count > 1)
         {
             <form asp-action="RevokeOtherSessions" method="post">
-                <input type="hidden" name="currentId" value="@currentSession.Id" />
                 <button type="submit" class="px-4 py-2 bg-error text-white text-xs font-semibold rounded-xl hover:bg-error/90 transition-all shadow-sm">
                     Log Out All Other Devices
                 </button>

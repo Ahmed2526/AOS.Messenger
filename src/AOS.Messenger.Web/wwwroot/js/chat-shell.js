@@ -23,8 +23,16 @@ import {
     updateDocumentTitleUnreadBadge,
     ensureSidebarBroadcastChannel,
     syncSidebarConversations,
-    updateSidebarLastMessage
+    updateSidebarLastMessage,
+    updateSidebarPeerProfile
 } from './conversation-list.js';
+import {
+    hydrateAllAvatars,
+    bindAvatarLightboxDelegation,
+    updateUserAvatarAcrossDom,
+    closeAvatarLightbox,
+    clearAvatarUrlCache
+} from './avatar-loader.js';
 import { initChatActions } from './chat-actions.js';
 import { setupPresence } from './presence.js';
 import { setupTypingEmitter, setupTypingReceiver } from './typing.js';
@@ -35,6 +43,12 @@ import { createEmojiPicker } from './emoji-picker.js';
 import { createEmojiAutocomplete } from './emoji-autocomplete.js';
 import { createMediaLightbox } from './media-lightbox.js';
 import { createMediaUploader } from './media-uploader.js';
+import {
+    createStickerPicker,
+    hydrateStickerImages,
+    clearStickerUrlCache
+} from './sticker-picker.js';
+import { createStickerCreator } from './sticker-creator.js';
 
 const DEFAULT_SHELL_TITLE = 'A♡S Messenger - Desktop App';
 
@@ -61,13 +75,20 @@ export function initChatShell(overrides = {}) {
 
     const state = overrides.state || (overrides.isolatedState ? createChatState() : chatState);
     let signalrClient = null;
+    let router = null;
     let composerEmojiPicker = null;
+    let stickerPicker = null;
+    let stickerCreator = null;
     let emojiAutocomplete = null;
     let composer = null;
     let mediaLightbox = null;
     let mediaUploader = null;
     let scrollReadDebounce = null;
     let lastVisibilitySyncAt = 0;
+    let topPaginationObserver = null;
+    let paginationObserverArmRaf = null;
+    let topPaginationArmed = false;
+    let unbindAvatarLightbox = null;
 
     function navigateReplace(targetUrl) {
         if (typeof overrides.navigateReplace === 'function') {
@@ -106,10 +127,15 @@ export function initChatShell(overrides = {}) {
         if (signalrClient && typeof signalrClient.stop === 'function') {
             signalrClient.stop();
         }
+        disarmTopPaginationObserver();
         if (composerEmojiPicker) composerEmojiPicker.close();
+        if (stickerPicker) stickerPicker.invalidateCache();
+        if (stickerCreator) stickerCreator.abortAndWipe();
         if (emojiAutocomplete) emojiAutocomplete.close();
         if (mediaUploader) mediaUploader.abortAllAndWipe();
         if (mediaLightbox) mediaLightbox.wipe();
+        clearAvatarUrlCache();
+        clearStickerUrlCache();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -124,10 +150,15 @@ export function initChatShell(overrides = {}) {
         if (signalrClient && typeof signalrClient.stop === 'function') {
             signalrClient.stop();
         }
+        disarmTopPaginationObserver();
         if (composerEmojiPicker) composerEmojiPicker.close();
+        if (stickerPicker) stickerPicker.invalidateCache();
+        if (stickerCreator) stickerCreator.abortAndWipe();
         if (emojiAutocomplete) emojiAutocomplete.close();
         if (mediaUploader) mediaUploader.abortAllAndWipe();
         if (mediaLightbox) mediaLightbox.wipe();
+        clearAvatarUrlCache();
+        clearStickerUrlCache();
         state.wipeAllSensitiveState();
         resetReceiptsState();
         resetDocumentTitleState();
@@ -161,7 +192,33 @@ export function initChatShell(overrides = {}) {
     const presence = setupPresence(null, sidebarListEl, activeHeaderEl, { skipInitialFetch: true });
     const receipts = initReceipts(null, getActiveConversationId, getCurrentUserId);
     const emojiPicker = setupEmojiPicker(getActiveConversationId, getCurrentUserId, { getSwitchEpoch });
-    composerEmojiPicker = createEmojiPicker({ getUserId: getCurrentUserId });
+    const closeAllPopoversBeforeModal = () => {
+        if (composerEmojiPicker && typeof composerEmojiPicker.close === 'function') composerEmojiPicker.close();
+        if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') emojiAutocomplete.close();
+        if (emojiPicker && typeof emojiPicker.closePopover === 'function') emojiPicker.closePopover();
+        const attachMenu = document.getElementById('composer-attach-menu');
+        if (attachMenu && attachMenu.classList) attachMenu.classList.add('hidden');
+        const attachBtn = document.getElementById('composer-attach-btn');
+        if (attachBtn && typeof attachBtn.setAttribute === 'function') attachBtn.setAttribute('aria-expanded', 'false');
+    };
+    stickerCreator = createStickerCreator({
+        onBeforeOpen: closeAllPopoversBeforeModal
+    });
+    stickerPicker = createStickerPicker({
+        getActiveConversationId,
+        getCurrentUserId,
+        onSendSticker: (sticker) => composer?.sendSticker(sticker),
+        onOpenCreator: (opts) => {
+            closeAllPopoversBeforeModal();
+            stickerCreator.open(opts);
+        },
+        onBeforeOpenModal: closeAllPopoversBeforeModal,
+        onNotice: (msg) => composer?.showActionError(msg)
+    });
+    composerEmojiPicker = createEmojiPicker({
+        getUserId: getCurrentUserId,
+        stickerPicker
+    });
     emojiAutocomplete = createEmojiAutocomplete({ getUserId: getCurrentUserId });
     mediaLightbox = createMediaLightbox();
     mediaUploader = createMediaUploader({
@@ -195,7 +252,20 @@ export function initChatShell(overrides = {}) {
         getSwitchEpoch,
         emojiPicker: composerEmojiPicker,
         emojiAutocomplete,
-        mediaLightbox
+        mediaLightbox,
+        stickerPicker,
+        loadOlderMessages: (opts) => (router ? router.loadOlderMessages(opts) : Promise.resolve({ loaded: 0, hasMore: false, error: null })),
+        hasMoreOlder: () => Boolean(state.hasMore && state.nextCursor),
+        onMessagesMutated: () => evaluatePaginationUi(),
+        onMessageDeleted: (msgId) => {
+            if (msgId && state.messagesById) {
+                state.messagesById.delete(String(msgId));
+            }
+        },
+        showActionNotice: (msg) => composer?.showActionError(msg),
+        onToggleReaction: (msgId, emoji) => emojiPicker.toggleReactionForMessage(msgId, emoji),
+        onReply: (id, sender, preview) => composer?.setReply(id, sender, preview),
+        onBeforeOpenMobileSheet: closeAllPopoversBeforeModal
     });
 
     signalrClient = createSignalRClient({
@@ -215,7 +285,39 @@ export function initChatShell(overrides = {}) {
         onPresenceChanged: presence.handlePresenceChanged,
         onRefreshPresence: () => presence.fetchPresence(),
         onIncomingMessage: (convId, msg) => mediaUploader.reconcileIncomingMessage(convId, msg),
-        onMessageDeleted: (msgId) => mediaLightbox.closeIfMessage(msgId),
+        onMessageDeleted: (msgId) => {
+            mediaLightbox.closeIfMessage(msgId);
+            if (stickerPicker) stickerPicker.closeIfMessage(msgId);
+            if (messageActions && typeof messageActions.closeMobileActionSheetIfMessage === 'function') {
+                messageActions.closeMobileActionSheetIfMessage(msgId);
+            }
+        },
+        onReconciledWindowReplaced: () => armTopPaginationObserver(),
+        onUserProfileUpdated: (profile) => {
+            if (!profile || expiredHandled) return;
+            const userId = messageRenderer.getUserId(profile.userId ?? profile.UserId);
+            const displayName = profile.displayName ?? profile.DisplayName ?? null;
+            const avatarVersion = profile.avatarVersion !== undefined ? profile.avatarVersion : profile.AvatarVersion;
+            if (!userId) return;
+
+            updateUserAvatarAcrossDom(userId, avatarVersion, displayName);
+            updateSidebarPeerProfile(userId, displayName);
+
+            const activePeerId = messageRenderer.getUserId(
+                state.activeMeta?.otherParticipantId ?? state.activeMeta?.OtherParticipantId
+            );
+            if (activePeerId && activePeerId.toLowerCase() === userId.toLowerCase()) {
+                state.activeMeta = {
+                    ...(state.activeMeta || {}),
+                    otherParticipantAvatarVersion: avatarVersion || null,
+                    ...(displayName ? { otherParticipantName: displayName } : {})
+                };
+                if (displayName) {
+                    const nameEl = document.querySelector('#active-conversation-header [data-peer-name]');
+                    if (nameEl) nameEl.textContent = displayName;
+                }
+            }
+        },
         signalRLib: overrides.signalRLib || null
     });
 
@@ -225,7 +327,10 @@ export function initChatShell(overrides = {}) {
         typingEmitter,
         emojiPicker: composerEmojiPicker,
         emojiAutocomplete,
-        mediaUploader
+        mediaUploader,
+        onStickerSent: (sticker) => {
+            if (stickerPicker) stickerPicker.recordLocalRecent(sticker);
+        }
     });
     composer.init();
     composer.registerTransientResetHook(() => mediaUploader.resetTrayForSwitch());
@@ -236,13 +341,81 @@ export function initChatShell(overrides = {}) {
         receipts.checkAndMarkIncoming(containerEl);
     }
 
-    const router = createChatRouter({
+    const loadOlderBtnEl = document.getElementById('messages-load-older-btn');
+    const loadOlderRetryBtnEl = document.getElementById('messages-load-older-retry-btn');
+
+    function evaluatePaginationUi() {
+        const containerEl = document.getElementById('messages-container');
+        messageRenderer.syncPaginationUi({
+            hasMore: state.hasMore,
+            hasMessages: Boolean(containerEl && containerEl.children && containerEl.children.length > 0),
+            hasPaginatedOlder: state.hasPaginatedOlder,
+            isLoading: state.isLoadingOlder,
+            errorMessage: null,
+            streamEl
+        });
+    }
+
+    function disarmTopPaginationObserver() {
+        if (paginationObserverArmRaf !== null && typeof cancelAnimationFrame === 'function') {
+            cancelAnimationFrame(paginationObserverArmRaf);
+        }
+        paginationObserverArmRaf = null;
+        if (topPaginationObserver && typeof topPaginationObserver.disconnect === 'function') {
+            topPaginationObserver.disconnect();
+        }
+        topPaginationObserver = null;
+        topPaginationArmed = false;
+    }
+
+    function armTopPaginationObserver() {
+        disarmTopPaginationObserver();
+        const expectedEpoch = state.switchEpoch;
+        const scheduleArm = () => {
+            paginationObserverArmRaf = null;
+            if (expectedEpoch !== state.switchEpoch || !state.activeConversationId || state.pendingConversationId !== null) {
+                return;
+            }
+            topPaginationArmed = true;
+            evaluatePaginationUi();
+
+            if (typeof IntersectionObserver === 'function' && streamEl) {
+                const sentinelEl = document.getElementById('messages-top-sentinel');
+                if (sentinelEl) {
+                    topPaginationObserver = new IntersectionObserver((entries) => {
+                        if (!topPaginationArmed || !state.activeConversationId || state.pendingConversationId !== null || !state.hasMore || state.isLoadingOlder) {
+                            return;
+                        }
+                        if (!entries.some(e => e.isIntersecting)) {
+                            return;
+                        }
+                        if (streamEl.scrollHeight <= streamEl.clientHeight + 24 || streamEl.scrollTop > 240) {
+                            return;
+                        }
+                        if (router) {
+                            router.loadOlderMessages();
+                        }
+                    }, { root: streamEl, rootMargin: '240px 0px 0px 0px', threshold: 0 });
+                    topPaginationObserver.observe(sentinelEl);
+                }
+            }
+        };
+
+        if (typeof requestAnimationFrame === 'function') {
+            paginationObserverArmRaf = requestAnimationFrame(scheduleArm);
+        } else {
+            scheduleArm();
+        }
+    }
+
+    router = createChatRouter({
         state,
         api: { getConversationBundle, getMessagesPage },
         renderer: messageRenderer,
         hooks: {
             getDraftText: () => composer.getText(),
             onBeforeSwitch: (_prevId, nextId) => {
+                disarmTopPaginationObserver();
                 typingEmitter.resetForSwitch();
                 typingReceiver.resetForSwitch();
                 receipts.resetForSwitch();
@@ -251,6 +424,12 @@ export function initChatShell(overrides = {}) {
                 emojiAutocomplete.resetForSwitch();
                 messageActions.resetForSwitch();
                 mediaLightbox.resetForSwitch();
+                if (stickerPicker) {
+                    stickerPicker.closeStickerInfoModal();
+                    if (typeof stickerPicker.closeConfirmModal === 'function') stickerPicker.closeConfirmModal();
+                }
+                if (stickerCreator) stickerCreator.close();
+                closeAvatarLightbox();
                 mediaUploader.resetTrayForSwitch();
                 mediaUploader.clearRenderedPendingJobs();
                 mediaUploader.setLocked(true);
@@ -275,17 +454,32 @@ export function initChatShell(overrides = {}) {
                 signalrClient.notifyActiveConversation(nextId);
                 presence.fetchPresence();
                 markVisibleIncoming();
+                armTopPaginationObserver();
             },
             onSwitchToEmpty: (prevId) => {
+                disarmTopPaginationObserver();
                 setActiveRow(null);
                 mediaLightbox.resetForSwitch();
+                if (stickerPicker) {
+                    stickerPicker.closeStickerInfoModal();
+                    if (typeof stickerPicker.closeConfirmModal === 'function') stickerPicker.closeConfirmModal();
+                }
+                if (stickerCreator) stickerCreator.close();
+                closeAvatarLightbox();
                 mediaUploader.clearRenderedPendingJobs();
                 setDocumentBaseTitle(DEFAULT_SHELL_TITLE);
                 signalrClient.leaveActiveConversation(prevId);
             },
             onSwitchError: () => {
+                disarmTopPaginationObserver();
                 setActiveRow(null);
                 mediaLightbox.resetForSwitch();
+                if (stickerPicker) {
+                    stickerPicker.closeStickerInfoModal();
+                    if (typeof stickerPicker.closeConfirmModal === 'function') stickerPicker.closeConfirmModal();
+                }
+                if (stickerCreator) stickerCreator.close();
+                closeAvatarLightbox();
                 mediaUploader.clearRenderedPendingJobs();
                 setDocumentBaseTitle(DEFAULT_SHELL_TITLE);
                 signalrClient.leaveActiveConversation();
@@ -297,6 +491,8 @@ export function initChatShell(overrides = {}) {
 
     // Hydrate SSR state from #chat-bootstrap without triggering an initial duplicate fetch
     router.init();
+    hydrateAllAvatars(document);
+    unbindAvatarLightbox = bindAvatarLightboxDelegation(document);
 
     if (state.activeConversationId) {
         document.querySelectorAll('.message-timestamp[data-created-at]').forEach((el) => {
@@ -310,9 +506,11 @@ export function initChatShell(overrides = {}) {
         setDocumentBaseTitle(initialName ? `${initialName} - A♡S Messenger` : DEFAULT_SHELL_TITLE);
         composer.applyConversationPolicy(state.activeMeta);
         messageRenderer.hydrateMediaElements(document.getElementById('messages-container'));
+        hydrateStickerImages(document.getElementById('messages-container'));
         mediaUploader.renderPendingJobsForConversation(state.activeConversationId);
         messageRenderer.scrollToBottom(false);
         markVisibleIncoming();
+        armTopPaginationObserver();
     } else {
         setActiveRow(null);
         composer.setLocked(true);
@@ -328,13 +526,21 @@ export function initChatShell(overrides = {}) {
 
     const onStreamScroll = () => {
         if (!state.activeConversationId || state.pendingConversationId !== null) return;
-        if (streamEl && streamEl.scrollTop <= 40) {
+        if (streamEl && topPaginationArmed &&
+            (streamEl.scrollHeight === 0 || streamEl.scrollHeight > streamEl.clientHeight + 24) &&
+            streamEl.scrollTop <= 160) {
             router.loadOlderMessages();
         }
         if (scrollReadDebounce) clearTimeout(scrollReadDebounce);
         scrollReadDebounce = setTimeout(() => {
             markVisibleIncoming();
         }, 300);
+    };
+
+    const onManualLoadOlderClick = () => {
+        if (router) {
+            router.loadOlderMessages({ force: true });
+        }
     };
 
     const onWindowFocus = () => {
@@ -373,6 +579,12 @@ export function initChatShell(overrides = {}) {
     if (streamEl && typeof streamEl.addEventListener === 'function') {
         streamEl.addEventListener('scroll', onStreamScroll);
     }
+    if (loadOlderBtnEl && typeof loadOlderBtnEl.addEventListener === 'function') {
+        loadOlderBtnEl.addEventListener('click', onManualLoadOlderClick);
+    }
+    if (loadOlderRetryBtnEl && typeof loadOlderRetryBtnEl.addEventListener === 'function') {
+        loadOlderRetryBtnEl.addEventListener('click', onManualLoadOlderClick);
+    }
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('focus', onWindowFocus);
     }
@@ -382,12 +594,19 @@ export function initChatShell(overrides = {}) {
     }
 
     function destroy() {
+        disarmTopPaginationObserver();
         if (scrollReadDebounce) {
             clearTimeout(scrollReadDebounce);
             scrollReadDebounce = null;
         }
         if (streamEl && typeof streamEl.removeEventListener === 'function') {
             streamEl.removeEventListener('scroll', onStreamScroll);
+        }
+        if (loadOlderBtnEl && typeof loadOlderBtnEl.removeEventListener === 'function') {
+            loadOlderBtnEl.removeEventListener('click', onManualLoadOlderClick);
+        }
+        if (loadOlderRetryBtnEl && typeof loadOlderRetryBtnEl.removeEventListener === 'function') {
+            loadOlderRetryBtnEl.removeEventListener('click', onManualLoadOlderClick);
         }
         if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
             window.removeEventListener('focus', onWindowFocus);
@@ -404,10 +623,17 @@ export function initChatShell(overrides = {}) {
         receipts.destroy();
         emojiPicker.destroy();
         composerEmojiPicker.destroy();
+        if (stickerPicker) stickerPicker.destroy();
+        if (stickerCreator) stickerCreator.destroy();
         emojiAutocomplete.destroy();
         messageActions.destroy();
         mediaUploader.destroy();
         mediaLightbox.destroy();
+        if (typeof unbindAvatarLightbox === 'function') {
+            unbindAvatarLightbox();
+            unbindAvatarLightbox = null;
+        }
+        closeAvatarLightbox();
         signalrClient.destroy();
     }
 

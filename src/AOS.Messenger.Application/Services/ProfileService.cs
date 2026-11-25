@@ -1,6 +1,8 @@
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Domain.ValueObjects;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 
 namespace AOS.Messenger.Application.Services;
 
@@ -9,15 +11,22 @@ public sealed class ProfileService : IProfileService
     private readonly IUserReader _userReader;
     private readonly IUserWriter _userWriter;
     private readonly IBlockPersistence _blockPersistence;
+    private readonly IRealtimeNotifier _realtimeNotifier;
+    private readonly ILogger<ProfileService>? _logger;
 
+    [ActivatorUtilitiesConstructor]
     public ProfileService(
         IUserReader userReader,
         IUserWriter userWriter,
-        IBlockPersistence blockPersistence)
+        IBlockPersistence blockPersistence,
+        IRealtimeNotifier? realtimeNotifier = null,
+        ILogger<ProfileService>? logger = null)
     {
         _userReader = userReader;
         _userWriter = userWriter;
         _blockPersistence = blockPersistence;
+        _realtimeNotifier = realtimeNotifier ?? NullRealtimeNotifier.Instance;
+        _logger = logger;
     }
 
     public async Task<UserProfileDto?> GetProfileAsync(UserId callerId, UserId targetUserId, CancellationToken ct = default)
@@ -79,6 +88,23 @@ public sealed class ProfileService : IProfileService
             return false;
         }
 
-        return await _userWriter.UpdateProfileAsync(userId, trimmedDisplayName, trimmedBio, ct);
+        var updated = await _userWriter.UpdateProfileAsync(userId, trimmedDisplayName, trimmedBio, ct);
+        if (updated)
+        {
+            try
+            {
+                var profile = await _userReader.GetByIdAsync(userId, ct);
+                await _realtimeNotifier.NotifyUserProfileUpdatedAsync(
+                    userId,
+                    new UserProfileUpdatedDto(userId, trimmedDisplayName, profile?.AvatarVersion),
+                    ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger?.LogWarning(ex, "Failed to broadcast profile update notification for user {UserId}.", userId.Value);
+            }
+        }
+
+        return updated;
     }
 }

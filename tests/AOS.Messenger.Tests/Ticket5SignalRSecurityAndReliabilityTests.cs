@@ -101,9 +101,24 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
 
         // Broadcast 2: Active block detected by live check -> broadcast suppressed!
         await notifier.NotifyNewMessageAsync(conv.Id, blockedMsgDto);
+        await notifier.NotifyReceiptUpdatedAsync(userA, new ReceiptUpdateDto(conv.Id.Value, userB.Value, 2, DateTimeOffset.UtcNow, "read"));
+        await notifier.NotifyTypingAsync(userA, new TypingIndicatorDto(conv.Id.Value, userB.Value, true));
 
         Assert.Empty(hubContext.HubClients.TargetedUserIds);
         Assert.Empty(hubContext.HubClients.UsersClient.ReceivedMessages);
+        Assert.Empty(hubContext.HubClients.AllClient.ReceivedReceipts);
+        Assert.Empty(hubContext.HubClients.AllClient.ReceivedTypingIndicators);
+
+        // Broadcast 3 (different unblocked conversation): direct receipt & typing succeed
+        var userC = UserId.New();
+        var unblockedConv = Conversation.Create(userA, userC, DateTimeOffset.UtcNow, ConversationId.New());
+        var unblockedNotifier = new SignalRRealtimeNotifier(hubContext, new TestConversationPersistence(unblockedConv), blockPersistence, logger);
+
+        await unblockedNotifier.NotifyReceiptUpdatedAsync(userA, new ReceiptUpdateDto(unblockedConv.Id.Value, userC.Value, 5, DateTimeOffset.UtcNow, "delivered"));
+        await unblockedNotifier.NotifyTypingAsync(userA, new TypingIndicatorDto(unblockedConv.Id.Value, userC.Value, true));
+
+        Assert.Single(hubContext.HubClients.AllClient.ReceivedReceipts);
+        Assert.Single(hubContext.HubClients.AllClient.ReceivedTypingIndicators);
     }
 
     [Fact]
@@ -779,6 +794,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
         public Task<IReadOnlyList<UserConversationState>> GetUserStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
+        public Task<IReadOnlyList<UserConversationState>> GetPeerStatesForConversationsAsync(IReadOnlyList<ConversationId> conversationIds, UserId callerId, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<UserConversationState>>(Array.Empty<UserConversationState>());
         public Task<Message?> GetLastMessageAsync(ConversationId conversationId, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default) =>
             Task.FromResult<Message?>(null);
         public Task<int> GetUnreadCountAsync(ConversationId conversationId, UserId userId, MessageId? lastReadMessageId = null, DateTimeOffset? minCreatedAtUtc = null, CancellationToken ct = default) =>
@@ -801,6 +818,10 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             Task.FromResult(false);
         public Task<IReadOnlyList<UserId>> GetPeerUserIdsWithExistingConversationAsync(UserId userId, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserId>>(Array.Empty<UserId>());
+        public Task<UserId?> GetVerifiedTypingRecipientAsync(UserId senderId, ConversationId conversationId, CancellationToken ct = default) =>
+            Task.FromResult<UserId?>(_conversation.Id == conversationId && _conversation.HasParticipant(senderId)
+                ? _conversation.GetOtherParticipant(senderId)
+                : null);
     }
 
     private sealed class TestBlockPersistence : IBlockPersistence
@@ -869,6 +890,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
 
         public Task<UserProfileDto?> GetByEmailAsync(string email, CancellationToken ct = default) => Task.FromResult<UserProfileDto?>(null);
         public Task<bool> ExistsAsync(UserId id, CancellationToken ct = default) => Task.FromResult(_profiles.ContainsKey(id));
+        public Task<IReadOnlySet<UserId>> GetActiveUserIdsAsync(IEnumerable<UserId> userIds, CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlySet<UserId>>(userIds.Where(_profiles.ContainsKey).ToHashSet());
         public Task<IReadOnlyList<UserSearchResultDto>> SearchUsersAsync(UserId currentUserId, string query, IReadOnlySet<UserId> excludedUserIds, int limit, CancellationToken ct = default) =>
             Task.FromResult<IReadOnlyList<UserSearchResultDto>>([]);
     }
@@ -890,11 +913,14 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class TestChatClient : IChatClient
     {
         public List<MessageDto> ReceivedMessages { get; } = new();
+        public List<ReceiptUpdateDto> ReceivedReceipts { get; } = new();
+        public List<TypingIndicatorDto> ReceivedTypingIndicators { get; } = new();
 
         public Task ReceiveMessage(MessageDto message)
         {
@@ -902,13 +928,23 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             return Task.CompletedTask;
         }
 
-        public Task ReceiveReceiptUpdated(ReceiptUpdateDto receipt) => Task.CompletedTask;
-        public Task ReceiveTypingIndicator(TypingIndicatorDto typing) => Task.CompletedTask;
+        public Task ReceiveReceiptUpdated(ReceiptUpdateDto receipt)
+        {
+            ReceivedReceipts.Add(receipt);
+            return Task.CompletedTask;
+        }
+
+        public Task ReceiveTypingIndicator(TypingIndicatorDto typing)
+        {
+            ReceivedTypingIndicators.Add(typing);
+            return Task.CompletedTask;
+        }
         public Task ReceivePresenceChanged(UserPresenceDto presence) => Task.CompletedTask;
         public Task ReceiveMessageEdited(MessageEditedDto message) => Task.CompletedTask;
         public Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message) => Task.CompletedTask;
         public Task ReceiveMessageDeletedForMe(MessageDeletedForMeDto message) => Task.CompletedTask;
         public Task ReceiveReactionUpdated(ReactionUpdatedDto reaction) => Task.CompletedTask;
+        public Task ReceiveUserProfileUpdated(UserProfileUpdatedDto profile) => Task.CompletedTask;
     }
 
     private sealed class TestHubContext : IHubContext<ChatHub, IChatClient>

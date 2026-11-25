@@ -164,4 +164,5 @@ internal sealed class TestNoOpRealtimeNotifier : IRealtimeNotifier
     public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, Application.DTOs.MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, Application.DTOs.MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyReactionUpdatedAsync(ConversationId conversationId, Application.DTOs.ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+    public Task NotifyUserProfileUpdatedAsync(UserId userId, Application.DTOs.UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
 }

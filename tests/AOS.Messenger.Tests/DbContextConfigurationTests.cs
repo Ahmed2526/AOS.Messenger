@@ -54,6 +54,35 @@ public sealed class DbContextConfigurationTests
     }
 
     [Fact]
+    public void Conversation_HasIndexOnParticipant2Id()
+    {
+        var model = BuildModel();
+        var entityType = model.FindEntityType(typeof(Conversation));
+        Assert.NotNull(entityType);
+
+        var index = entityType.GetIndexes().FirstOrDefault(i =>
+            i.Properties.Count == 1 &&
+            i.Properties[0].Name == nameof(Conversation.Participant2Id));
+
+        Assert.NotNull(index);
+    }
+
+    [Fact]
+    public void ApplicationUser_HasIndexOnEmailConfirmedAndCreatedAtUtc()
+    {
+        var model = BuildModel();
+        var entityType = model.FindEntityType(typeof(Infrastructure.Identity.ApplicationUser));
+        Assert.NotNull(entityType);
+
+        var index = entityType.GetIndexes().FirstOrDefault(i =>
+            i.Properties.Count == 2 &&
+            i.Properties[0].Name == nameof(Infrastructure.Identity.ApplicationUser.EmailConfirmed) &&
+            i.Properties[1].Name == nameof(Infrastructure.Identity.ApplicationUser.CreatedAtUtc));
+
+        Assert.NotNull(index);
+    }
+
+    [Fact]
     public void Message_HasUniqueIndexOnSenderIdAndIdempotencyKey()
     {
         var model = BuildModel();
@@ -200,6 +229,55 @@ public sealed class DbContextConfigurationTests
         var msgType = model.FindEntityType(typeof(Message));
         Assert.NotNull(msgType);
         Assert.NotNull(msgType.FindProperty(nameof(Message.HasAttachments)));
+    }
+
+    [Fact]
+    public void StickerAndStickerPack_HaveNewSequentialIdClusteredPk_AndTransientFactories()
+    {
+        var model = BuildModel();
+
+        var packType = model.FindEntityType(typeof(StickerPack));
+        Assert.NotNull(packType);
+        var packPk = packType.FindPrimaryKey();
+        Assert.NotNull(packPk);
+        Assert.True(packPk.IsClustered());
+        var packIdProp = packType.FindProperty(nameof(StickerPack.Id));
+        Assert.NotNull(packIdProp);
+        Assert.Equal("NEWSEQUENTIALID()", packIdProp.GetDefaultValueSql());
+        AssertConverter(packType, nameof(StickerPack.Id), typeof(StickerPackId), typeof(Guid));
+
+        var stickerType = model.FindEntityType(typeof(Sticker));
+        Assert.NotNull(stickerType);
+        var stickerPk = stickerType.FindPrimaryKey();
+        Assert.NotNull(stickerPk);
+        Assert.True(stickerPk.IsClustered());
+        var stickerIdProp = stickerType.FindProperty(nameof(Sticker.Id));
+        Assert.NotNull(stickerIdProp);
+        Assert.Equal("NEWSEQUENTIALID()", stickerIdProp.GetDefaultValueSql());
+        AssertConverter(stickerType, nameof(Sticker.Id), typeof(StickerId), typeof(Guid));
+
+        var now = DateTimeOffset.UtcNow;
+        var ownerId = UserId.New();
+
+        var customPack = StickerPack.CreateCustom(ownerId, "My Pack", "Tester", 1, now);
+        Assert.True(customPack.IsTransient());
+        var systemPack = StickerPack.CreateSystem("test-pack", "Test Pack", "AOS", 1, now);
+        Assert.True(systemPack.IsTransient());
+
+        var explicitPackId = StickerPackId.New();
+        var explicitPack = StickerPack.CreateCustom(ownerId, "Explicit Pack", "Tester", 2, now, explicitPackId);
+        Assert.False(explicitPack.IsTransient());
+        Assert.Equal(explicitPackId, explicitPack.Id);
+
+        var pendingSticker = Sticker.CreatePendingCustom(explicitPackId, ownerId, "image/png", 1024, "👋", 1, now);
+        Assert.True(pendingSticker.IsTransient());
+        var systemSticker = Sticker.CreateSystem(explicitPackId, "/stickers/packs/test-pack/wave.webp", "👋", 1, 1024, now);
+        Assert.True(systemSticker.IsTransient());
+
+        var explicitStickerId = StickerId.New();
+        var explicitSticker = Sticker.CreatePendingCustom(explicitPackId, ownerId, "image/png", 1024, "👋", 2, now, explicitStickerId);
+        Assert.False(explicitSticker.IsTransient());
+        Assert.Equal(explicitStickerId, explicitSticker.Id);
     }
 
     private static void AssertConverter(

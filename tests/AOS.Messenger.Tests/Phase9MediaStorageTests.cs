@@ -435,7 +435,11 @@ public sealed class Phase9MediaStorageTests : IClassFixture<SqlTestDatabaseFixtu
                     {
                         ["ConnectionStrings:DefaultConnection"] = _fixture.ConnectionString,
                         ["PublicBaseUrl"] = "https://localhost:7001",
-                        ["Media:LocalStoragePath"] = simRoot
+                        ["Media:LocalStoragePath"] = simRoot,
+                        ["R2:ServiceUrl"] = "",
+                        ["R2:BucketName"] = "",
+                        ["R2:AccessKeyId"] = "",
+                        ["R2:SecretAccessKey"] = ""
                     });
                 });
             });

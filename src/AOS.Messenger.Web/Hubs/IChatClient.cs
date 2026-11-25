@@ -19,4 +19,5 @@ public interface IChatClient
     Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message);
     Task ReceiveMessageDeletedForMe(MessageDeletedForMeDto message);
     Task ReceiveReactionUpdated(ReactionUpdatedDto reaction);
+    Task ReceiveUserProfileUpdated(UserProfileUpdatedDto profile);
 }

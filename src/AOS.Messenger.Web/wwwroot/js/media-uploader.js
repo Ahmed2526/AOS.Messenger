@@ -1057,8 +1057,32 @@ export function createMediaUploader({
         return Array.from(dt.types).includes('Files');
     };
 
+    const isBlockingModalOpen = (target) => {
+        if (typeof document === 'undefined') return false;
+        if (target && typeof target.closest === 'function') {
+            const enclosingDialog = target.closest('[aria-modal="true"]');
+            if (enclosingDialog && (!enclosingDialog.classList || !enclosingDialog.classList.contains('hidden'))) {
+                return true;
+            }
+        }
+        if (typeof document.querySelectorAll === 'function') {
+            const modals = document.querySelectorAll('[aria-modal="true"]');
+            for (let i = 0; i < modals.length; i++) {
+                const modal = modals[i];
+                if (modal && (!modal.classList || !modal.classList.contains('hidden'))) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
     const onDragEnter = (e) => {
         if (locked || isTerminated || !hasDraggedFiles(e.dataTransfer)) return;
+        if (isBlockingModalOpen(e.target)) {
+            hideDropzone();
+            return;
+        }
         e.preventDefault();
         dragDepth++;
         const dz = getDropzoneEl();
@@ -1067,11 +1091,19 @@ export function createMediaUploader({
 
     const onDragOver = (e) => {
         if (locked || isTerminated || !hasDraggedFiles(e.dataTransfer)) return;
+        if (isBlockingModalOpen(e.target)) {
+            hideDropzone();
+            return;
+        }
         e.preventDefault();
     };
 
     const onDragLeave = (e) => {
         if (!hasDraggedFiles(e.dataTransfer)) return;
+        if (isBlockingModalOpen(e.target)) {
+            hideDropzone();
+            return;
+        }
         dragDepth = Math.max(0, dragDepth - 1);
         if (dragDepth === 0) {
             hideDropzone();
@@ -1080,6 +1112,10 @@ export function createMediaUploader({
 
     const onDrop = (e) => {
         if (!hasDraggedFiles(e.dataTransfer)) return;
+        if (isBlockingModalOpen(e.target)) {
+            hideDropzone();
+            return;
+        }
         e.preventDefault();
         hideDropzone();
         if (!locked && !isTerminated && e.dataTransfer?.files?.length) {
@@ -1088,7 +1124,7 @@ export function createMediaUploader({
     };
 
     const onPaste = (e) => {
-        if (locked || isTerminated) return;
+        if (locked || isTerminated || isBlockingModalOpen(e.target)) return;
         const inputEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
             ? document.getElementById('message-content-input')
             : null;

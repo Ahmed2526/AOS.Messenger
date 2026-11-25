@@ -20,12 +20,26 @@ import { updateSidebarLastMessage as updateSidebarLastMessageInList } from './co
 import { getMessageContentClassName, truncateGraphemes } from './emoji-utils.js';
 import { buildMediaInlineUrl, getMediaDownloadUrl } from './api-client.js';
 import { isSafeMediaUrl, triggerSafeDownloadAnchor } from './media-lightbox.js';
+import { setBoundedMapEntry } from './memory-image-cache.js';
+import {
+    hydrateAvatarSlot,
+    evictUserAvatarCache,
+    closeAvatarLightboxIfUser,
+    clearAvatarUrlCache
+} from './avatar-loader.js';
+import {
+    clearStickerUrlCache,
+    applyInitialStickerSrc,
+    hydrateStickerImages
+} from './sticker-picker.js';
 
 const MEDIA_URL_CACHE_TTL_MS = 8 * 60 * 1000;
 const MEDIA_URL_SAFETY_MARGIN_MS = 60 * 1000;
 const VIDEO_RETRY_COOLDOWN_MS = 15 * 1000;
 const mediaUrlCache = new Map();
 const activeMediaObservers = new Set();
+const videoLoadHandlers = new WeakMap();
+let sharedVideoObserver = null;
 
 export function disconnectActiveMediaObservers() {
     for (const obs of activeMediaObservers) {
@@ -60,7 +74,7 @@ export function evictMediaUrlCacheForMessage(msgId) {
     }
 }
 
-function teardownRowVideos(rootEl) {
+export function teardownRowVideos(rootEl) {
     if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
     const videos = rootEl.querySelectorAll('video');
     for (const video of videos) {
@@ -68,7 +82,6 @@ function teardownRowVideos(rootEl) {
         try {
             if (typeof video.pause === 'function') video.pause();
             if (typeof video.removeAttribute === 'function') video.removeAttribute('src');
-            video.src = '';
             if (typeof video.load === 'function') video.load();
         } catch {}
     }
@@ -99,6 +112,11 @@ export function formatMessagePreview(message, maxGraphemes = 100) {
     if (!message || typeof message !== 'object') return '';
     if (message.isDeletedForEveryone ?? message.IsDeletedForEveryone) {
         return 'This message was deleted';
+    }
+
+    const rawSticker = message.sticker ?? message.Sticker ?? null;
+    if (rawSticker && (rawSticker.id ?? rawSticker.Id)) {
+        return '🏷️ Sticker';
     }
 
     const rawContent = message.content !== undefined ? message.content : message.Content;
@@ -149,11 +167,12 @@ export async function resolveCachedMediaUrl(
     conversationId,
     messageId,
     mediaId,
-    { download = false, bypassCache = false, getMediaUrlFn = getMediaDownloadUrl, nowFn = () => Date.now() } = {}
+    { download = false, variant = null, bypassCache = false, getMediaUrlFn = getMediaDownloadUrl, nowFn = () => Date.now() } = {}
 ) {
     if (!conversationId || !messageId || !mediaId) return null;
 
-    const cacheKey = `${conversationId}:${messageId}:${mediaId}:${download ? 'dl' : 'inline'}`;
+    const variantKey = variant ? String(variant).toLowerCase() : 'default';
+    const cacheKey = `${conversationId}:${messageId}:${mediaId}:${download ? 'dl' : 'inline'}:${variantKey}`;
     const now = nowFn();
     if (!bypassCache && mediaUrlCache.has(cacheKey)) {
         const entry = mediaUrlCache.get(cacheKey);
@@ -163,7 +182,7 @@ export async function resolveCachedMediaUrl(
         mediaUrlCache.delete(cacheKey);
     }
 
-    const dto = await getMediaUrlFn(conversationId, messageId, mediaId, { download });
+    const dto = await getMediaUrlFn(conversationId, messageId, mediaId, { download, variant });
     const url = dto?.url ?? dto?.Url ?? '';
     if (!isSafeMediaUrl(url)) {
         return null;
@@ -177,7 +196,7 @@ export async function resolveCachedMediaUrl(
         : defaultExpiryMs;
 
     if (expiresAtMs > now) {
-        mediaUrlCache.set(cacheKey, {
+        setBoundedMapEntry(mediaUrlCache, cacheKey, {
             url,
             expiresAtMs
         });
@@ -236,6 +255,12 @@ export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadU
             video.addEventListener('playing', resetRetry);
 
             video.addEventListener('error', async () => {
+                const hasSrc = (typeof video.hasAttribute === 'function' && video.hasAttribute('src'))
+                    ? Boolean(video.getAttribute('src'))
+                    : Boolean(video.src);
+                if (!hasSrc) {
+                    return;
+                }
                 const now = nowFn();
                 const lastRetryMs = Number(video.getAttribute('data-video-last-retry-ms') || '0');
                 if (video.getAttribute('data-video-retried') === 'true' || (lastRetryMs > 0 && now - lastRetryMs < VIDEO_RETRY_COOLDOWN_MS)) {
@@ -261,15 +286,28 @@ export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadU
         }
 
         if (typeof IntersectionObserver === 'function') {
-            const obs = new IntersectionObserver((entries) => {
-                if (entries.some(e => e.isIntersecting)) {
-                    obs.disconnect();
-                    activeMediaObservers.delete(obs);
-                    loadVideoSource(false);
-                }
-            });
-            activeMediaObservers.add(obs);
-            obs.observe(video);
+            if (!sharedVideoObserver || !activeMediaObservers.has(sharedVideoObserver)) {
+                sharedVideoObserver = new IntersectionObserver((entries) => {
+                    for (let j = 0; j < entries.length; j++) {
+                        const entry = entries[j];
+                        if (!entry || !entry.isIntersecting) continue;
+                        const target = entry.target;
+                        if (sharedVideoObserver && typeof sharedVideoObserver.unobserve === 'function' && target) {
+                            sharedVideoObserver.unobserve(target);
+                        }
+                        if (target) {
+                            const loadFn = videoLoadHandlers.get(target);
+                            if (typeof loadFn === 'function') {
+                                videoLoadHandlers.delete(target);
+                                loadFn(false);
+                            }
+                        }
+                    }
+                });
+                activeMediaObservers.add(sharedVideoObserver);
+            }
+            videoLoadHandlers.set(video, loadVideoSource);
+            sharedVideoObserver.observe(video);
         } else {
             loadVideoSource(false);
         }
@@ -528,8 +566,10 @@ export function applyMessageEditedToRow(msgId, newContent, editedAtUtc, previewT
  */
 export function applyMessageDeletedForEveryone(row, msgId) {
     if (row && typeof document !== 'undefined') {
+        const wasSticker = row.getAttribute('data-is-sticker') === 'true';
         row.setAttribute('data-deleted', 'true');
         row.setAttribute('data-has-attachments', 'false');
+        row.setAttribute('data-is-sticker', 'false');
         row.setAttribute('data-message-preview', 'This message was deleted');
 
         if (typeof row.querySelectorAll === 'function') {
@@ -537,10 +577,40 @@ export function applyMessageDeletedForEveryone(row, msgId) {
             row.querySelectorAll('.message-media-container').forEach((mediaEl) => {
                 if (typeof mediaEl.remove === 'function') mediaEl.remove();
             });
+            row.querySelectorAll('.message-sticker-container').forEach((stickerEl) => {
+                if (typeof stickerEl.remove === 'function') stickerEl.remove();
+            });
         }
 
         const isOutgoing = row.getAttribute('data-is-outgoing') === 'true' || row.classList.contains('justify-end');
-        const contentEl = row.querySelector('.message-text-content');
+        if (wasSticker) {
+            const bubbleEl = row.querySelector('.message-bubble');
+            if (bubbleEl) {
+                bubbleEl.className = isOutgoing
+                    ? 'message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative'
+                    : 'message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tl-xs px-4 py-2 bg-[#FFFFFF] dark:bg-[#3A3835] text-[#2B2725] dark:text-[#F0E9E2] border border-[#E3DCD7] dark:border-[#514D48] shadow-2xs relative';
+            }
+            const footerEl = row.querySelector('.message-meta-footer');
+            if (footerEl) {
+                footerEl.className = isOutgoing
+                    ? 'message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80'
+                    : 'message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]';
+            }
+        }
+
+        let contentEl = row.querySelector('.message-text-content');
+        if (!contentEl) {
+            const bubbleEl = row.querySelector('.message-bubble');
+            if (bubbleEl) {
+                contentEl = document.createElement('div');
+                const footerEl = bubbleEl.querySelector('.message-meta-footer');
+                if (footerEl && typeof bubbleEl.insertBefore === 'function') {
+                    bubbleEl.insertBefore(contentEl, footerEl);
+                } else {
+                    bubbleEl.appendChild(contentEl);
+                }
+            }
+        }
         if (contentEl) {
             while (contentEl.firstChild) {
                 contentEl.removeChild(contentEl.firstChild);
@@ -581,7 +651,7 @@ export function applyMessageDeletedForEveryone(row, msgId) {
  * @param {string|null} newLastMessagePreview
  * @param {boolean} isActiveConv
  */
-export function applyMessageDeletedForMe(msgId, convId, newLastMessageId, newLastMessagePreview, isActiveConv) {
+export function applyMessageDeletedForMe(msgId, convId, newLastMessageId, newLastMessagePreview, isActiveConv, options = {}) {
     if (msgId) {
         evictMediaUrlCacheForMessage(msgId);
     }
@@ -603,7 +673,10 @@ export function applyMessageDeletedForMe(msgId, convId, newLastMessageId, newLas
 
         const containerEl = typeof document.getElementById === 'function' ? document.getElementById('messages-container') : null;
         const emptyPlaceholderEl = typeof document.getElementById === 'function' ? document.getElementById('no-messages-placeholder') : null;
-        if (containerEl && emptyPlaceholderEl && containerEl.querySelectorAll('.message-bubble-row').length === 0) {
+        const effectiveHasMore = typeof options?.hasMore === 'boolean'
+            ? options.hasMore
+            : Boolean(containerEl && typeof containerEl.getAttribute === 'function' && containerEl.getAttribute('data-has-more') === 'true');
+        if (containerEl && emptyPlaceholderEl && !effectiveHasMore && containerEl.querySelectorAll('.message-bubble-row').length === 0) {
             emptyPlaceholderEl.classList.remove('hidden');
             emptyPlaceholderEl.classList.add('flex');
         }
@@ -700,6 +773,9 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     const rawAttachments = message.attachments ?? message.Attachments ?? [];
     const attachments = !message.isDeletedForEveryone && Array.isArray(rawAttachments) ? rawAttachments : [];
     const hasAttachments = attachments.length > 0;
+    const rawSticker = !message.isDeletedForEveryone ? (message.sticker ?? message.Sticker ?? null) : null;
+    const stickerId = rawSticker ? normalizeIdValue(rawSticker.id ?? rawSticker.Id) : '';
+    const isSticker = Boolean(rawSticker && stickerId);
     const formattedPreview = formatMessagePreview(message);
 
     // Root row container
@@ -710,6 +786,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     }
     row.setAttribute('data-deleted', message.isDeletedForEveryone ? 'true' : 'false');
     row.setAttribute('data-has-attachments', hasAttachments ? 'true' : 'false');
+    row.setAttribute('data-is-sticker', isSticker ? 'true' : 'false');
     row.setAttribute('data-message-preview', formattedPreview);
     if (message.createdAtUtc) {
         row.setAttribute('data-created-at', message.createdAtUtc);
@@ -723,9 +800,19 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         row.setAttribute('data-is-outgoing', 'false');
 
         // Avatar circle for incoming
+        const senderAvatarVersion = message.senderAvatarVersion ?? message.SenderAvatarVersion ?? '';
         const avatar = document.createElement('div');
-        avatar.className = 'w-8 h-8 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1';
-        avatar.textContent = initials;
+        avatar.className = 'w-8 h-8 rounded-full overflow-hidden bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1';
+        avatar.setAttribute('data-avatar-slot', 'true');
+        if (senderId) avatar.setAttribute('data-avatar-user-id', senderId);
+        avatar.setAttribute('data-avatar-version', senderAvatarVersion ? String(senderAvatarVersion) : '');
+        avatar.setAttribute('data-avatar-name', senderName);
+        avatar.setAttribute('data-avatar-handle', message.senderHandle || '');
+        const initialsSpan = document.createElement('span');
+        initialsSpan.setAttribute('data-avatar-initials', 'true');
+        initialsSpan.textContent = initials;
+        avatar.appendChild(initialsSpan);
+        hydrateAvatarSlot(avatar);
         row.appendChild(avatar);
     }
 
@@ -735,7 +822,17 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
 
     // Bubble container
     const bubble = document.createElement('div');
-    if (isOutgoing) {
+    if (isSticker) {
+        bubble.className = isOutgoing
+            ? 'message-bubble max-w-[75%] min-w-0 relative flex flex-col items-end'
+            : 'message-bubble max-w-[75%] min-w-0 relative flex flex-col items-start';
+        if (!isOutgoing) {
+            const senderHeader = document.createElement('div');
+            senderHeader.className = 'text-[11px] font-bold text-[#735761] dark:text-[#E1BDC9] px-1 mb-0.5';
+            senderHeader.textContent = senderName;
+            bubble.appendChild(senderHeader);
+        }
+    } else if (isOutgoing) {
         bubble.className = 'message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative';
     } else {
         bubble.className = 'message-bubble max-w-[75%] min-w-0 rounded-2xl rounded-tl-xs px-4 py-2 bg-[#FFFFFF] dark:bg-[#3A3835] text-[#2B2725] dark:text-[#F0E9E2] border border-[#E3DCD7] dark:border-[#514D48] shadow-2xs relative';
@@ -749,9 +846,9 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     // Reply quote banner if replyTo exists
     if (message.replyTo) {
         const replyBanner = document.createElement('div');
-        const rBgClass = isOutgoing
+        const rBgClass = (isOutgoing && !isSticker)
             ? 'mb-1.5 px-2.5 py-1 rounded border-l-2 text-xs bg-black/15 border-white/70 text-white/80 cursor-pointer hover:bg-black/25 transition-colors'
-            : 'mb-1.5 px-2.5 py-1 rounded border-l-2 text-xs bg-[#F8F6F3] dark:bg-[#302F2C] border-[#B3929D] text-[#6E6560] dark:text-[#C9C0B9] cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors';
+            : 'mb-1.5 px-2.5 py-1 rounded border-l-2 text-xs bg-[#FFFFFF] dark:bg-[#3A3835] border-[#B3929D] text-[#6E6560] dark:text-[#C9C0B9] cursor-pointer hover:bg-[#F0E9DF] dark:hover:bg-[#3E3C38] transition-colors shadow-2xs';
         replyBanner.className = rBgClass;
 
         const parentId = getMessageId(message.replyTo);
@@ -760,7 +857,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         }
 
         const rSenderEl = document.createElement('div');
-        rSenderEl.className = isOutgoing ? 'font-bold text-[10px] text-white/95' : 'font-bold text-[10px] text-[#2B2725] dark:text-[#F0E9E2]';
+        rSenderEl.className = (isOutgoing && !isSticker) ? 'font-bold text-[10px] text-white/95' : 'font-bold text-[10px] text-[#2B2725] dark:text-[#F0E9E2]';
         rSenderEl.textContent = message.replyTo.senderName || message.replyTo.senderDisplayName || 'Unknown';
         replyBanner.appendChild(rSenderEl);
 
@@ -795,6 +892,54 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         delDiv.appendChild(delText);
 
         bubble.appendChild(delDiv);
+    } else if (isSticker) {
+        const stickerWrap = document.createElement('div');
+        stickerWrap.className = 'message-sticker-container';
+
+        const stickerPackId = normalizeIdValue(rawSticker.packId ?? rawSticker.PackId);
+        const stickerPackName = String(rawSticker.packName ?? rawSticker.PackName ?? 'Stickers');
+        const stickerPackAuthor = String(rawSticker.packAuthor ?? rawSticker.PackAuthor ?? 'Community Sticker');
+        const stickerAnimated = !!(rawSticker.isAnimated ?? rawSticker.IsAnimated);
+        const stickerSystem = !!(rawSticker.isSystem ?? rawSticker.IsSystem);
+        const stickerStaticUrl = rawSticker.staticUrl ?? rawSticker.StaticUrl ?? '';
+        const stickerTags = String(rawSticker.emojiTags ?? rawSticker.EmojiTags ?? '');
+        const stickerFavorited = !!(rawSticker.isFavoritedByCurrentUser ?? rawSticker.IsFavoritedByCurrentUser);
+
+        const stickerBtn = document.createElement('button');
+        stickerBtn.type = 'button';
+        stickerBtn.setAttribute('data-sticker-info-trigger', 'true');
+        stickerBtn.setAttribute('data-sticker-id', stickerId);
+        stickerBtn.setAttribute('data-sticker-pack-id', stickerPackId);
+        stickerBtn.setAttribute('data-sticker-pack-name', stickerPackName);
+        stickerBtn.setAttribute('data-sticker-pack-author', stickerPackAuthor);
+        stickerBtn.setAttribute('data-sticker-animated', stickerAnimated ? 'true' : 'false');
+        stickerBtn.setAttribute('data-sticker-system', stickerSystem ? 'true' : 'false');
+        stickerBtn.setAttribute('data-sticker-static-url', stickerStaticUrl || '');
+        stickerBtn.setAttribute('data-sticker-tags', stickerTags);
+        stickerBtn.setAttribute('data-sticker-favorited', stickerFavorited ? 'true' : 'false');
+        stickerBtn.setAttribute('aria-label', stickerTags ? `Sticker: ${stickerTags}. View details` : 'View sticker details');
+        stickerBtn.title = stickerPackName;
+        stickerBtn.className = 'block rounded-2xl p-0.5 focus:outline-none focus:ring-2 focus:ring-[#B3929D] transition-transform hover:scale-[1.03] active:scale-[0.98] cursor-pointer';
+
+        const img = document.createElement('img');
+        applyInitialStickerSrc(img, rawSticker);
+        img.alt = stickerTags ? `Sticker ${stickerTags}` : 'Sticker';
+        img.setAttribute('width', String(Number(rawSticker.width ?? rawSticker.Width ?? 512) || 512));
+        img.setAttribute('height', String(Number(rawSticker.height ?? rawSticker.Height ?? 512) || 512));
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.setAttribute('data-sticker-img', 'true');
+        img.setAttribute('data-sticker-id', stickerId);
+        img.setAttribute('data-sticker-static', stickerStaticUrl ? 'true' : 'false');
+        img.className = 'w-36 h-36 sm:w-44 sm:h-44 object-contain drop-shadow-sm select-none';
+        stickerBtn.appendChild(img);
+
+        stickerWrap.appendChild(stickerBtn);
+        bubble.appendChild(stickerWrap);
+
+        const hiddenText = document.createElement('div');
+        hiddenText.className = 'message-text-content hidden';
+        bubble.appendChild(hiddenText);
     } else {
         if (hasAttachments) {
             const mediaContainer = document.createElement('div');
@@ -822,7 +967,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
                         : 'block w-full overflow-hidden rounded-xl bg-black/5 dark:bg-black/20 focus:outline-none focus:ring-2 focus:ring-[#B3929D] cursor-pointer');
 
                 const img = document.createElement('img');
-                img.src = buildMediaInlineUrl(convId, id || '', mediaId);
+                img.src = buildMediaInlineUrl(convId, id || '', mediaId, { variant: 'thumb' });
                 img.alt = fileName;
                 const w = att.width ?? att.Width;
                 const h = att.height ?? att.Height;
@@ -943,9 +1088,13 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
 
     // Footer with time, edited flag, and receipt checkmarks
     const footer = document.createElement('div');
-    footer.className = isOutgoing
-        ? 'flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80'
-        : 'flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]';
+    if (isSticker) {
+        footer.className = 'message-meta-footer inline-flex items-center justify-end gap-1 mt-1 px-2 py-0.5 rounded-full bg-black/55 text-white text-[10px] shadow-2xs';
+    } else {
+        footer.className = isOutgoing
+            ? 'message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-white/80'
+            : 'message-meta-footer flex items-center justify-end gap-1 mt-1 text-[10px] text-[#6E6560] dark:text-[#C9C0B9]';
+    }
 
     const editedSpan = document.createElement('span');
     editedSpan.className = `text-[9px] italic edited-label ${message.editedAtUtc && !message.isDeletedForEveryone ? '' : 'hidden'}`;
@@ -978,21 +1127,23 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     // Reaction pills container below footer
     const pillsContainer = document.createElement('div');
     pillsContainer.className = 'reaction-pills-container flex flex-wrap gap-1 mt-1';
+    bubble.appendChild(pillsContainer);
+
+    row.appendChild(bubble);
+
+    // Render reaction pills AFTER bubble is attached to row so data-is-sticker contrast rules apply
     if (message.reactions && message.reactions.length > 0) {
         renderReactionPills(pillsContainer, message.reactions, id, convId, isOutgoing);
     } else {
         pillsContainer.classList.add('hidden');
     }
-    bubble.appendChild(pillsContainer);
 
-    row.appendChild(bubble);
-
-    // Message action controls bar (hover/focus + visible on mobile touch)
+    // Message action controls bar (desktop hover/focus; mobile uses WhatsApp-style long-press action sheet)
     if (!message.isDeletedForEveryone) {
         const actionsBar = document.createElement('div');
         actionsBar.className = isOutgoing
-            ? 'message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 flex items-center gap-0.5'
-            : 'message-actions-bar opacity-100 sm:opacity-0 sm:group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity self-center shrink-0 ml-1 flex items-center gap-0.5';
+            ? 'message-actions-bar hidden sm:flex sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity self-center shrink-0 mr-1 items-center gap-0.5'
+            : 'message-actions-bar hidden sm:flex sm:opacity-0 sm:group-hover:opacity-100 sm:group-focus-within:opacity-100 transition-opacity self-center shrink-0 ml-1 items-center gap-0.5';
 
         // React button
         const reactBtn = document.createElement('button');
@@ -1024,8 +1175,42 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         replyBtn.appendChild(replyIcon);
         actionsBar.appendChild(replyBtn);
 
-        // Edit button (sender only)
-        if (isOutgoing) {
+        // Quick Star / Sticker Info button (sticker messages only)
+        if (isSticker) {
+            const stickerPackId = normalizeIdValue(rawSticker.packId ?? rawSticker.PackId);
+            const stickerPackName = String(rawSticker.packName ?? rawSticker.PackName ?? 'Stickers');
+            const stickerPackAuthor = String(rawSticker.packAuthor ?? rawSticker.PackAuthor ?? 'Community Sticker');
+            const stickerAnimated = !!(rawSticker.isAnimated ?? rawSticker.IsAnimated);
+            const stickerSystem = !!(rawSticker.isSystem ?? rawSticker.IsSystem);
+            const stickerStaticUrl = rawSticker.staticUrl ?? rawSticker.StaticUrl ?? '';
+            const stickerTags = String(rawSticker.emojiTags ?? rawSticker.EmojiTags ?? '');
+            const stickerFavorited = !!(rawSticker.isFavoritedByCurrentUser ?? rawSticker.IsFavoritedByCurrentUser);
+
+            const favBtn = document.createElement('button');
+            favBtn.type = 'button';
+            favBtn.setAttribute('data-sticker-info-trigger', 'true');
+            favBtn.setAttribute('data-sticker-id', stickerId);
+            favBtn.setAttribute('data-sticker-pack-id', stickerPackId);
+            favBtn.setAttribute('data-sticker-pack-name', stickerPackName);
+            favBtn.setAttribute('data-sticker-pack-author', stickerPackAuthor);
+            favBtn.setAttribute('data-sticker-animated', stickerAnimated ? 'true' : 'false');
+            favBtn.setAttribute('data-sticker-system', stickerSystem ? 'true' : 'false');
+            favBtn.setAttribute('data-sticker-static-url', stickerStaticUrl || '');
+            favBtn.setAttribute('data-sticker-tags', stickerTags);
+            favBtn.setAttribute('data-sticker-favorited', stickerFavorited ? 'true' : 'false');
+            favBtn.className = 'w-6 h-6 sm:w-7 sm:h-7 rounded flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-amber-500 hover:bg-[#F0E9DF]/60 dark:hover:bg-[#45423E]/60 transition-colors cursor-pointer';
+            favBtn.title = 'Sticker info & favorites';
+            favBtn.setAttribute('aria-label', 'Sticker info and favorites');
+
+            const favIcon = document.createElement('span');
+            favIcon.className = 'material-symbols-outlined text-[16px]';
+            favIcon.textContent = stickerFavorited ? 'star' : 'star_outline';
+            favBtn.appendChild(favIcon);
+            actionsBar.appendChild(favBtn);
+        }
+
+        // Edit button (sender only, never on stickers)
+        if (isOutgoing && !isSticker) {
             const editBtn = document.createElement('button');
             editBtn.type = 'button';
             editBtn.setAttribute('data-action', 'edit');
@@ -1063,6 +1248,9 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
 
     if (hasAttachments) {
         hydrateMediaElements(row);
+    }
+    if (isSticker) {
+        hydrateStickerImages(row);
     }
 
     return row;
@@ -1305,6 +1493,8 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
 export function renderMessages(containerEl, messages, currentUserId, peerWatermarks = null, { scrollToEnd = true } = {}) {
     if (!containerEl || typeof document === 'undefined') return;
 
+    disconnectActiveMediaObservers();
+    teardownRowVideos(containerEl);
     clearElementChildren(containerEl);
     syncMessagesContainerAttributes(containerEl, currentUserId, peerWatermarks);
 
@@ -1362,6 +1552,71 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
 }
 
 /**
+ * Synchronizes keyset pagination attributes on #messages-container.
+ * @param {HTMLElement|null} containerEl
+ * @param {string|null|undefined} nextCursor
+ * @param {boolean} hasMore
+ */
+export function syncPaginationAttributes(containerEl, nextCursor, hasMore) {
+    if (!containerEl || typeof containerEl.setAttribute !== 'function') return;
+    containerEl.setAttribute('data-next-cursor', nextCursor || '');
+    containerEl.setAttribute('data-has-more', hasMore ? 'true' : 'false');
+}
+
+/**
+ * Synchronizes top pagination UI elements (loading spinner, tall-viewport manual load button,
+ * transient error retry bar, and beginning-of-conversation pill).
+ */
+export function syncPaginationUi({
+    hasMore = false,
+    hasMessages = false,
+    hasPaginatedOlder = false,
+    isLoading = false,
+    errorMessage = null,
+    streamEl = null
+} = {}) {
+    if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return;
+
+    const loadingTopEl = document.getElementById('messages-loading-top');
+    if (loadingTopEl && loadingTopEl.classList) {
+        loadingTopEl.classList.toggle('hidden', !isLoading);
+    }
+
+    const errorWrapEl = document.getElementById('messages-load-older-error');
+    const errorTextEl = document.getElementById('messages-load-older-error-text');
+    const showError = Boolean(errorMessage) && !isLoading;
+    if (errorTextEl) {
+        errorTextEl.textContent = showError ? String(errorMessage) : 'Could not load older messages.';
+    }
+    if (errorWrapEl && errorWrapEl.classList) {
+        errorWrapEl.classList.toggle('hidden', !showError);
+    }
+
+    const targetStreamEl = streamEl || document.getElementById('message-stream');
+    const scrollHeight = Number(targetStreamEl?.scrollHeight || 0);
+    const clientHeight = Number(targetStreamEl?.clientHeight || 0);
+    const needsManualLoad = Boolean(
+        hasMore &&
+        !isLoading &&
+        !showError &&
+        targetStreamEl &&
+        scrollHeight > 0 &&
+        scrollHeight <= clientHeight + 24
+    );
+
+    const loadOlderWrapEl = document.getElementById('messages-load-older-wrap');
+    if (loadOlderWrapEl && loadOlderWrapEl.classList) {
+        loadOlderWrapEl.classList.toggle('hidden', !needsManualLoad);
+    }
+
+    const historyStartEl = document.getElementById('messages-history-start');
+    const showHistoryStart = Boolean(!hasMore && hasMessages && hasPaginatedOlder && !isLoading && !showError);
+    if (historyStartEl && historyStartEl.classList) {
+        historyStartEl.classList.toggle('hidden', !showHistoryStart);
+    }
+}
+
+/**
  * Prepends older keyset-paginated messages while preserving the caller's scroll offset.
  * @param {HTMLElement|null} containerEl
  * @param {HTMLElement|null} streamEl
@@ -1384,12 +1639,14 @@ export function prependOlderMessages(containerEl, streamEl, messages, currentUse
         : null;
 
     let added = 0;
+    const addedNodes = [];
     for (const msg of sorted) {
         const msgId = getMessageId(msg);
         if (!msgId || isMessageRendered(msgId)) continue;
         const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
         if (el && frag) {
             frag.appendChild(el);
+            addedNodes.push(el);
             added++;
         }
     }
@@ -1399,6 +1656,11 @@ export function prependOlderMessages(containerEl, streamEl, messages, currentUse
             containerEl.insertBefore(frag, containerEl.firstChild);
         } else if (typeof containerEl.appendChild === 'function') {
             containerEl.appendChild(frag);
+        }
+
+        for (const node of addedNodes) {
+            hydrateMediaElements(node);
+            hydrateStickerImages(node);
         }
 
         if (streamEl) {
@@ -1420,6 +1682,14 @@ export function clearConversationHeader() {
     if (headerEl) {
         if (typeof headerEl.setAttribute === 'function') {
             headerEl.setAttribute('data-peer-user-id', '');
+        }
+        const avatarSlot = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-avatar-slot]') : null;
+        if (avatarSlot) {
+            avatarSlot.setAttribute('data-avatar-user-id', '');
+            avatarSlot.setAttribute('data-avatar-version', '');
+            avatarSlot.setAttribute('data-avatar-name', '');
+            avatarSlot.setAttribute('data-avatar-handle', '');
+            hydrateAvatarSlot(avatarSlot);
         }
         const initialsEl = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-peer-initials]') : null;
         if (initialsEl) initialsEl.textContent = '';
@@ -1549,15 +1819,33 @@ export function renderConversationHeader(meta) {
     const peerHandle = meta.otherParticipantHandle ?? meta.OtherParticipantHandle ?? '';
     const peerBio = meta.otherParticipantBio ?? meta.OtherParticipantBio ?? '';
     const isBlocked = !!(meta.isBlocked ?? meta.IsBlocked);
+    const isPeerDeleted = !!(meta.isPeerDeleted ?? meta.IsPeerDeleted);
+    const peerAvatarVersion = (isBlocked || isPeerDeleted)
+        ? ''
+        : (meta.otherParticipantAvatarVersion ?? meta.OtherParticipantAvatarVersion ?? '');
     const isPinned = !!(meta.isPinned ?? meta.IsPinned);
     const isMuted = !!(meta.isMuted ?? meta.IsMuted);
     const isArchived = !!(meta.isArchived ?? meta.IsArchived);
     const isOnline = !!(meta.isOnline ?? meta.IsOnline);
     const lastSeen = meta.lastSeenAtUtc ?? meta.LastSeenAtUtc ?? null;
 
+    if (isBlocked || isPeerDeleted || !peerAvatarVersion) {
+        evictUserAvatarCache(peerId);
+        closeAvatarLightboxIfUser(peerId);
+    }
+
     const headerEl = document.getElementById('active-conversation-header');
     if (headerEl) {
         headerEl.setAttribute('data-peer-user-id', peerId);
+
+        const avatarSlot = typeof headerEl.querySelector === 'function' ? headerEl.querySelector('[data-avatar-slot]') : null;
+        if (avatarSlot) {
+            avatarSlot.setAttribute('data-avatar-user-id', peerId);
+            avatarSlot.setAttribute('data-avatar-version', peerAvatarVersion ? String(peerAvatarVersion) : '');
+            avatarSlot.setAttribute('data-avatar-name', peerName);
+            avatarSlot.setAttribute('data-avatar-handle', peerHandle);
+            hydrateAvatarSlot(avatarSlot);
+        }
 
         const initialsEl = headerEl.querySelector('[data-peer-initials]');
         if (initialsEl) initialsEl.textContent = getInitials(peerName, peerHandle);
@@ -1625,6 +1913,7 @@ export function clearPane() {
     disconnectActiveMediaObservers();
     if (typeof document === 'undefined') return;
     const containerEl = document.getElementById('messages-container');
+    teardownRowVideos(containerEl);
     clearElementChildren(containerEl);
     if (containerEl) {
         containerEl.setAttribute('data-conversation-id', '');
@@ -1640,6 +1929,14 @@ export function clearPane() {
     if (emptyPlaceholder) emptyPlaceholder.classList.add('hidden');
     const loadingTop = document.getElementById('messages-loading-top');
     if (loadingTop) loadingTop.classList.add('hidden');
+    const historyStart = document.getElementById('messages-history-start');
+    if (historyStart) historyStart.classList.add('hidden');
+    const loadOlderWrap = document.getElementById('messages-load-older-wrap');
+    if (loadOlderWrap) loadOlderWrap.classList.add('hidden');
+    const loadOlderError = document.getElementById('messages-load-older-error');
+    if (loadOlderError) loadOlderError.classList.add('hidden');
+    const loadOlderErrorText = document.getElementById('messages-load-older-error-text');
+    if (loadOlderErrorText) loadOlderErrorText.textContent = 'Could not load older messages.';
     const skeletonEl = document.getElementById('chat-loading-skeleton');
     if (skeletonEl) skeletonEl.classList.add('hidden');
     hideSafeError();
@@ -1694,6 +1991,8 @@ export function wipeSensitiveDom() {
     if (typeof document === 'undefined') return;
 
     clearMediaUrlCache();
+    clearAvatarUrlCache();
+    clearStickerUrlCache();
     clearPane();
     lockAndClearHeaderActions();
 
@@ -1743,7 +2042,7 @@ export function wipeSensitiveDom() {
     const replyPreview = document.getElementById('reply-banner-preview');
     if (replyPreview) replyPreview.textContent = '';
 
-    for (const id of ['chat-policy-notice', 'chat-action-error', 'edit-message-modal', 'delete-message-modal', 'reaction-picker-popover', 'composer-attachments-tray', 'composer-attach-menu', 'chat-dropzone-overlay', 'media-lightbox-modal']) {
+    for (const id of ['chat-policy-notice', 'chat-action-error', 'edit-message-modal', 'delete-message-modal', 'mobile-message-action-sheet', 'reaction-picker-popover', 'composer-attachments-tray', 'composer-attach-menu', 'chat-dropzone-overlay', 'media-lightbox-modal', 'sticker-info-modal', 'sticker-creator-modal', 'sticker-confirm-modal']) {
         const el = document.getElementById(id);
         if (el) {
             el.classList.add('hidden');
@@ -1759,6 +2058,20 @@ export function wipeSensitiveDom() {
     const pendingContainer = document.getElementById('pending-uploads-container');
     if (pendingContainer) {
         clearElementChildren(pendingContainer);
+    }
+
+    const historyStartEl = document.getElementById('messages-history-start');
+    if (historyStartEl) historyStartEl.classList.add('hidden');
+    const loadOlderWrapEl = document.getElementById('messages-load-older-wrap');
+    if (loadOlderWrapEl) loadOlderWrapEl.classList.add('hidden');
+    const loadOlderErrEl = document.getElementById('messages-load-older-error');
+    if (loadOlderErrEl) loadOlderErrEl.classList.add('hidden');
+    const loadOlderErrTextEl = document.getElementById('messages-load-older-error-text');
+    if (loadOlderErrTextEl) loadOlderErrTextEl.textContent = '';
+
+    const stickerInfoImg = document.getElementById('sticker-info-img');
+    if (stickerInfoImg && typeof stickerInfoImg.removeAttribute === 'function') {
+        stickerInfoImg.removeAttribute('src');
     }
 
     const lightboxImg = document.getElementById('media-lightbox-img');

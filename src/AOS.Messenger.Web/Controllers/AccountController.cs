@@ -9,23 +9,30 @@ using Microsoft.AspNetCore.RateLimiting;
 
 namespace AOS.Messenger.Web.Controllers;
 
+[RequestSizeLimit(16 * 1024)]
 public sealed class AccountController : Controller
 {
     private readonly IIdentityService _identityService;
     private readonly ISessionService _sessionService;
     private readonly ICurrentUser _currentUser;
     private readonly IEmailSender _emailSender;
+    private readonly IRealtimeNotifier? _realtimeNotifier;
+    private readonly ILogger<AccountController>? _logger;
 
     public AccountController(
         IIdentityService identityService,
         ISessionService sessionService,
         ICurrentUser currentUser,
-        IEmailSender emailSender)
+        IEmailSender emailSender,
+        IRealtimeNotifier? realtimeNotifier = null,
+        ILogger<AccountController>? logger = null)
     {
         _identityService = identityService;
         _sessionService = sessionService;
         _currentUser = currentUser;
         _emailSender = emailSender;
+        _realtimeNotifier = realtimeNotifier;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -128,6 +135,7 @@ public sealed class AccountController : Controller
     [HttpPost]
     [Authorize]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> Logout()
     {
         await _identityService.LogoutAsync(HttpContext.RequestAborted);
@@ -344,6 +352,7 @@ public sealed class AccountController : Controller
     [HttpPost]
     [Authorize]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> RevokeSession(Guid id)
     {
         if (_currentUser.Id is null)
@@ -358,20 +367,28 @@ public sealed class AccountController : Controller
     [HttpPost]
     [Authorize]
     [ValidateAntiForgeryToken]
-    public async Task<IActionResult> RevokeOtherSessions(Guid currentId)
+    [EnableRateLimiting("messages")]
+    public async Task<IActionResult> RevokeOtherSessions()
     {
         if (_currentUser.Id is null)
         {
             return Unauthorized();
         }
 
-        await _sessionService.RevokeOtherSessionsAsync(_currentUser.Id, currentId, HttpContext.RequestAborted);
+        var sessionClaim = User?.FindFirstValue("SessionId");
+        if (!Guid.TryParse(sessionClaim, out var currentSessionId) || currentSessionId == Guid.Empty)
+        {
+            return Unauthorized();
+        }
+
+        await _sessionService.RevokeOtherSessionsAsync(_currentUser.Id, currentSessionId, HttpContext.RequestAborted);
         return RedirectToAction("Sessions");
     }
 
     [HttpPost]
     [Authorize]
     [ValidateAntiForgeryToken]
+    [EnableRateLimiting("messages")]
     public async Task<IActionResult> DeleteAccount()
     {
         if (_currentUser.Id is null)
@@ -379,7 +396,23 @@ public sealed class AccountController : Controller
             return Unauthorized();
         }
 
-        await _identityService.SoftDeleteAccountAsync(_currentUser.Id, HttpContext.RequestAborted);
+        var userId = _currentUser.Id;
+        var deleted = await _identityService.SoftDeleteAccountAsync(userId, HttpContext.RequestAborted);
+        if (deleted && _realtimeNotifier is not null)
+        {
+            try
+            {
+                await _realtimeNotifier.NotifyUserProfileUpdatedAsync(
+                    userId,
+                    new UserProfileUpdatedDto(userId, "Deleted Account", null),
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger?.LogWarning(ex, "Failed to broadcast account deletion profile update for user {UserId}.", userId.Value);
+            }
+        }
+
         return RedirectToAction("Login");
     }
 

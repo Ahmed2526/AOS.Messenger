@@ -7,7 +7,8 @@ public sealed record UserProfileDto(
     string UserName,
     string DisplayName,
     string? Bio,
-    bool IsDeleted);
+    bool IsDeleted,
+    string? AvatarVersion = null);
 
 public sealed record UpdateProfileDto(
     string DisplayName,
@@ -17,7 +18,8 @@ public sealed record UserSearchResultDto(
     UserId Id,
     string UserName,
     string DisplayName,
-    string? Bio);
+    string? Bio,
+    string? AvatarVersion = null);
 
 public sealed record BlockedUserDto(
     UserId Id,

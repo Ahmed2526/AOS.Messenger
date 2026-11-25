@@ -57,7 +57,7 @@ public sealed class LocalMediaSigningService
         string responseContentDisposition,
         DateTimeOffset expiresAtUtc)
     {
-        MediaStorageKeyValidator.ValidateObjectKey(objectKey, MediaConstraints.MediaKeyPrefix);
+        MediaStorageKeyValidator.ValidatePermanentObjectKey(objectKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(responseContentType);
         ArgumentException.ThrowIfNullOrWhiteSpace(responseContentDisposition);
 
@@ -112,7 +112,7 @@ public sealed class LocalMediaSigningService
                     return false;
                 }
 
-                MediaStorageKeyValidator.ValidateObjectKey(parsed.ObjectKey, MediaConstraints.MediaKeyPrefix);
+                MediaStorageKeyValidator.ValidatePermanentObjectKey(parsed.ObjectKey);
             }
             else
             {

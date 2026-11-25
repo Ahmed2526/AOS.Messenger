@@ -1,5 +1,6 @@
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Application.DTOs;
+using AOS.Messenger.Domain.Exceptions;
 using AOS.Messenger.Domain.ValueObjects;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -106,6 +107,7 @@ public sealed class MediaController : ControllerBase
         long messageId,
         Guid mediaId,
         [FromQuery] bool download = false,
+        [FromQuery] string? variant = null,
         CancellationToken ct = default)
     {
         SetResourcePolicy();
@@ -114,12 +116,14 @@ public sealed class MediaController : ControllerBase
             return Unauthorized();
         }
 
+        var thumbnail = ParseThumbnailVariant(variant);
         var result = await _mediaService.GetDownloadUrlAsync(
             _currentUser.Id,
             new ConversationId(conversationId),
             new MessageId(messageId),
             new MediaId(mediaId),
             download,
+            thumbnail,
             ct);
 
         return Redirect(result.Url);
@@ -132,6 +136,7 @@ public sealed class MediaController : ControllerBase
         long messageId,
         Guid mediaId,
         [FromQuery] bool download = false,
+        [FromQuery] string? variant = null,
         CancellationToken ct = default)
     {
         SetResourcePolicy();
@@ -140,15 +145,32 @@ public sealed class MediaController : ControllerBase
             return Unauthorized();
         }
 
+        var thumbnail = ParseThumbnailVariant(variant);
         var result = await _mediaService.GetDownloadUrlAsync(
             _currentUser.Id,
             new ConversationId(conversationId),
             new MessageId(messageId),
             new MediaId(mediaId),
             download,
+            thumbnail,
             ct);
 
         return Ok(result);
+    }
+
+    private static bool ParseThumbnailVariant(string? variant)
+    {
+        if (string.IsNullOrWhiteSpace(variant) || string.Equals(variant.Trim(), "original", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.Equals(variant.Trim(), "thumb", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        throw new DomainException("Invalid media variant. Allowed values are 'original' and 'thumb'.");
     }
 
     private void SetResourcePolicy()

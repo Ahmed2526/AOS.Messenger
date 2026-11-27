@@ -741,6 +741,17 @@ public sealed class MessageService : IMessageService
 
         await EnsureMessageVisibleToUserAsync(conversationId, message, callerId, ct);
 
+        IReadOnlyList<Media>? attachedMedia = null;
+        if (message.HasAttachments)
+        {
+            var mediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [message.Id], ct);
+            mediaMap.TryGetValue(message.Id, out attachedMedia);
+            if (attachedMedia is not null && attachedMedia.Any(m => m.Kind == MediaKind.Voice))
+            {
+                throw new DomainException("Voice messages cannot be edited.");
+            }
+        }
+
         string? normalizedNewContent = null;
         if (Message.HasVisibleContent(dto.Content))
         {
@@ -755,13 +766,6 @@ public sealed class MessageService : IMessageService
         else if (!message.HasAttachments)
         {
             throw new DomainException("Message content cannot be empty.");
-        }
-
-        IReadOnlyList<Media>? attachedMedia = null;
-        if (message.HasAttachments)
-        {
-            var mediaMap = await _mediaPersistence.GetByMessageIdsAsync(conversationId, [message.Id], ct);
-            mediaMap.TryGetValue(message.Id, out attachedMedia);
         }
 
         if (string.Equals(normalizedNewContent, message.Content, StringComparison.Ordinal))
@@ -1218,7 +1222,11 @@ public sealed class MessageService : IMessageService
             media.Height,
             media.DurationMs,
             media.DisplayOrder,
-            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey));
+            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey),
+            WaveformPeaks: media.Kind == MediaKind.Voice
+                ? MediaConstraints.ParseWaveformPeaks(media.WaveformPeaks)
+                : null,
+            PlayedAtUtc: media.Kind == MediaKind.Voice ? media.PlayedAtUtc : null);
     }
 }
 
@@ -1233,6 +1241,8 @@ internal sealed class NullRealtimeNotifier : IRealtimeNotifier
     public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+    public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+    public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
     public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;

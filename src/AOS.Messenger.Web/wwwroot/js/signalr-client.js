@@ -26,6 +26,7 @@ import {
 } from './message-renderer.js';
 import { mapReactionGroupsToSummaries, renderReactionPills } from './reactions.js';
 import { updateMessageCheckmarks, markDelivered, markRead, checkAndMarkIncoming } from './receipts.js';
+import { applyVoicePlayedToRow } from './voice-player.js';
 import {
     findSidebarItem,
     setSidebarUnreadCount,
@@ -117,6 +118,7 @@ export function createSignalRClient({
     onIdentityChanged = null,
     onConversationReconciled = null,
     onTypingIndicator = null,
+    onRecordingIndicator = null,
     onPresenceChanged = null,
     onRefreshPresence = null,
     onIncomingMessage = null,
@@ -699,6 +701,16 @@ export function createSignalRClient({
                                     renderReactionPills(pillsContainer, summaries, msgId, convId, isOutgoing);
                                 }
                             }
+                            const rawAtts = msg.attachments ?? msg.Attachments;
+                            if (Array.isArray(rawAtts)) {
+                                for (const att of rawAtts) {
+                                    const attPlayedAt = att?.playedAtUtc ?? att?.PlayedAtUtc ?? null;
+                                    const attMediaId = normalizeId(att?.id ?? att?.Id);
+                                    if (attPlayedAt && attMediaId) {
+                                        applyVoicePlayedToRow(msgId, attMediaId, attPlayedAt);
+                                    }
+                                }
+                            }
                         }
                         if (isLatestRenderedMessage(containerEl, msgId)) {
                             updateSidebarLastMessage(convId, formattedPreview, msgId, true);
@@ -1083,6 +1095,36 @@ export function createSignalRClient({
         }
     }
 
+    function handleReceiveVoicePlayed(played, { isReplay = false } = {}) {
+        if (!played || isTerminated) return;
+        const eventConvId = normalizeId(played.conversationId !== undefined ? played.conversationId : played.ConversationId);
+        const msgId = normalizeId(played.messageId !== undefined ? played.messageId : played.MessageId);
+        const mediaId = normalizeId(played.mediaId !== undefined ? played.mediaId : played.MediaId);
+        const playedAtUtc = played.playedAtUtc !== undefined ? played.playedAtUtc : played.PlayedAtUtc;
+        if (!eventConvId || !msgId || !mediaId || !playedAtUtc) return;
+
+        if (!isReplay && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveVoicePlayed', payload: played }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveVoicePlayed', payload: played }))) {
+            return;
+        }
+
+        if (!sameId(eventConvId, state.activeConversationId)) return;
+
+        applyVoicePlayedToRow(msgId, mediaId, playedAtUtc);
+
+        if (state.messagesById && state.messagesById.has(String(msgId))) {
+            const cached = state.messagesById.get(String(msgId));
+            const atts = cached?.attachments ?? cached?.Attachments;
+            if (Array.isArray(atts)) {
+                for (const att of atts) {
+                    if (sameId(att?.id ?? att?.Id, mediaId)) {
+                        att.playedAtUtc = playedAtUtc;
+                    }
+                }
+            }
+        }
+    }
+
     /**
      * Replays realtime events buffered during an active conversation fetch in deterministic order.
      * @param {string} convId
@@ -1112,6 +1154,9 @@ export function createSignalRClient({
                     break;
                 case 'ReceiveReceiptUpdated':
                     handleReceiveReceiptUpdated(evt.payload, { isReplay: true });
+                    break;
+                case 'ReceiveVoicePlayed':
+                    handleReceiveVoicePlayed(evt.payload, { isReplay: true });
                     break;
             }
         }
@@ -1208,6 +1253,12 @@ export function createSignalRClient({
             onTypingIndicator(typing);
         }
     });
+    connection.on('ReceiveRecordingIndicator', (recording) => {
+        if (!isTerminated && typeof onRecordingIndicator === 'function') {
+            onRecordingIndicator(recording);
+        }
+    });
+    connection.on('ReceiveVoicePlayed', (played) => handleReceiveVoicePlayed(played));
     connection.on('ReceivePresenceChanged', (presence) => {
         if (!isTerminated && typeof onPresenceChanged === 'function') {
             onPresenceChanged(presence);

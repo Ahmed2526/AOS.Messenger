@@ -68,4 +68,15 @@ internal sealed class NullMediaPersistence : IMediaPersistence
     {
         return Task.CompletedTask;
     }
+
+    public Task<MarkVoicePlayedResult> TryMarkVoicePlayedAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        DateTimeOffset nowUtc,
+        CancellationToken ct = default)
+    {
+        return Task.FromResult(new MarkVoicePlayedResult(MarkVoicePlayedStatus.NotFound));
+    }
 }

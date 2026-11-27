@@ -307,4 +307,132 @@ public sealed class MediaPersistence : IMediaPersistence
                 ex);
         }
     }
+
+    public async Task<MarkVoicePlayedResult> TryMarkVoicePlayedAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        DateTimeOffset nowUtc,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        ArgumentNullException.ThrowIfNull(conversationId);
+        ArgumentNullException.ThrowIfNull(messageId);
+        ArgumentNullException.ThrowIfNull(mediaId);
+
+        var row = await _db.Conversations
+            .AsNoTracking()
+            .Where(c => c.Id == conversationId)
+            .Select(c => new
+            {
+                IsParticipant = c.Participant1Id == callerId || c.Participant2Id == callerId,
+                IsBlocked = _db.UserBlocks.Any(b =>
+                    (b.BlockerId == c.Participant1Id && b.BlockedUserId == c.Participant2Id)
+                    || (b.BlockerId == c.Participant2Id && b.BlockedUserId == c.Participant1Id)),
+                MediaInfo = _db.Media
+                    .Where(m => m.Id == mediaId
+                                && m.ConversationId == conversationId
+                                && m.MessageId == messageId
+                                && m.State == MediaState.Attached
+                                && _db.Messages.Any(msg =>
+                                    msg.ConversationId == conversationId
+                                    && msg.Id == messageId
+                                    && !msg.IsDeletedForEveryone
+                                    && !_db.UserMessageDeletions.Any(d =>
+                                        d.ConversationId == conversationId
+                                        && d.MessageId == messageId
+                                        && d.UserId == callerId)
+                                    && !_db.UserConversationStates.Any(s =>
+                                        s.ConversationId == conversationId
+                                        && s.UserId == callerId
+                                        && ((s.ClearedAtUtc != null && msg.CreatedAtUtc < s.ClearedAtUtc)
+                                            || (s.DeletedAtUtc != null && msg.CreatedAtUtc < s.DeletedAtUtc)))))
+                    .Select(m => new
+                    {
+                        m.Kind,
+                        m.UploaderId,
+                        m.PlayedAtUtc
+                    })
+                    .FirstOrDefault()
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (row is null)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.NotFound);
+        }
+
+        if (!row.IsParticipant)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.ForbiddenNotParticipant);
+        }
+
+        if (row.IsBlocked)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.ForbiddenBlocked);
+        }
+
+        if (row.MediaInfo is null)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.NotFound);
+        }
+
+        if (row.MediaInfo.Kind != MediaKind.Voice)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.InvalidNotVoiceMedia);
+        }
+
+        if (row.MediaInfo.UploaderId == callerId)
+        {
+            return new MarkVoicePlayedResult(MarkVoicePlayedStatus.ForbiddenOwnVoiceMessage);
+        }
+
+        if (row.MediaInfo.PlayedAtUtc.HasValue)
+        {
+            return new MarkVoicePlayedResult(
+                MarkVoicePlayedStatus.AlreadyPlayed,
+                row.MediaInfo.UploaderId,
+                row.MediaInfo.PlayedAtUtc.Value);
+        }
+
+        var updatedRows = await _db.Media
+            .Where(m => m.Id == mediaId
+                        && m.ConversationId == conversationId
+                        && m.MessageId == messageId
+                        && m.Kind == MediaKind.Voice
+                        && m.State == MediaState.Attached
+                        && m.UploaderId != callerId
+                        && m.PlayedAtUtc == null)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(m => m.PlayedAtUtc, (DateTimeOffset?)nowUtc), ct);
+
+        if (updatedRows == 1)
+        {
+            return new MarkVoicePlayedResult(
+                MarkVoicePlayedStatus.Marked,
+                row.MediaInfo.UploaderId,
+                nowUtc);
+        }
+
+        var reloaded = await _db.Media
+            .AsNoTracking()
+            .Where(m => m.Id == mediaId
+                        && m.ConversationId == conversationId
+                        && m.MessageId == messageId
+                        && m.Kind == MediaKind.Voice
+                        && m.State == MediaState.Attached)
+            .Select(m => new { m.UploaderId, m.PlayedAtUtc })
+            .FirstOrDefaultAsync(ct);
+
+        if (reloaded?.PlayedAtUtc is not null)
+        {
+            return new MarkVoicePlayedResult(
+                MarkVoicePlayedStatus.AlreadyPlayed,
+                reloaded.UploaderId,
+                reloaded.PlayedAtUtc.Value);
+        }
+
+        return new MarkVoicePlayedResult(MarkVoicePlayedStatus.NotFound);
+    }
 }

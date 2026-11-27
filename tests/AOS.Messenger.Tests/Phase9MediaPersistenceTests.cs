@@ -61,6 +61,7 @@ public sealed class Phase9MediaPersistenceTests : IClassFixture<SqlTestDatabaseF
         var vid = new MediaAttachmentDto(MediaId.New(), "video", "clip.mp4", "video/mp4", 2048, null, null, null, 0);
         var doc = new MediaAttachmentDto(MediaId.New(), "document", "report.pdf", "application/pdf", 4096, null, null, null, 0);
         var voice = new MediaAttachmentDto(MediaId.New(), "voice", "note.ogg", "audio/ogg", 512, null, null, 3000, 0);
+        var voiceNoDuration = new MediaAttachmentDto(MediaId.New(), "voice", "note.ogg", "audio/ogg", 512, null, null, null, 0);
 
         Assert.Equal("Hello", MediaPreviewFormatter.FormatPreview("  Hello  ", (IReadOnlyList<MediaAttachmentDto>)[]));
         Assert.Equal(string.Empty, MediaPreviewFormatter.FormatPreview("   ", (IReadOnlyList<MediaAttachmentDto>?)null));
@@ -68,7 +69,8 @@ public sealed class Phase9MediaPersistenceTests : IClassFixture<SqlTestDatabaseF
         Assert.Equal("📷 Photo", MediaPreviewFormatter.FormatPreview(null, [img]));
         Assert.Equal("📷 Photo", MediaPreviewFormatter.FormatPreview("\u200B  ", [img]));
         Assert.Equal("🎬 Video", MediaPreviewFormatter.FormatPreview(null, [vid]));
-        Assert.Equal("🎤 Voice message", MediaPreviewFormatter.FormatPreview(null, [voice]));
+        Assert.Equal("🎤 Voice message (0:03)", MediaPreviewFormatter.FormatPreview(null, [voice]));
+        Assert.Equal("🎤 Voice message", MediaPreviewFormatter.FormatPreview(null, [voiceNoDuration]));
         Assert.Equal("📎 report.pdf", MediaPreviewFormatter.FormatPreview(null, [doc]));
 
         Assert.Equal("📷 3 photos", MediaPreviewFormatter.FormatPreview(null, [img, img, img]));

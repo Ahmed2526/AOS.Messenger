@@ -342,6 +342,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
 
         const isOutgoing = row.getAttribute('data-is-outgoing') === 'true';
         const isSticker = row.getAttribute('data-is-sticker') === 'true';
+        const isVoice = row.getAttribute('data-is-voice') === 'true';
         const hasAttachments = row.getAttribute('data-has-attachments') === 'true';
         const createdAt = row.getAttribute('data-created-at') || '';
         const contentEl = typeof row.querySelector === 'function' ? row.querySelector('.message-text-content') : null;
@@ -362,6 +363,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
             messageId,
             isOutgoing,
             isSticker,
+            isVoice,
             hasAttachments,
             createdAt,
             senderName,
@@ -398,7 +400,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         if (mobileStickerInfoIcon) {
             mobileStickerInfoIcon.textContent = stickerFavorited ? 'star' : 'star_outline';
         }
-        setElVisible(mobileEditBtn, isOutgoing && !isSticker);
+        setElVisible(mobileEditBtn, isOutgoing && !isSticker && !isVoice);
         setElVisible(mobileDeleteBtn, true);
 
         mobileSheet.classList.remove('hidden');
@@ -494,7 +496,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const onMobileEditClick = (e) => {
         if (e && typeof e.preventDefault === 'function') e.preventDefault();
         const ctx = activeMobileSheetContext;
-        if (!ctx || !ctx.isOutgoing || ctx.isSticker) return;
+        if (!ctx || !ctx.isOutgoing || ctx.isSticker || ctx.isVoice) return;
         closeMobileActionSheet();
         openEditModal(ctx.messageId, ctx.textContent, ctx.hasAttachments);
     };
@@ -513,7 +515,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         if (e.isPrimary === false) return;
         if (typeof e.button === 'number' && e.button !== 0) return;
         if (!e.target || typeof e.target.closest !== 'function') return;
-        if (e.target.closest('.reaction-pill') || e.target.closest('video')) return;
+        if (e.target.closest('.reaction-pill') || e.target.closest('video') || e.target.closest('.voice-player-control') || e.target.closest('[data-voice-waveform]')) return;
 
         const bubble = e.target.closest('.message-bubble');
         if (!bubble) return;

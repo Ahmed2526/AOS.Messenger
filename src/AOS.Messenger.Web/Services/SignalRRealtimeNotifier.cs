@@ -82,6 +82,44 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
         await _hubContext.Clients.User(recipientUserId.Value.ToString()).ReceiveTypingIndicator(typing);
     }
 
+    public async Task NotifyRecordingAsync(
+        UserId recipientUserId,
+        RecordingIndicatorDto recording,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(recipientUserId);
+        ArgumentNullException.ThrowIfNull(recording);
+
+        if (!await IsAuthorizedDirectPeerAsync(new ConversationId(recording.ConversationId), new UserId(recording.UserId), recipientUserId, ct))
+        {
+            return;
+        }
+
+        await _hubContext.Clients.User(recipientUserId.Value.ToString()).ReceiveRecordingIndicator(recording);
+    }
+
+    public async Task NotifyVoicePlayedAsync(
+        ConversationId conversationId,
+        UserId callerUserId,
+        UserId uploaderUserId,
+        VoicePlayedDto played,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversationId);
+        ArgumentNullException.ThrowIfNull(callerUserId);
+        ArgumentNullException.ThrowIfNull(uploaderUserId);
+        ArgumentNullException.ThrowIfNull(played);
+
+        var targetIds = new List<string> { callerUserId.Value.ToString() };
+        if (callerUserId != uploaderUserId
+            && await IsAuthorizedDirectPeerAsync(conversationId, callerUserId, uploaderUserId, ct))
+        {
+            targetIds.Add(uploaderUserId.Value.ToString());
+        }
+
+        await _hubContext.Clients.Users(targetIds).ReceiveVoicePlayed(played);
+    }
+
     public async Task NotifyPresenceChangedAsync(
         IReadOnlyList<UserId> recipientUserIds,
         UserPresenceDto presence,
@@ -244,17 +282,15 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
             return false;
         }
 
-        var conversation = await _conversationPersistence.GetByIdAsync(conversationId, ct);
-        if (conversation is null ||
-            !conversation.HasParticipant(senderUserId) ||
-            !conversation.HasParticipant(recipientUserId))
-        {
-            return false;
-        }
+        var authorized = await _conversationPersistence.AreAuthorizedDirectPeersAsync(
+            conversationId,
+            senderUserId,
+            recipientUserId,
+            ct);
 
-        if (await _blockPersistence.IsBlockedBidirectionalAsync(senderUserId, recipientUserId, ct))
+        if (!authorized)
         {
-            _logger.LogDebug("Conversation {ConversationId} has active block; suppressing direct realtime broadcast", conversationId.Value);
+            _logger.LogDebug("Conversation {ConversationId} missing or blocked; suppressing direct realtime broadcast", conversationId.Value);
             return false;
         }
 

@@ -16,6 +16,7 @@ import {
     cancelMediaUpload,
     sendMessage
 } from './api-client.js';
+import { formatVoiceDuration } from './voice-player.js';
 
 export const MAX_ATTACHMENTS = 5;
 export const MAX_CONCURRENT_UPLOADS = 2;
@@ -197,6 +198,8 @@ export function createMediaUploader({
     onError = null,
     onMessageSent = null,
     onUnauthorized = null,
+    onTrayChanged = null,
+    isVoiceDockActive = null,
     nowFn = () => Date.now()
 } = {}) {
     let locked = true;
@@ -367,8 +370,18 @@ export function createMediaUploader({
         trayEl.appendChild(strip);
     }
 
+    function notifyTrayChanged() {
+        if (typeof onTrayChanged === 'function') {
+            onTrayChanged(trayItems.length);
+        }
+    }
+
     function addFiles(fileList) {
         if (locked || isTerminated || !fileList) return 0;
+        if (typeof isVoiceDockActive === 'function' && isVoiceDockActive()) {
+            reportError('Finish or discard your voice recording before attaching files.');
+            return 0;
+        }
         const files = Array.from(fileList);
         if (files.length === 0) return 0;
 
@@ -399,6 +412,7 @@ export function createMediaUploader({
 
         if (addedCount > 0) {
             renderTray();
+            notifyTrayChanged();
         }
         return addedCount;
     }
@@ -409,14 +423,19 @@ export function createMediaUploader({
         const [removed] = trayItems.splice(idx, 1);
         revokeBlobUrl(removed?.previewUrl);
         renderTray();
+        notifyTrayChanged();
     }
 
     function clearTray() {
+        const hadItems = trayItems.length > 0;
         while (trayItems.length > 0) {
             const removed = trayItems.pop();
             revokeBlobUrl(removed?.previewUrl);
         }
         renderTray();
+        if (hadItems) {
+            notifyTrayChanged();
+        }
     }
 
     function resetTrayForSwitch() {
@@ -464,9 +483,11 @@ export function createMediaUploader({
             statusHeader.className = 'flex items-center justify-between gap-3 mb-1.5 text-[11px] font-semibold';
             const statusText = document.createElement('span');
             if (job.status === 'failed') {
-                statusText.textContent = job.errorMessage || 'Upload failed';
+                statusText.textContent = job.errorMessage || (job.isVoice ? 'Voice upload failed' : 'Upload failed');
             } else if (job.status === 'sending') {
-                statusText.textContent = 'Sending message...';
+                statusText.textContent = job.isVoice ? 'Sending voice message...' : 'Sending message...';
+            } else if (job.isVoice) {
+                statusText.textContent = 'Uploading voice message...';
             } else {
                 statusText.textContent = `Uploading ${job.items.length} attachment${job.items.length > 1 ? 's' : ''}...`;
             }
@@ -504,8 +525,18 @@ export function createMediaUploader({
                 topLine.className = 'flex items-center justify-between gap-2';
 
                 const nameSpan = document.createElement('span');
-                nameSpan.className = 'truncate font-medium text-[11px]';
-                nameSpan.textContent = item.fileName;
+                nameSpan.className = 'truncate font-medium text-[11px] flex items-center gap-1';
+                if (item.kind === 'voice') {
+                    const micIcon = document.createElement('span');
+                    micIcon.className = 'material-symbols-outlined text-[14px]';
+                    micIcon.textContent = 'mic';
+                    nameSpan.appendChild(micIcon);
+                    const durSpan = document.createElement('span');
+                    durSpan.textContent = `Voice message (${formatVoiceDuration(item.durationMs)})`;
+                    nameSpan.appendChild(durSpan);
+                } else {
+                    nameSpan.textContent = item.fileName;
+                }
                 topLine.appendChild(nameSpan);
 
                 const stateSpan = document.createElement('span');
@@ -642,13 +673,20 @@ export function createMediaUploader({
                 item.abortController = typeof AbortController === 'function' ? new AbortController() : null;
                 renderIfActive(job);
 
+                const initPayload = {
+                    fileName: item.fileName,
+                    contentType: item.contentType,
+                    sizeBytes: item.sizeBytes
+                };
+                if (item.kind === 'voice') {
+                    initPayload.kind = 'voice';
+                    initPayload.durationMs = item.durationMs;
+                    initPayload.waveformPeaks = item.waveformPeaks;
+                }
+
                 const initResp = await api.initiateMediaUpload(
                     job.conversationId,
-                    {
-                        fileName: item.fileName,
-                        contentType: item.contentType,
-                        sizeBytes: item.sizeBytes
-                    },
+                    initPayload,
                     { signal: item.abortController?.signal }
                 );
                 initiatedMediaId = initResp?.mediaId ?? initResp?.MediaId ?? null;
@@ -850,6 +888,7 @@ export function createMediaUploader({
 
         const selected = trayItems.splice(0, trayItems.length);
         renderTray();
+        notifyTrayChanged();
 
         const job = {
             id: createUuid(),
@@ -880,6 +919,55 @@ export function createMediaUploader({
                 xhr: null,
                 abortController: null
             }))
+        };
+
+        const normConvId = normalizeId(job.conversationId);
+        if (!jobsByConversation.has(normConvId)) {
+            jobsByConversation.set(normConvId, []);
+        }
+        jobsByConversation.get(normConvId).push(job);
+        jobsById.set(job.id, job);
+
+        renderIfActive(job);
+        job.promise = processJob(job);
+        return job;
+    }
+
+    function startVoiceUploadJob({ conversationId, blob, fileName, contentType, durationMs, waveformPeaks, replyTo = null } = {}) {
+        if (!conversationId || !blob || isTerminated) return null;
+
+        const job = {
+            id: createUuid(),
+            conversationId: String(conversationId),
+            caption: '',
+            isVoice: true,
+            replyToMessageId: replyTo ? String(replyTo.id) : null,
+            idempotencyKey: createUuid(),
+            status: 'uploading',
+            errorMessage: '',
+            retryable: true,
+            cancelled: false,
+            sendController: null,
+            items: [{
+                index: 0,
+                file: blob,
+                fileName: fileName || 'voice-message.webm',
+                contentType: contentType || blob.type || 'audio/webm',
+                sizeBytes: Number(blob.size) || 0,
+                kind: 'voice',
+                durationMs: Number(durationMs) || 0,
+                waveformPeaks: Array.isArray(waveformPeaks) ? waveformPeaks : null,
+                previewUrl: null,
+                status: 'queued',
+                progress: 0,
+                mediaId: null,
+                stagedReady: false,
+                verifiedAtMs: null,
+                retryable: true,
+                errorMessage: '',
+                xhr: null,
+                abortController: null
+            }]
         };
 
         const normConvId = normalizeId(job.conversationId);
@@ -1110,8 +1198,10 @@ export function createMediaUploader({
         return false;
     };
 
+    const isVoiceLocked = () => typeof isVoiceDockActive === 'function' && isVoiceDockActive();
+
     const onDragEnter = (e) => {
-        if (locked || isTerminated || !hasDraggedFiles(e.dataTransfer)) return;
+        if (locked || isTerminated || isVoiceLocked() || !hasDraggedFiles(e.dataTransfer)) return;
         if (isBlockingModalOpen(e.target)) {
             hideDropzone();
             return;
@@ -1123,7 +1213,7 @@ export function createMediaUploader({
     };
 
     const onDragOver = (e) => {
-        if (locked || isTerminated || !hasDraggedFiles(e.dataTransfer)) return;
+        if (locked || isTerminated || isVoiceLocked() || !hasDraggedFiles(e.dataTransfer)) return;
         if (isBlockingModalOpen(e.target)) {
             hideDropzone();
             return;
@@ -1151,13 +1241,13 @@ export function createMediaUploader({
         }
         e.preventDefault();
         hideDropzone();
-        if (!locked && !isTerminated && e.dataTransfer?.files?.length) {
+        if (!locked && !isTerminated && !isVoiceLocked() && e.dataTransfer?.files?.length) {
             addFiles(e.dataTransfer.files);
         }
     };
 
     const onPaste = (e) => {
-        if (locked || isTerminated || isBlockingModalOpen(e.target)) return;
+        if (locked || isTerminated || isVoiceLocked() || isBlockingModalOpen(e.target)) return;
         const inputEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
             ? document.getElementById('message-content-input')
             : null;
@@ -1252,12 +1342,14 @@ export function createMediaUploader({
         init,
         destroy,
         setLocked,
+        closeMenu,
         addFiles,
         removeTrayItem,
         clearTray,
         hasPendingFiles,
         getTrayItems: () => [...trayItems],
         startUploadJob,
+        startVoiceUploadJob,
         retryJob,
         cancelJob,
         reconcileIncomingMessage,

@@ -52,6 +52,12 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
             : null;
     }
 
+    function getVoiceBtn() {
+        return typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('composer-voice-btn')
+            : null;
+    }
+
     function closeEmojiOverlays() {
         if (emojiPicker && typeof emojiPicker.close === 'function') {
             emojiPicker.close();
@@ -85,10 +91,13 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         const inputEl = getInputEl();
         const sendBtn = getSendBtn();
         const emojiBtn = getEmojiBtn();
+        const voiceBtn = getVoiceBtn();
         const shouldDisable = locked || isSending;
+        const hasPendingFiles = !!(mediaUploader && typeof mediaUploader.hasPendingFiles === 'function' && mediaUploader.hasPendingFiles());
         if (inputEl) inputEl.disabled = shouldDisable;
         if (sendBtn) sendBtn.disabled = shouldDisable;
         if (emojiBtn) emojiBtn.disabled = shouldDisable;
+        if (voiceBtn) voiceBtn.disabled = shouldDisable || hasPendingFiles;
         if (mediaUploader && typeof mediaUploader.setLocked === 'function') {
             mediaUploader.setLocked(shouldDisable);
         }
@@ -242,11 +251,13 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
             if (typeof state.deleteDraft === 'function') {
                 state.deleteDraft(targetConvId);
             }
-            return mediaUploader.startUploadJob({
+            const job = mediaUploader.startUploadJob({
                 conversationId: targetConvId,
                 caption: content,
                 replyTo: replySnapshot
             });
+            syncDisabledState();
+            return job;
         }
 
         const epoch = state.switchEpoch;
@@ -557,6 +568,7 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         getText,
         setText,
         setLocked,
+        syncDisabledState,
         applyConversationPolicy,
         showPolicyNotice,
         hidePolicyNotice,

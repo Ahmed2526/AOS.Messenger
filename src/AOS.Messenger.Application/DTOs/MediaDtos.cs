@@ -5,7 +5,10 @@ namespace AOS.Messenger.Application.DTOs;
 public sealed record InitiateMediaUploadRequestDto(
     string FileName,
     string? ContentType,
-    long SizeBytes);
+    long SizeBytes,
+    string? Kind = null,
+    int? DurationMs = null,
+    IReadOnlyList<int>? WaveformPeaks = null);
 
 public sealed record InitiateMediaUploadResponseDto(
     MediaId MediaId,
@@ -26,7 +29,16 @@ public sealed record MediaAttachmentDto(
     int? Height,
     int? DurationMs,
     int DisplayOrder,
-    bool HasThumbnail = false);
+    bool HasThumbnail = false,
+    IReadOnlyList<int>? WaveformPeaks = null,
+    DateTimeOffset? PlayedAtUtc = null);
+
+public sealed record VoicePlayedDto(
+    Guid ConversationId,
+    long MessageId,
+    Guid MediaId,
+    Guid PlayedByUserId,
+    DateTimeOffset PlayedAtUtc);
 
 public sealed record MediaDownloadUrlDto(
     string Url,

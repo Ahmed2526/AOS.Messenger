@@ -28,6 +28,15 @@ public sealed class MediaConfiguration : IEntityTypeConfiguration<Media>
             t.HasCheckConstraint(
                 "CK_Media_ThumbnailObjectKey",
                 "([ThumbnailObjectKey] IS NULL OR [ThumbnailObjectKey] LIKE N'thumbs/%')");
+            t.HasCheckConstraint(
+                "CK_Media_Voice_Duration",
+                "([Kind] <> 3) OR ([DurationMs] IS NOT NULL AND [DurationMs] >= 500 AND [DurationMs] <= 1200000)");
+            t.HasCheckConstraint(
+                "CK_Media_Voice_Waveform",
+                "([Kind] <> 3 AND [WaveformPeaks] IS NULL) OR ([Kind] = 3 AND [WaveformPeaks] IS NOT NULL AND LEN([WaveformPeaks]) > 0)");
+            t.HasCheckConstraint(
+                "CK_Media_PlayedAtUtc_Voice",
+                "([PlayedAtUtc] IS NULL) OR ([Kind] = 3)");
         });
 
         builder.HasKey(m => m.Id).IsClustered();
@@ -94,6 +103,11 @@ public sealed class MediaConfiguration : IEntityTypeConfiguration<Media>
         builder.Property(m => m.Height);
 
         builder.Property(m => m.DurationMs);
+
+        builder.Property(m => m.WaveformPeaks)
+            .HasMaxLength(256);
+
+        builder.Property(m => m.PlayedAtUtc);
 
         builder.Property(m => m.CreatedAtUtc)
             .IsRequired();

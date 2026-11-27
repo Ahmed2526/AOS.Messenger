@@ -126,9 +126,8 @@ export function setupTypingEmitter(connection, convIdOrGetter, inputElement) {
 }
 
 /**
- * Sets up typing indicator receiver for a conversation.
- * Listens for ReceiveTypingIndicator and updates typingContainerElement.
- * Auto-hides after 5 seconds if no updates arrive.
+ * Sets up typing and voice-recording indicator receiver for a conversation.
+ * Listens for ReceiveTypingIndicator and ReceiveRecordingIndicator with independent auto-hide timers.
  *
  * @param {object} connection - SignalR HubConnection
  * @param {string|Function} convIdOrGetter
@@ -141,18 +140,44 @@ export function setupTypingReceiver(connection, convIdOrGetter, typingContainerE
         : () => convIdOrGetter;
 
     if (!typingContainerElement || !convIdOrGetter) {
-        return { resetForSwitch: () => {}, destroy: () => {} };
+        return {
+            handleTypingIndicator: () => {},
+            handleRecordingIndicator: () => {},
+            resetForSwitch: () => {},
+            destroy: () => {}
+        };
     }
 
-    let autoHideTimer = null;
+    let isTypingActive = false;
+    let isRecordingActive = false;
+    let typingAutoHideTimer = null;
+    let recordingAutoHideTimer = null;
+
+    function renderActivityIndicator() {
+        if (isRecordingActive) {
+            typingContainerElement.textContent = 'recording audio...';
+            typingContainerElement.classList.remove('hidden');
+        } else if (isTypingActive) {
+            typingContainerElement.textContent = 'typing...';
+            typingContainerElement.classList.remove('hidden');
+        } else {
+            typingContainerElement.textContent = '';
+            typingContainerElement.classList.add('hidden');
+        }
+    }
 
     function resetForSwitch() {
-        if (autoHideTimer) {
-            clearTimeout(autoHideTimer);
-            autoHideTimer = null;
+        if (typingAutoHideTimer) {
+            clearTimeout(typingAutoHideTimer);
+            typingAutoHideTimer = null;
         }
-        typingContainerElement.textContent = '';
-        typingContainerElement.classList.add('hidden');
+        if (recordingAutoHideTimer) {
+            clearTimeout(recordingAutoHideTimer);
+            recordingAutoHideTimer = null;
+        }
+        isTypingActive = false;
+        isRecordingActive = false;
+        renderActivityIndicator();
     }
 
     function handleTypingIndicator(typing) {
@@ -165,37 +190,68 @@ export function setupTypingReceiver(connection, convIdOrGetter, typingContainerE
 
         const isTyping = (typing.isTyping !== undefined) ? typing.isTyping : typing.IsTyping;
 
-        if (autoHideTimer) {
-            clearTimeout(autoHideTimer);
-            autoHideTimer = null;
+        if (typingAutoHideTimer) {
+            clearTimeout(typingAutoHideTimer);
+            typingAutoHideTimer = null;
         }
 
         if (isTyping) {
-            typingContainerElement.textContent = 'typing...';
-            typingContainerElement.classList.remove('hidden');
-
-            autoHideTimer = setTimeout(() => {
-                typingContainerElement.textContent = '';
-                typingContainerElement.classList.add('hidden');
-                autoHideTimer = null;
+            isTypingActive = true;
+            typingAutoHideTimer = setTimeout(() => {
+                isTypingActive = false;
+                typingAutoHideTimer = null;
+                renderActivityIndicator();
             }, 5000);
         } else {
-            typingContainerElement.textContent = '';
-            typingContainerElement.classList.add('hidden');
+            isTypingActive = false;
         }
+
+        renderActivityIndicator();
+    }
+
+    function handleRecordingIndicator(recording) {
+        if (!recording) return;
+        const currentConvId = resolveConvId();
+        if (!currentConvId) return;
+
+        const convId = recording.conversationId || recording.ConversationId;
+        if (!convId || String(convId).toLowerCase() !== String(currentConvId).toLowerCase()) return;
+
+        const isRecording = (recording.isRecording !== undefined) ? recording.isRecording : recording.IsRecording;
+
+        if (recordingAutoHideTimer) {
+            clearTimeout(recordingAutoHideTimer);
+            recordingAutoHideTimer = null;
+        }
+
+        if (isRecording) {
+            isRecordingActive = true;
+            recordingAutoHideTimer = setTimeout(() => {
+                isRecordingActive = false;
+                recordingAutoHideTimer = null;
+                renderActivityIndicator();
+            }, 5000);
+        } else {
+            isRecordingActive = false;
+        }
+
+        renderActivityIndicator();
     }
 
     if (connection && typeof connection.on === 'function') {
         connection.on('ReceiveTypingIndicator', handleTypingIndicator);
+        connection.on('ReceiveRecordingIndicator', handleRecordingIndicator);
     }
 
     return {
         handleTypingIndicator,
+        handleRecordingIndicator,
         resetForSwitch,
         destroy: () => {
             resetForSwitch();
             if (connection && typeof connection.off === 'function') {
                 connection.off('ReceiveTypingIndicator', handleTypingIndicator);
+                connection.off('ReceiveRecordingIndicator', handleRecordingIndicator);
             }
         }
     };

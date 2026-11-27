@@ -644,9 +644,9 @@ public sealed class MediaDragGuardFrontendTests
             Assert.True(backLink.Success, $"Missing data-back-to-chats link in {fileName}");
             Assert.Contains("draggable=\"false\"", backLink.Value, StringComparison.OrdinalIgnoreCase);
 
-            var voiceLink = Regex.Match(html, @"<a\b[^>]*asp-action=""VoiceRecording""[^>]*>", RegexOptions.IgnoreCase);
-            Assert.True(voiceLink.Success, $"Missing VoiceRecording link in {fileName}");
-            Assert.Contains("draggable=\"false\"", voiceLink.Value, StringComparison.OrdinalIgnoreCase);
+            var voiceBtn = Regex.Match(html, @"<button\b[^>]*id=""composer-voice-btn""[^>]*>", RegexOptions.IgnoreCase);
+            Assert.True(voiceBtn.Success, $"Missing #composer-voice-btn button in {fileName}");
+            Assert.Contains("type=\"button\"", voiceBtn.Value, StringComparison.OrdinalIgnoreCase);
         }
 
         // 3. Avatar-wrapping links in ConversationSidebar/Default.cshtml and Chat/Archived.cshtml

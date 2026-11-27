@@ -253,47 +253,104 @@
         <div id="composer-attachments-tray" class="hidden px-4 py-2 bg-[#F8F6F3]/90 dark:bg-[#302F2C]/80 border-b border-[#E3DCD7] dark:border-[#514D48]"></div>
 
         <!-- Composer Input Bar -->
-        <div class="px-4 py-2.5 max-w-4xl mx-auto flex items-end gap-2">
-            <div class="relative flex-shrink-0">
-                <button id="composer-attach-btn"
-                        type="button"
-                        disabled
-                        aria-label="Attach files"
-                        aria-haspopup="menu"
-                        aria-expanded="false"
-                        aria-controls="composer-attach-menu"
-                        title="Attach File or Media"
-                        class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
-                </button>
-                <div id="composer-attach-menu" role="menu" aria-label="Attachment options" class="hidden absolute bottom-full left-0 mb-2 w-48 rounded-xl bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-lg py-1.5 z-50 text-xs flex flex-col">
-                    <button type="button" role="menuitem" data-attach-choice="media" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
-                        <span class="material-symbols-outlined text-[18px] text-[#B3929D]">photo_library</span>
-                        <span>Photos &amp; Videos</span>
+        <div id="composer-input-row">
+            <div class="px-4 py-2.5 max-w-4xl mx-auto flex items-end gap-2">
+                <div class="relative flex-shrink-0">
+                    <button id="composer-attach-btn"
+                            type="button"
+                            disabled
+                            aria-label="Attach files"
+                            aria-haspopup="menu"
+                            aria-expanded="false"
+                            aria-controls="composer-attach-menu"
+                            title="Attach File or Media"
+                            class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
                     </button>
-                    <button type="button" role="menuitem" data-attach-choice="document" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
-                        <span class="material-symbols-outlined text-[18px] text-[#A07860] dark:text-[#D8C080]">description</span>
-                        <span>Document</span>
+                    <div id="composer-attach-menu" role="menu" aria-label="Attachment options" class="hidden absolute bottom-full left-0 mb-2 w-48 rounded-xl bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] shadow-lg py-1.5 z-50 text-xs flex flex-col">
+                        <button type="button" role="menuitem" data-attach-choice="media" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[18px] text-[#B3929D]">photo_library</span>
+                            <span>Photos &amp; Videos</span>
+                        </button>
+                        <button type="button" role="menuitem" data-attach-choice="document" class="w-full px-3 py-2 text-left flex items-center gap-2.5 text-[#2B2725] dark:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[18px] text-[#A07860] dark:text-[#D8C080]">description</span>
+                            <span>Document</span>
+                        </button>
+                    </div>
+                    <input id="media-file-input" type="file" multiple class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" />
+                    <input id="document-file-input" type="file" multiple class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/csv,application/zip" />
+                </div>
+                <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
+                    <textarea id="message-content-input" disabled maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
+                    <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled aria-label="Emoji and stickers" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Emoji &amp; Stickers">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
                     </button>
                 </div>
-                <input id="media-file-input" type="file" multiple class="hidden" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov,image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" />
-                <input id="document-file-input" type="file" multiple class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/plain,text/csv,application/zip" />
-            </div>
-            <div class="flex-1 bg-[#F8F6F3] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] rounded-lg flex items-center px-3 py-1 focus-within:border-[#B3929D] focus-within:ring-1 focus-within:ring-[#B3929D] transition-all">
-                <textarea id="message-content-input" disabled maxlength="4000" rows="1" aria-label="Write a message" class="w-full bg-transparent text-xs font-medium text-[#2B2725] dark:text-[#F0E9E2] placeholder-[#6E6560] dark:placeholder-[#C9C0B9] focus:outline-none resize-none py-1 max-h-32 disabled:opacity-50" placeholder="Write a message..."></textarea>
-                <button id="composer-emoji-btn" type="button" data-emoji-trigger="composer" disabled aria-label="Emoji and stickers" aria-expanded="false" aria-haspopup="dialog" class="p-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] transition-colors rounded-lg flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed" title="Emoji &amp; Stickers">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                <button id="composer-voice-btn" type="button" disabled aria-label="Record voice message" title="Record Voice Message" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
+                </button>
+                <button id="send-message-btn" type="button" disabled class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send Message">
+                    <svg class="w-4 h-4 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"></path></svg>
                 </button>
             </div>
-            <a asp-controller="Chat" asp-action="VoiceRecording" draggable="false" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Record Voice Message">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
-            </a>
-            <button id="send-message-btn" type="button" disabled class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send Message">
-                <svg class="w-4 h-4 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"></path></svg>
-            </button>
+            <div class="text-center pb-2">
+                <span class="text-[10px] text-[#6E6560] dark:text-[#C9C0B9] font-medium">Press <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Return</kbd> to send, <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Shift + Return</kbd> for new line</span>
+            </div>
         </div>
-        <div class="text-center pb-2">
-            <span class="text-[10px] text-[#6E6560] dark:text-[#C9C0B9] font-medium">Press <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Return</kbd> to send, <kbd class="px-1.5 py-0.5 text-[10px] bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Shift + Return</kbd> for new line</span>
+
+        <!-- Inline Voice Recording & Preview Dock -->
+        <div id="composer-voice-dock" class="hidden px-3 sm:px-4 py-2.5">
+            <div class="max-w-4xl mx-auto flex flex-col gap-1.5">
+                <div id="voice-dock-recording" class="hidden flex items-center gap-2 min-w-0 bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#B3929D] rounded-xl px-2.5 sm:px-3.5 py-2 shadow-2xs">
+                    <div class="flex items-center gap-1.5 bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-full px-2 py-1 shrink-0 shadow-2xs">
+                        <span id="voice-rec-dot" class="w-2 h-2 rounded-full bg-[#C7624F] animate-pulse"></span>
+                        <span id="voice-rec-status" class="text-[10px] font-bold text-[#C7624F] tracking-wide uppercase">REC</span>
+                        <span class="h-3 w-px bg-[#E3DCD7] dark:bg-[#514D48]"></span>
+                        <span id="voice-rec-timer" class="text-xs font-bold text-[#2B2725] dark:text-[#F0E9E2] font-mono tabular-nums">0:00</span>
+                    </div>
+                    <span id="voice-rec-limit-hint" class="hidden text-[10px] font-semibold text-amber-700 dark:text-amber-300 shrink-0"></span>
+                    <div id="voice-live-waveform" class="flex-1 min-w-0 flex items-center justify-center gap-[2px] h-7 px-1 overflow-hidden" aria-hidden="true"></div>
+                    <div class="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                        <button id="voice-discard-btn" type="button" aria-label="Discard recording" title="Discard recording (Esc)" class="w-8 h-8 sm:w-auto sm:px-2.5 rounded-lg flex items-center justify-center gap-1 text-xs font-semibold text-[#C7624F] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[18px]">delete</span>
+                            <span class="hidden sm:inline">Discard</span>
+                        </button>
+                        <button id="voice-pause-btn" type="button" aria-label="Pause recording" title="Pause recording" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span id="voice-pause-icon" class="material-symbols-outlined text-[18px]">pause</span>
+                        </button>
+                        <button id="voice-stop-preview-btn" type="button" aria-label="Stop and preview recording" title="Stop &amp; Preview" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#735761] dark:text-[#E1BDC9] bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[18px] icon-filled">stop</span>
+                        </button>
+                        <button id="voice-send-now-btn" type="button" aria-label="Send voice message" title="Send Voice Message" class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs shrink-0 cursor-pointer">
+                            <svg class="w-4 h-4 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"></path></svg>
+                        </button>
+                    </div>
+                </div>
+
+                <div id="voice-dock-preview" class="hidden flex items-center gap-2 min-w-0 bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#B3929D] rounded-xl px-2.5 sm:px-3.5 py-2 shadow-2xs">
+                    <button id="voice-preview-play-btn" type="button" aria-label="Play voice preview" title="Play preview" class="w-8 h-8 rounded-full bg-[#B3929D] text-white flex items-center justify-center shrink-0 hover:opacity-95 active:scale-95 transition-all cursor-pointer">
+                        <span id="voice-preview-play-icon" class="material-symbols-outlined text-[18px] icon-filled">play_arrow</span>
+                    </button>
+                    <div id="voice-preview-waveform" role="slider" tabindex="0" aria-label="Voice preview seek bar" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" class="flex-1 min-w-0 flex items-center gap-[1px] sm:gap-0.5 h-7 cursor-pointer touch-none"></div>
+                    <span id="voice-preview-timer" class="text-xs font-mono font-semibold text-[#2B2725] dark:text-[#F0E9E2] tabular-nums shrink-0">0:00</span>
+                    <audio id="voice-preview-audio" preload="metadata" class="hidden"></audio>
+                    <div class="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                        <button id="voice-preview-discard-btn" type="button" aria-label="Discard preview" title="Discard (Esc)" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#C7624F] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[18px]">delete</span>
+                        </button>
+                        <button id="voice-preview-rerecord-btn" type="button" aria-label="Re-record voice message" title="Re-record" class="w-8 h-8 sm:w-auto sm:px-2.5 rounded-lg flex items-center justify-center gap-1 text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer">
+                            <span class="material-symbols-outlined text-[17px]">mic</span>
+                            <span class="hidden sm:inline">Re-record</span>
+                        </button>
+                        <button id="voice-preview-send-btn" type="button" aria-label="Send voice message" title="Send Voice Message" class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs shrink-0 cursor-pointer">
+                            <svg class="w-4 h-4 translate-x-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14 5l7 7m0 0l-7 7m7-7H3" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"></path></svg>
+                        </button>
+                    </div>
+                </div>
+                <div class="text-center text-[10px] text-[#6E6560] dark:text-[#C9C0B9] font-medium">
+                    <span>Max 20 min • Press <kbd class="px-1.5 py-0.5 bg-[#F0E9DF] dark:bg-[#45423E] rounded border border-[#E3DCD7] dark:border-[#514D48]">Esc</kbd> to discard</span>
+                </div>
+            </div>
         </div>
     </div>
 

@@ -569,6 +569,33 @@ public sealed class ConversationPersistence : IConversationPersistence
         return rows.Count > 0 ? new UserId(rows[0]) : null;
     }
 
+    public async Task<bool> AreAuthorizedDirectPeersAsync(
+        ConversationId conversationId,
+        UserId userA,
+        UserId userB,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(conversationId);
+        ArgumentNullException.ThrowIfNull(userA);
+        ArgumentNullException.ThrowIfNull(userB);
+
+        if (userA == userB)
+        {
+            return false;
+        }
+
+        return await _db.Conversations
+            .AsNoTracking()
+            .AnyAsync(c =>
+                c.Id == conversationId
+                && ((c.Participant1Id == userA && c.Participant2Id == userB)
+                    || (c.Participant1Id == userB && c.Participant2Id == userA))
+                && !_db.UserBlocks.Any(b =>
+                    (b.BlockerId == userA && b.BlockedUserId == userB)
+                    || (b.BlockerId == userB && b.BlockedUserId == userA)),
+                ct);
+    }
+
     private sealed record UnreadCountRequestJson(
         Guid ConversationId,
         long? LastReadMessageId,

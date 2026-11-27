@@ -30,4 +30,5 @@ public interface IConversationPersistence
     Task<bool> AdvanceReadWatermarkAsync(ConversationId conversationId, UserId userId, MessageId messageId, DateTimeOffset msgCreatedAtUtc, CancellationToken ct = default);
     Task<IReadOnlyList<UserId>> GetPeerUserIdsWithExistingConversationAsync(UserId userId, CancellationToken ct = default);
     Task<UserId?> GetVerifiedTypingRecipientAsync(UserId senderId, ConversationId conversationId, CancellationToken ct = default);
+    Task<bool> AreAuthorizedDirectPeersAsync(ConversationId conversationId, UserId userA, UserId userB, CancellationToken ct = default);
 }

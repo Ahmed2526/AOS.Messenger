@@ -11,9 +11,11 @@
 const MEDIA_DRAG_SELECTORS = [
     'img',
     'video',
+    'audio',
     '[data-media-img]',
     '[data-sticker-img]',
     '[data-avatar-img]',
+    '[data-voice-player]',
     '[data-lightbox-trigger]',
     '[data-sticker-info-trigger]',
     '[data-media-download]',
@@ -159,6 +161,7 @@ export function collectRenderedMediaUrls(documentRef, origin = '') {
 
     addFromElements(documentRef.querySelectorAll('img'));
     addFromElements(documentRef.querySelectorAll('video'));
+    addFromElements(documentRef.querySelectorAll('audio'));
     return urls;
 }
 

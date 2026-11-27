@@ -14,6 +14,8 @@ public interface IChatClient
 
     Task ReceiveReceiptUpdated(ReceiptUpdateDto receipt);
     Task ReceiveTypingIndicator(TypingIndicatorDto typing);
+    Task ReceiveRecordingIndicator(RecordingIndicatorDto recording);
+    Task ReceiveVoicePlayed(VoicePlayedDto played);
     Task ReceivePresenceChanged(UserPresenceDto presence);
     Task ReceiveMessageEdited(MessageEditedDto message);
     Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message);

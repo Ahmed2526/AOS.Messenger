@@ -99,7 +99,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
      * @param {string} nextId
      * @param {{ pushUrl?: boolean, force?: boolean }} [options]
      */
-    async function switchConversation(nextId, { pushUrl = true, force = false } = {}) {
+    async function switchConversation(nextId, { pushUrl = true, force = false, skipConfirm = false } = {}) {
         if (!nextId) return;
 
         const normNext = String(nextId).trim().toLowerCase();
@@ -110,6 +110,13 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
         if (!force && (normNext === normActive || normNext === normPending)) {
             return;
+        }
+
+        if (!force && !skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const allowed = await hooks.confirmBeforeSwitch(nextId);
+            if (!allowed) {
+                return false;
+            }
         }
 
         const previousId = state.activeConversationId;
@@ -221,7 +228,13 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
      * Transitions the shell back to the empty / sidebar state (e.g. /chat or mobile back button).
      * @param {{ pushUrl?: boolean }} [options]
      */
-    function switchToEmptyState({ pushUrl = true } = {}) {
+    async function switchToEmptyState({ pushUrl = true, skipConfirm = false } = {}) {
+        if (!skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const allowed = await hooks.confirmBeforeSwitch(null);
+            if (!allowed) {
+                return false;
+            }
+        }
         const previousId = state.activeConversationId;
         if (previousId && typeof hooks.getDraftText === 'function') {
             const draftText = hooks.getDraftText();
@@ -434,15 +447,27 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
         };
 
-        onPopState = (e) => {
+        onPopState = async (e) => {
             const fromState = e.state && e.state.conversationId ? String(e.state.conversationId) : null;
             const fromPath = typeof window !== 'undefined' ? parseConversationIdFromPath(window.location.pathname) : null;
             const targetId = fromState || fromPath;
 
+            if (typeof hooks.confirmBeforeSwitch === 'function') {
+                const allowed = await hooks.confirmBeforeSwitch(targetId);
+                if (!allowed) {
+                    if (typeof history !== 'undefined' && typeof history.pushState === 'function') {
+                        const rollbackId = state.activeConversationId ?? null;
+                        const rollbackUrl = rollbackId ? `/chat/${encodeURIComponent(String(rollbackId))}` : '/chat';
+                        history.pushState({ conversationId: rollbackId }, '', rollbackUrl);
+                    }
+                    return;
+                }
+            }
+
             if (targetId) {
-                switchConversation(targetId, { pushUrl: false });
+                switchConversation(targetId, { pushUrl: false, skipConfirm: true });
             } else {
-                switchToEmptyState({ pushUrl: false });
+                switchToEmptyState({ pushUrl: false, skipConfirm: true });
             }
         };
 

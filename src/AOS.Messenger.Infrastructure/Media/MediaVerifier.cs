@@ -16,11 +16,16 @@ namespace AOS.Messenger.Infrastructure.Storage;
 
 /// <summary>
 /// Performs decompression-bomb-safe image decoding/re-encoding (stripping EXIF/XMP/IPTC/text/comments
-/// and normalizing orientation via <c>Magick.NET</c>) plus bounded 4 KB magic-byte inspection for videos and documents.
+/// and normalizing orientation via <c>Magick.NET</c>) plus bounded magic-byte and metadata-container inspection
+/// for videos, documents, and voice messages.
 /// </summary>
 public sealed class MediaVerifier : IMediaVerifier, IDisposable
 {
     private const int HeaderInspectBytes = 4096;
+    private const int MaxContainerRangeReads = 16;
+    private const int MaxContainerMetadataBytes = 256 * 1024;
+    private const int MaxContainerBoxesVisited = 128;
+    private const int MaxContainerDepth = 6;
 
     private static readonly HashSet<string> RejectedMp4Brands = new(StringComparer.Ordinal)
     {
@@ -36,6 +41,23 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
     {
         "ftyp", "moov", "mdat", "wide", "free", "skip", "pnot"
     };
+
+    private static readonly HashSet<string> AllowedVoiceMp4Brands = new(StringComparer.Ordinal)
+    {
+        "M4A ", "M4B ", "mp42", "isom", "iso2", "iso5", "iso6", "mp41", "dash", "qt  "
+    };
+
+    private static readonly HashSet<string> RejectedImageIsoBmffBrands = new(StringComparer.Ordinal)
+    {
+        "heic", "heix", "hevc", "hevx", "mif1", "msf1", "avif", "avis"
+    };
+
+    private static readonly byte[] OggSignature = [0x4F, 0x67, 0x67, 0x53];
+    private const uint WebmSegmentElementIdValue = 0x18538067u;
+    private const uint WebmTracksElementIdValue = 0x1654AE6Bu;
+    private const uint WebmClusterElementIdValue = 0x1F43B675u;
+    private const uint WebmTrackEntryElementIdValue = 0xAEu;
+    private const uint WebmTrackTypeElementIdValue = 0x83u;
 
     private static readonly string[] ActiveHtmlXmlPrefixes =
     [
@@ -99,8 +121,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         ArgumentNullException.ThrowIfNull(media);
         ArgumentNullException.ThrowIfNull(stagingMetadata);
 
-        var (expectedKind, canonicalMime, maxSizeBytes) =
-            MediaConstraints.ResolveAllowedMedia(media.SanitizedFileName, media.DeclaredContentType);
+        var (expectedKind, canonicalMime, maxSizeBytes) = media.Kind == MediaKind.Voice
+            ? MediaConstraints.ResolveAllowedVoiceMedia(media.SanitizedFileName, media.DeclaredContentType)
+            : MediaConstraints.ResolveAllowedMedia(media.SanitizedFileName, media.DeclaredContentType);
 
         if (expectedKind != media.Kind)
         {
@@ -118,6 +141,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             MediaKind.Image => await VerifyAndSanitizeImageAsync(media, stagingMetadata, canonicalMime, ct),
             MediaKind.Video => await VerifyVideoHeaderAsync(media, stagingMetadata, canonicalMime, ct),
             MediaKind.Document => await VerifyDocumentHeaderAsync(media, stagingMetadata, canonicalMime, ct),
+            MediaKind.Voice => await VerifyVoiceHeaderAsync(media, stagingMetadata, canonicalMime, ct),
             _ => throw new DomainException($"Unsupported media kind '{media.Kind}'.")
         };
     }
@@ -644,6 +668,58 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         return new VerifiedMediaResult(canonicalMime, stagingMetadata.ContentLength);
     }
 
+    private async Task<VerifiedMediaResult> VerifyVoiceHeaderAsync(
+        Media media,
+        MediaObjectMetadata stagingMetadata,
+        string canonicalMime,
+        CancellationToken ct)
+    {
+        var header = await _storage.ReadByteRangeAsync(
+            media.ObjectKey,
+            0,
+            HeaderInspectBytes,
+            stagingMetadata.ETag,
+            ct);
+
+        if (header.Length == 0)
+        {
+            throw new DomainException("Uploaded voice recording is empty.");
+        }
+
+        switch (canonicalMime)
+        {
+            case "audio/mp4":
+                var mp4Reader = new BoundedStorageReader(
+                    _storage,
+                    media.ObjectKey,
+                    stagingMetadata.ContentLength,
+                    stagingMetadata.ETag,
+                    header);
+                await ValidateVoiceMp4Async(mp4Reader, ct);
+                break;
+
+            case "audio/webm":
+                var segmentStartOffset = ValidateWebmHeader(header, stagingMetadata.ContentLength);
+                var webmReader = new BoundedStorageReader(
+                    _storage,
+                    media.ObjectKey,
+                    stagingMetadata.ContentLength,
+                    stagingMetadata.ETag,
+                    header);
+                await ValidateWebmAudioTracksAsync(webmReader, segmentStartOffset, ct);
+                break;
+
+            case "audio/ogg":
+                ValidateOggAudioHeader(header);
+                break;
+
+            default:
+                throw new DomainException($"Unsupported voice media type '{canonicalMime}'.");
+        }
+
+        return new VerifiedMediaResult(canonicalMime, stagingMetadata.ContentLength, durationMs: media.DurationMs);
+    }
+
     private async Task<VerifiedMediaResult> VerifyDocumentHeaderAsync(
         Media media,
         MediaObjectMetadata stagingMetadata,
@@ -759,6 +835,646 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         }
     }
 
+    private static async Task ValidateVoiceMp4Async(BoundedStorageReader reader, CancellationToken ct)
+    {
+        var counter = new BoxCounter(1);
+        var ftyp = await TryReadIsoBmffBoxHeaderAsync(
+            reader,
+            offset: 0,
+            limitEnd: reader.TotalLength,
+            allowZeroSizeToEnd: false,
+            ct);
+
+        if (ftyp is null || !string.Equals(ftyp.Value.BoxType, "ftyp", StringComparison.Ordinal))
+        {
+            throw new DomainException("MP4 audio file must begin with an ISO BMFF 'ftyp' box.");
+        }
+
+        var ftypHeader = ftyp.Value;
+        if (ftypHeader.PayloadLength < 4 || ftypHeader.EndOffset > reader.TotalLength)
+        {
+            throw new DomainException("Invalid MP4 audio 'ftyp' box size.");
+        }
+
+        var brandBytes = new byte[4];
+        if (!await reader.ReadExactAsync(ftypHeader.PayloadOffset, brandBytes, ct) || !IsPrintableAscii(brandBytes))
+        {
+            throw new DomainException("Invalid MP4 audio major brand identifier.");
+        }
+
+        var majorBrand = Encoding.ASCII.GetString(brandBytes);
+        if (RejectedImageIsoBmffBrands.Contains(majorBrand) || !AllowedVoiceMp4Brands.Contains(majorBrand))
+        {
+            throw new DomainException($"Media container brand '{majorBrand}' is not permitted for voice audio.");
+        }
+
+        var offset = ftypHeader.EndOffset;
+        var foundMoov = false;
+        var hasAudioHandler = false;
+
+        while (offset < reader.TotalLength)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("MP4 audio container exceeds maximum inspectable box count.");
+            }
+
+            var box = await TryReadIsoBmffBoxHeaderAsync(
+                reader,
+                offset,
+                limitEnd: reader.TotalLength,
+                allowZeroSizeToEnd: true,
+                ct) ?? throw new DomainException("Invalid MP4 audio container box structure.");
+
+            if (string.Equals(box.BoxType, "moov", StringComparison.Ordinal))
+            {
+                foundMoov = true;
+                hasAudioHandler |= await ScanIsoBmffContainerForVoiceAsync(
+                    reader,
+                    box.PayloadOffset,
+                    box.EndOffset,
+                    depth: 1,
+                    inMdia: false,
+                    counter,
+                    ct);
+            }
+
+            if (box.EndOffset <= offset)
+            {
+                throw new DomainException("Invalid MP4 audio container box progression.");
+            }
+
+            offset = box.EndOffset;
+        }
+
+        if (!foundMoov || !hasAudioHandler)
+        {
+            throw new DomainException("MP4 voice recording must contain an audio track.");
+        }
+    }
+
+    private sealed class BoxCounter(int initial)
+    {
+        public int Count { get; set; } = initial;
+    }
+
+    private readonly record struct IsoBmffBoxHeader(
+        string BoxType,
+        long PayloadOffset,
+        long EndOffset)
+    {
+        public long PayloadLength => EndOffset - PayloadOffset;
+    }
+
+    private static async Task<bool> ScanIsoBmffContainerForVoiceAsync(
+        BoundedStorageReader reader,
+        long startOffset,
+        long endOffset,
+        int depth,
+        bool inMdia,
+        BoxCounter counter,
+        CancellationToken ct)
+    {
+        if (depth > MaxContainerDepth)
+        {
+            throw new DomainException("MP4 container nesting exceeds maximum allowed depth.");
+        }
+
+        var hasAudioHandler = false;
+        var offset = startOffset;
+
+        while (offset < endOffset)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("MP4 container exceeds maximum inspectable box count.");
+            }
+
+            var box = await TryReadIsoBmffBoxHeaderAsync(
+                reader,
+                offset,
+                endOffset,
+                allowZeroSizeToEnd: false,
+                ct) ?? throw new DomainException("Invalid MP4 audio container box structure.");
+
+            if (string.Equals(box.BoxType, "hdlr", StringComparison.Ordinal))
+            {
+                // FullBox (4 bytes version/flags) + pre_defined (4 bytes) + handler_type (4 bytes)
+                if (box.PayloadLength >= 12)
+                {
+                    var handlerHeader = new byte[12];
+                    if (!await reader.ReadExactAsync(box.PayloadOffset, handlerHeader, ct))
+                    {
+                        throw new DomainException("Truncated MP4 handler box.");
+                    }
+
+                    var handlerType = handlerHeader.AsSpan(8, 4);
+                    if (handlerType.SequenceEqual("vide"u8) ||
+                        handlerType.SequenceEqual("pict"u8) ||
+                        handlerType.SequenceEqual("auxv"u8))
+                    {
+                        throw new DomainException("Video tracks are not permitted in voice recordings.");
+                    }
+
+                    if (inMdia && handlerType.SequenceEqual("soun"u8))
+                    {
+                        hasAudioHandler = true;
+                    }
+                }
+            }
+            else if (box.BoxType is "moov" or "trak" or "mdia")
+            {
+                if (box.EndOffset > box.PayloadOffset)
+                {
+                    hasAudioHandler |= await ScanIsoBmffContainerForVoiceAsync(
+                        reader,
+                        box.PayloadOffset,
+                        box.EndOffset,
+                        depth + 1,
+                        inMdia || string.Equals(box.BoxType, "mdia", StringComparison.Ordinal),
+                        counter,
+                        ct);
+                }
+            }
+
+            if (box.EndOffset <= offset)
+            {
+                throw new DomainException("Invalid MP4 audio container box progression.");
+            }
+
+            offset = box.EndOffset;
+        }
+
+        return hasAudioHandler;
+    }
+
+    private static async Task<IsoBmffBoxHeader?> TryReadIsoBmffBoxHeaderAsync(
+        BoundedStorageReader reader,
+        long offset,
+        long limitEnd,
+        bool allowZeroSizeToEnd,
+        CancellationToken ct)
+    {
+        if (offset < 0 || limitEnd - offset < 8)
+        {
+            return null;
+        }
+
+        var head8 = new byte[8];
+        if (!await reader.ReadExactAsync(offset, head8, ct))
+        {
+            return null;
+        }
+
+        var rawSize = BinaryPrimitives.ReadUInt32BigEndian(head8.AsSpan(0, 4));
+        var typeSpan = head8.AsSpan(4, 4);
+        if (!IsPrintableAscii(typeSpan))
+        {
+            return null;
+        }
+
+        var boxType = Encoding.ASCII.GetString(typeSpan);
+        if (rawSize == 0)
+        {
+            if (!allowZeroSizeToEnd)
+            {
+                return null;
+            }
+
+            return new IsoBmffBoxHeader(boxType, offset + 8, limitEnd);
+        }
+
+        long payloadOffset;
+        long boxSize;
+        if (rawSize == 1)
+        {
+            if (limitEnd - offset < 16)
+            {
+                return null;
+            }
+
+            var ext8 = new byte[8];
+            if (!await reader.ReadExactAsync(offset + 8, ext8, ct))
+            {
+                return null;
+            }
+
+            var extendedSize = BinaryPrimitives.ReadUInt64BigEndian(ext8);
+            if (extendedSize < 16 || extendedSize > (ulong)(limitEnd - offset))
+            {
+                return null;
+            }
+
+            payloadOffset = offset + 16;
+            boxSize = (long)extendedSize;
+        }
+        else
+        {
+            if (rawSize < 8 || (long)rawSize > limitEnd - offset)
+            {
+                return null;
+            }
+
+            payloadOffset = offset + 8;
+            boxSize = rawSize;
+        }
+
+        return new IsoBmffBoxHeader(boxType, payloadOffset, offset + boxSize);
+    }
+
+    private static async Task ValidateWebmAudioTracksAsync(
+        BoundedStorageReader reader,
+        long segmentSearchStartOffset,
+        CancellationToken ct)
+    {
+        var counter = new BoxCounter(0);
+        var pos = segmentSearchStartOffset;
+        var foundTracks = false;
+        var hasAudioTrack = false;
+
+        while (pos < reader.TotalLength)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("WebM container exceeds maximum inspectable element count.");
+            }
+
+            var element = await TryReadEbmlElementHeaderAsync(reader, pos, reader.TotalLength, ct)
+                ?? throw new DomainException("Invalid WebM EBML container structure.");
+
+            if (element.ElementId == WebmSegmentElementIdValue)
+            {
+                var segmentEnd = element.IsUnknownSize
+                    ? reader.TotalLength
+                    : element.EndOffset;
+                (foundTracks, hasAudioTrack) = await ScanWebmSegmentForVoiceAsync(
+                    reader,
+                    element.PayloadOffset,
+                    segmentEnd,
+                    counter,
+                    ct);
+                break;
+            }
+
+            if (element.IsUnknownSize || element.EndOffset <= pos)
+            {
+                throw new DomainException("WebM container has invalid top-level element sizing.");
+            }
+
+            pos = element.EndOffset;
+        }
+
+        if (!foundTracks || !hasAudioTrack)
+        {
+            throw new DomainException("WebM voice recording must contain an audio track.");
+        }
+    }
+
+    private static async Task<(bool FoundTracks, bool HasAudioTrack)> ScanWebmSegmentForVoiceAsync(
+        BoundedStorageReader reader,
+        long startOffset,
+        long endOffset,
+        BoxCounter counter,
+        CancellationToken ct)
+    {
+        var pos = startOffset;
+        var foundTracks = false;
+        var hasAudioTrack = false;
+
+        while (pos < endOffset)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("WebM segment exceeds maximum inspectable element count.");
+            }
+
+            var element = await TryReadEbmlElementHeaderAsync(reader, pos, endOffset, ct)
+                ?? throw new DomainException("Invalid WebM segment element framing.");
+
+            if (element.ElementId == WebmClusterElementIdValue)
+            {
+                break;
+            }
+
+            if (element.ElementId == WebmTracksElementIdValue)
+            {
+                if (element.IsUnknownSize || element.PayloadLength == 0)
+                {
+                    throw new DomainException("WebM voice recording has invalid Tracks section.");
+                }
+
+                foundTracks = true;
+                hasAudioTrack |= await ScanWebmTracksElementAsync(
+                    reader,
+                    element.PayloadOffset,
+                    element.EndOffset,
+                    depth: 2,
+                    counter,
+                    ct);
+            }
+
+            if (element.IsUnknownSize || element.EndOffset <= pos)
+            {
+                throw new DomainException("WebM segment contains an invalid unknown-size metadata element.");
+            }
+
+            pos = element.EndOffset;
+        }
+
+        return (foundTracks, hasAudioTrack);
+    }
+
+    private static async Task<bool> ScanWebmTracksElementAsync(
+        BoundedStorageReader reader,
+        long startOffset,
+        long endOffset,
+        int depth,
+        BoxCounter counter,
+        CancellationToken ct)
+    {
+        if (depth > MaxContainerDepth)
+        {
+            throw new DomainException("WebM Tracks nesting exceeds maximum allowed depth.");
+        }
+
+        var hasAudioTrack = false;
+        var pos = startOffset;
+
+        while (pos < endOffset)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("WebM Tracks exceeds maximum inspectable element count.");
+            }
+
+            var element = await TryReadEbmlElementHeaderAsync(reader, pos, endOffset, ct)
+                ?? throw new DomainException("Invalid WebM Tracks framing.");
+
+            if (element.IsUnknownSize || element.EndOffset <= pos)
+            {
+                throw new DomainException("Invalid WebM TrackEntry sizing.");
+            }
+
+            if (element.ElementId == WebmTrackEntryElementIdValue)
+            {
+                hasAudioTrack |= await ScanWebmTracksElementAsync(
+                    reader,
+                    element.PayloadOffset,
+                    element.EndOffset,
+                    depth + 1,
+                    counter,
+                    ct);
+            }
+            else if (element.ElementId == WebmTrackTypeElementIdValue && element.PayloadLength is >= 1 and <= 8)
+            {
+                var typeBytes = new byte[(int)element.PayloadLength];
+                if (!await reader.ReadExactAsync(element.PayloadOffset, typeBytes, ct))
+                {
+                    throw new DomainException("Truncated WebM TrackType element.");
+                }
+
+                ulong trackType = 0;
+                foreach (var b in typeBytes)
+                {
+                    trackType = (trackType << 8) | b;
+                }
+
+                if (trackType == 1)
+                {
+                    throw new DomainException("Video tracks are not permitted in WebM voice recordings.");
+                }
+
+                if (trackType == 2)
+                {
+                    hasAudioTrack = true;
+                }
+            }
+
+            pos = element.EndOffset;
+        }
+
+        return hasAudioTrack;
+    }
+
+    private readonly record struct EbmlElementHeader(
+        uint ElementId,
+        long PayloadOffset,
+        long EndOffset,
+        bool IsUnknownSize)
+    {
+        public long PayloadLength => EndOffset - PayloadOffset;
+    }
+
+    private static async Task<EbmlElementHeader?> TryReadEbmlElementHeaderAsync(
+        BoundedStorageReader reader,
+        long offset,
+        long limitEnd,
+        CancellationToken ct)
+    {
+        if (offset < 0 || offset >= limitEnd)
+        {
+            return null;
+        }
+
+        var probeLen = (int)Math.Min(12, limitEnd - offset);
+        var probe = new byte[probeLen];
+        var read = await reader.ReadAsync(offset, probe, ct);
+        if (read < 2)
+        {
+            return null;
+        }
+
+        var span = probe.AsSpan(0, read);
+        var pos = 0;
+        if (!TryReadEbmlElementId(span, ref pos, out var idStart, out var idLen) ||
+            !TryReadEbmlVintSizeOrUnknown(span, ref pos, out var elementSize, out var isUnknownSize))
+        {
+            return null;
+        }
+
+        uint elementId = 0;
+        for (var i = 0; i < idLen; i++)
+        {
+            elementId = (elementId << 8) | span[idStart + i];
+        }
+
+        var payloadOffset = offset + pos;
+        if (isUnknownSize)
+        {
+            return new EbmlElementHeader(elementId, payloadOffset, limitEnd, IsUnknownSize: true);
+        }
+
+        if (elementSize > (ulong)(limitEnd - payloadOffset))
+        {
+            return null;
+        }
+
+        return new EbmlElementHeader(elementId, payloadOffset, payloadOffset + (long)elementSize, IsUnknownSize: false);
+    }
+
+    private sealed class BoundedStorageReader
+    {
+        private readonly IMediaStorage _storage;
+        private readonly string _objectKey;
+        private readonly string? _ifMatchETag;
+        private readonly Dictionary<long, byte[]> _pages = [];
+        private int _rangeReads;
+        private int _totalBytesRead;
+
+        public long TotalLength { get; }
+
+        public BoundedStorageReader(
+            IMediaStorage storage,
+            string objectKey,
+            long totalLength,
+            string? ifMatchETag,
+            byte[] initialZeroOffsetPage)
+        {
+            _storage = storage;
+            _objectKey = objectKey;
+            TotalLength = totalLength;
+            _ifMatchETag = ifMatchETag;
+            _pages[0] = initialZeroOffsetPage;
+            _rangeReads = 1;
+            _totalBytesRead = initialZeroOffsetPage.Length;
+        }
+
+        public async Task<bool> ReadExactAsync(long offset, Memory<byte> destination, CancellationToken ct) =>
+            await ReadAsync(offset, destination, ct) == destination.Length;
+
+        public async Task<int> ReadAsync(long offset, Memory<byte> destination, CancellationToken ct)
+        {
+            if (offset < 0 || offset >= TotalLength || destination.IsEmpty)
+            {
+                return 0;
+            }
+
+            var want = (int)Math.Min(destination.Length, TotalLength - offset);
+            var copied = 0;
+
+            while (copied < want)
+            {
+                var currentOffset = offset + copied;
+                var pageStart = (currentOffset / HeaderInspectBytes) * HeaderInspectBytes;
+
+                if (!_pages.TryGetValue(pageStart, out var page))
+                {
+                    if (_rangeReads >= MaxContainerRangeReads)
+                    {
+                        throw new DomainException("Media container metadata exceeds maximum inspectable read budget.");
+                    }
+
+                    var pageLen = (int)Math.Min(HeaderInspectBytes, TotalLength - pageStart);
+                    if (_totalBytesRead + pageLen > MaxContainerMetadataBytes)
+                    {
+                        throw new DomainException("Media container metadata exceeds maximum inspectable byte budget.");
+                    }
+
+                    page = await _storage.ReadByteRangeAsync(_objectKey, pageStart, pageLen, _ifMatchETag, ct);
+                    _rangeReads++;
+                    _totalBytesRead += page.Length;
+
+                    if (page.Length == 0)
+                    {
+                        throw new DomainException("Media container metadata read encountered unexpected end of stream.");
+                    }
+
+                    _pages[pageStart] = page;
+                }
+
+                var inPageOffset = (int)(currentOffset - pageStart);
+                if (inPageOffset >= page.Length)
+                {
+                    break;
+                }
+
+                var take = Math.Min(want - copied, page.Length - inPageOffset);
+                page.AsSpan(inPageOffset, take).CopyTo(destination.Span.Slice(copied, take));
+                copied += take;
+            }
+
+            return copied;
+        }
+    }
+
+    private static bool TryReadEbmlVintSizeOrUnknown(
+        ReadOnlySpan<byte> buffer,
+        ref int pos,
+        out ulong value,
+        out bool isUnknownSize)
+    {
+        isUnknownSize = false;
+        if (pos >= buffer.Length)
+        {
+            value = 0;
+            return false;
+        }
+
+        var startPos = pos;
+        if (!TryReadEbmlVintSize(buffer, ref pos, out value))
+        {
+            return false;
+        }
+
+        var width = pos - startPos;
+        var unknownSentinel = width < 8 ? ((1UL << (width * 7)) - 1UL) : 0x00FF_FFFF_FFFF_FFFFUL;
+        if (value == unknownSentinel)
+        {
+            isUnknownSize = true;
+        }
+
+        return true;
+    }
+
+    private static void ValidateOggAudioHeader(ReadOnlySpan<byte> header)
+    {
+        if (header.Length < 29 || !header.StartsWith(OggSignature))
+        {
+            throw new DomainException("Invalid Ogg container signature.");
+        }
+
+        // Ogg stream_structure_version must be 0x00 and first page must set BOS flag (0x02)
+        if (header[4] != 0x00 || (header[5] & 0x02) == 0)
+        {
+            throw new DomainException("Ogg voice recording must start with a valid Beginning-of-Stream page.");
+        }
+
+        var pageSegments = header[26];
+        var headerTableEnd = 27 + pageSegments;
+        if (pageSegments < 1 || headerTableEnd > header.Length)
+        {
+            throw new DomainException("Invalid Ogg page segment table.");
+        }
+
+        var firstPacketSize = 0;
+        for (var i = 0; i < pageSegments; i++)
+        {
+            var segLen = header[27 + i];
+            firstPacketSize += segLen;
+            if (segLen < 255)
+            {
+                break;
+            }
+        }
+
+        if (firstPacketSize < 7 || headerTableEnd + 7 > header.Length)
+        {
+            throw new DomainException("Ogg voice recording is missing an identification header packet.");
+        }
+
+        var packetInspectLen = Math.Min(firstPacketSize, header.Length - headerTableEnd);
+        var packetPrefix = header.Slice(headerTableEnd, packetInspectLen);
+        if (!packetPrefix.StartsWith("OpusHead"u8) && !packetPrefix.StartsWith("\x01vorbis"u8))
+        {
+            throw new DomainException("Ogg voice recording must contain an Opus or Vorbis audio stream.");
+        }
+    }
+
     private static void ValidateMovHeader(ReadOnlySpan<byte> header, long totalContentLength)
     {
         var offset = 0;
@@ -871,7 +1587,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         return true;
     }
 
-    private static void ValidateWebmHeader(ReadOnlySpan<byte> header)
+    private static long ValidateWebmHeader(ReadOnlySpan<byte> header, long? totalContentLength = null)
     {
         if (!header.StartsWith(WebmSignature))
         {
@@ -879,12 +1595,14 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         }
 
         var pos = 4;
-        if (!TryReadEbmlVintSize(header, ref pos, out var ebmlHeaderSize))
+        if (!TryReadEbmlVintSize(header, ref pos, out var ebmlHeaderSize) ||
+            (totalContentLength.HasValue && ebmlHeaderSize > (ulong)Math.Max(0, totalContentLength.Value - pos)))
         {
             throw new DomainException("Corrupt WebM EBML header size.");
         }
 
-        var boundedHeaderSize = (int)Math.Min(ebmlHeaderSize, (ulong)header.Length);
+        var headerEndOffset = checked(pos + (long)ebmlHeaderSize);
+        var boundedHeaderSize = (int)Math.Min(ebmlHeaderSize, (ulong)(header.Length - pos));
         var ebmlEnd = Math.Min(header.Length, pos + boundedHeaderSize);
         while (pos < ebmlEnd)
         {
@@ -906,7 +1624,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 var docType = Encoding.ASCII.GetString(header.Slice(pos, payloadLen)).TrimEnd('\0');
                 if (string.Equals(docType, "webm", StringComparison.Ordinal))
                 {
-                    return;
+                    return headerEndOffset;
                 }
 
                 throw new DomainException($"Unsupported EBML DocType '{docType}' for WebM video.");

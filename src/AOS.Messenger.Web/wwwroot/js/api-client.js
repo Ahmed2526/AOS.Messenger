@@ -354,6 +354,14 @@ export function getMediaDownloadUrl(conversationId, messageId, mediaId, { downlo
 }
 
 /**
+ * Records that the current recipient has started playing a voice message.
+ */
+export function markVoicePlayed(conversationId, messageId, mediaId, { signal } = {}) {
+    const url = `/api/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/media/${encodeURIComponent(mediaId)}/played`;
+    return apiFetch(url, { method: 'POST', signal });
+}
+
+/**
  * Builds the cookie-authenticated inline/download redirect endpoint URL for images.
  */
 export function buildMediaInlineUrl(conversationId, messageId, mediaId, { download = false, variant = null } = {}) {

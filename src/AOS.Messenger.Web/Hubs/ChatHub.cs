@@ -216,20 +216,7 @@ public sealed class ChatHub : Hub<IChatClient>
 
     public async Task SendTypingIndicator(Guid conversationId, bool isTyping)
     {
-        var userId = _currentUser.Id;
-        if (userId is null && Context.User is not null)
-        {
-            var idClaim = Context.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
-            if (!string.IsNullOrEmpty(idClaim) && UserId.TryParse(idClaim, out var parsedId))
-            {
-                userId = parsedId;
-            }
-        }
-
-        if (userId is null)
-        {
-            throw new HubException("User is not authenticated.");
-        }
+        var userId = ResolveAuthenticatedUserId();
 
         if (_typingService is not null && _realtimeNotifier is not null)
         {
@@ -244,7 +231,24 @@ public sealed class ChatHub : Hub<IChatClient>
         }
     }
 
-    public async Task JoinConversation(Guid conversationId)
+    public async Task SendRecordingIndicator(Guid conversationId, bool isRecording)
+    {
+        var userId = ResolveAuthenticatedUserId();
+
+        if (_typingService is not null && _realtimeNotifier is not null)
+        {
+            var recipient = await _typingService.ValidateAndGetTypingRecipientAsync(userId, conversationId, Context.ConnectionAborted);
+            if (recipient is not null)
+            {
+                await _realtimeNotifier.NotifyRecordingAsync(
+                    recipient,
+                    new RecordingIndicatorDto(conversationId, userId.Value, isRecording),
+                    Context.ConnectionAborted);
+            }
+        }
+    }
+
+    private UserId ResolveAuthenticatedUserId()
     {
         var userId = _currentUser.Id;
         if (userId is null && Context.User is not null)
@@ -256,10 +260,12 @@ public sealed class ChatHub : Hub<IChatClient>
             }
         }
 
-        if (userId is null)
-        {
-            throw new HubException("User is not authenticated.");
-        }
+        return userId ?? throw new HubException("User is not authenticated.");
+    }
+
+    public async Task JoinConversation(Guid conversationId)
+    {
+        var userId = ResolveAuthenticatedUserId();
 
         try
         {

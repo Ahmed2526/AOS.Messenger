@@ -81,6 +81,11 @@ public sealed class StickerPersistence : IStickerPersistence
                 throw new DomainException($"You can create at most {maxCustomPacksPerUser} custom sticker packs.");
             }
 
+            var maxSortOrder = await _db.StickerPacks
+                .Where(p => !p.IsSystemPack && p.OwnerUserId == ownerId && !p.IsDeleted)
+                .MaxAsync(p => (int?)p.SortOrder, ct);
+            pack.SetSortOrder((maxSortOrder ?? 0) + 1);
+
             _db.StickerPacks.Add(pack);
             await _db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
@@ -123,6 +128,9 @@ public sealed class StickerPersistence : IStickerPersistence
             _db.ChangeTracker.Clear();
             await using var tx = await _db.Database.BeginTransactionAsync(ct);
 
+            await AcquireAppLockOrThrowAsync($"sticker-pack:{ownerUserId.Value:N}", tx, ct);
+            await AcquireAppLockOrThrowAsync($"media-quota:{ownerUserId.Value:N}", tx, ct);
+
             var pack = await _db.StickerPacks.FirstOrDefaultAsync(p => p.Id == packId, ct);
             if (pack is null || pack.IsDeleted)
             {
@@ -145,14 +153,6 @@ public sealed class StickerPersistence : IStickerPersistence
             }
 
             await _db.Stickers
-                .Where(s => s.PackId == packId && s.UploaderId == ownerUserId && s.State == StickerState.Ready)
-                .ExecuteUpdateAsync(
-                    s => s
-                        .SetProperty(st => st.State, StickerState.Archived)
-                        .SetProperty(st => st.DeletedAtUtc, nowUtc),
-                    ct);
-
-            await _db.Stickers
                 .Where(s => s.PackId == packId && s.UploaderId == ownerUserId && s.State == StickerState.Pending)
                 .ExecuteUpdateAsync(
                     s => s
@@ -165,12 +165,12 @@ public sealed class StickerPersistence : IStickerPersistence
                 .Where(s => s.PackId == packId && s.UploaderId == ownerUserId)
                 .Select(s => s.Id);
 
-            await _db.UserFavoriteStickers
-                .Where(f => packStickerIds.Contains(f.StickerId))
-                .ExecuteDeleteAsync(ct);
-
+            // Preserve all users' starred favorites and recipient recents per Option A (foundbugs.md Issue 3);
+            // remove only the pack owner's un-starred recents from the deleted pack.
             await _db.UserRecentStickers
-                .Where(r => packStickerIds.Contains(r.StickerId))
+                .Where(r => r.UserId == ownerUserId
+                            && packStickerIds.Contains(r.StickerId)
+                            && !_db.UserFavoriteStickers.Any(f => f.UserId == ownerUserId && f.StickerId == r.StickerId))
                 .ExecuteDeleteAsync(ct);
 
             await tx.CommitAsync(ct);
@@ -284,9 +284,14 @@ public sealed class StickerPersistence : IStickerPersistence
                 throw new DomainException($"A custom sticker pack can contain at most {maxStickersPerPack} stickers.");
             }
 
-            var totalCustomStickers = await _db.Stickers.CountAsync(
-                s => s.UploaderId == uploaderId && (s.State == StickerState.Ready || s.State == StickerState.Pending),
-                ct);
+            var totalCustomStickers = await (
+                from s in _db.Stickers
+                join p in _db.StickerPacks on s.PackId equals p.Id
+                where s.UploaderId == uploaderId
+                      && !p.IsDeleted
+                      && (s.State == StickerState.Ready || s.State == StickerState.Pending)
+                select s.Id
+            ).CountAsync(ct);
             if (totalCustomStickers >= maxTotalCustomStickersPerUser)
             {
                 await tx.RollbackAsync(ct);
@@ -307,54 +312,32 @@ public sealed class StickerPersistence : IStickerPersistence
                     $"You have reached the maximum of {maxConcurrentPending} concurrent pending uploads.");
             }
 
-            var mediaUsedBytes = await _db.Media
-                .Where(m => m.UploaderId == uploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => m.State == MediaState.Failed
-                    ? (long?)(m.VerifiedSizeBytes ?? 0L)
-                    : (long?)(m.VerifiedSizeBytes ?? m.DeclaredSizeBytes), ct) ?? 0L;
+            var (totalUsedBytes, totalInitiatedBytes) = await QuotaAccountingQueries.GetDailyQuotaUsageAsync(
+                _db,
+                uploaderId,
+                dailyQuotaWindowStartUtc,
+                ct);
 
-            var avatarUsedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == uploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => p.State == MediaState.Failed
-                    ? (long?)(p.VerifiedSizeBytes ?? 0L)
-                    : (long?)(p.VerifiedSizeBytes ?? p.DeclaredSizeBytes), ct) ?? 0L;
-
-            var stickerUsedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == uploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => s.State == StickerState.Failed
-                    ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : s.State == StickerState.Ready || s.State == StickerState.Archived
-                        ? (long?)s.DeclaredSizeBytes
-                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
-
-            var totalUsedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
             if (sticker.DeclaredSizeBytes > dailyQuotaBytes - totalUsedBytes)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
             }
 
-            var mediaInitiatedBytes = await _db.Media
-                .Where(m => m.UploaderId == uploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => (long?)m.DeclaredSizeBytes, ct) ?? 0L;
-
-            var avatarInitiatedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == uploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => (long?)p.DeclaredSizeBytes, ct) ?? 0L;
-
-            var stickerInitiatedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == uploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => (long?)s.DeclaredSizeBytes, ct) ?? 0L;
-
             var maxInitiatedBytes = dailyQuotaBytes <= long.MaxValue / 2
                 ? dailyQuotaBytes * 2
                 : long.MaxValue;
 
-            if (sticker.DeclaredSizeBytes > maxInitiatedBytes - (mediaInitiatedBytes + avatarInitiatedBytes + stickerInitiatedBytes))
+            if (sticker.DeclaredSizeBytes > maxInitiatedBytes - totalInitiatedBytes)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
             }
+
+            var maxDisplayOrder = await _db.Stickers
+                .Where(s => s.PackId == sticker.PackId)
+                .MaxAsync(s => (int?)s.DisplayOrder, ct);
+            sticker.SetDisplayOrder((maxDisplayOrder ?? 0) + 1);
 
             _db.Stickers.Add(sticker);
             await _db.SaveChangesAsync(ct);
@@ -474,6 +457,64 @@ public sealed class StickerPersistence : IStickerPersistence
         }
     }
 
+    public async Task CommitReadyStickerIfPackActiveAsync(Sticker sticker, DateTimeOffset nowUtc, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(sticker);
+        if (sticker.UploaderId is null)
+        {
+            throw new DomainException("Custom sticker must have an uploader.");
+        }
+
+        if (sticker.State != StickerState.Ready)
+        {
+            throw new DomainException($"Expected sticker in Ready state, found '{sticker.State}'.");
+        }
+
+        var uploaderId = sticker.UploaderId;
+        var strategy = _db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
+        {
+            _db.ChangeTracker.Clear();
+            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+            await AcquireAppLockOrThrowAsync($"media-quota:{uploaderId.Value:N}", tx, ct);
+
+            var packIsActive = await _db.StickerPacks
+                .AsNoTracking()
+                .AnyAsync(p => p.Id == sticker.PackId && !p.IsDeleted, ct);
+
+            if (!packIsActive)
+            {
+                await _db.Stickers
+                    .Where(s => s.Id == sticker.Id && s.State == StickerState.Pending)
+                    .ExecuteUpdateAsync(
+                        s => s
+                            .SetProperty(st => st.State, StickerState.Failed)
+                            .SetProperty(st => st.FailureReason, "Sticker pack was deleted.")
+                            .SetProperty(st => st.DeletedAtUtc, st => st.DeletedAtUtc ?? (sticker.UploadedAtUtc ?? nowUtc)),
+                        ct);
+
+                await tx.CommitAsync(ct);
+                _db.ChangeTracker.Clear();
+                throw new DomainException("The sticker pack was deleted before upload completed.");
+            }
+
+            _db.Stickers.Update(sticker);
+            try
+            {
+                await _db.SaveChangesAsync(ct);
+            }
+            catch (DbUpdateConcurrencyException ex)
+            {
+                await tx.RollbackAsync(ct);
+                _db.ChangeTracker.Clear();
+                throw new ConflictException("The sticker was modified concurrently. Please try again.", ex);
+            }
+
+            await tx.CommitAsync(ct);
+        });
+    }
+
     public async Task ArchiveStickerAndPruneReferencesAsync(
         StickerId stickerId,
         UserId ownerUserId,
@@ -554,7 +595,7 @@ public sealed class StickerPersistence : IStickerPersistence
             where f.UserId == userId
                   && s.State == StickerState.Ready
                   && s.PurgedAtUtc == null
-                  && !p.IsDeleted
+                  && (!p.IsSystemPack || !p.IsDeleted)
             orderby f.CreatedAtUtc descending
             select new { Sticker = s, Pack = p }
         ).ToListAsync(ct);
@@ -577,7 +618,10 @@ public sealed class StickerPersistence : IStickerPersistence
             where r.UserId == userId
                   && s.State == StickerState.Ready
                   && s.PurgedAtUtc == null
-                  && !p.IsDeleted
+                  && (!p.IsDeleted
+                      || (!p.IsSystemPack
+                          && (s.UploaderId != userId
+                              || _db.UserFavoriteStickers.Any(f => f.UserId == userId && f.StickerId == s.Id))))
             orderby r.LastUsedAtUtc descending
             select new { Sticker = s, Pack = p }
         ).Take(maxCount).ToListAsync(ct);
@@ -642,7 +686,7 @@ public sealed class StickerPersistence : IStickerPersistence
         await strategy.ExecuteAsync(async () =>
         {
             _db.ChangeTracker.Clear();
-            await using var tx = await _db.Database.BeginTransactionAsync(ct);
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.RepeatableRead, ct);
 
             await AcquireAppLockOrThrowAsync($"sticker-fav:{userId.Value:N}", tx, ct);
 
@@ -652,7 +696,7 @@ public sealed class StickerPersistence : IStickerPersistence
                 where s.Id == stickerId
                       && s.State == StickerState.Ready
                       && s.PurgedAtUtc == null
-                      && !p.IsDeleted
+                      && (!p.IsSystemPack || !p.IsDeleted)
                 select 1
             ).AnyAsync(ct);
             if (!stickerActive)
@@ -758,11 +802,29 @@ public sealed class StickerPersistence : IStickerPersistence
         ArgumentNullException.ThrowIfNull(stickerId);
 
         var record = await GetStickerWithPackAsync(stickerId, ct);
-        if (record is null || record.Sticker.PurgedAtUtc is not null)
+        if (record is null)
         {
             return false;
         }
 
+        return await CanUserAccessStickerAsync(callerId, record, forSending, ct);
+    }
+
+    public async Task<bool> CanUserAccessStickerAsync(
+        UserId callerId,
+        StickerWithPackRecord record,
+        bool forSending,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        ArgumentNullException.ThrowIfNull(record);
+
+        if (record.Sticker.PurgedAtUtc is not null)
+        {
+            return false;
+        }
+
+        var stickerId = record.Sticker.Id;
         var sticker = record.Sticker;
         var pack = record.Pack;
 
@@ -773,14 +835,13 @@ public sealed class StickerPersistence : IStickerPersistence
 
         if (forSending)
         {
-            if (pack.IsDeleted
-                || sticker.State != StickerState.Ready
+            if (sticker.State != StickerState.Ready
                 || string.IsNullOrWhiteSpace(sticker.ObjectKey))
             {
                 return false;
             }
 
-            if (sticker.UploaderId == callerId)
+            if (!pack.IsDeleted && sticker.UploaderId == callerId)
             {
                 return true;
             }
@@ -792,9 +853,14 @@ public sealed class StickerPersistence : IStickerPersistence
                 return true;
             }
 
-            return await _db.UserRecentStickers
-                .AsNoTracking()
-                .AnyAsync(r => r.UserId == callerId && r.StickerId == stickerId, ct);
+            if (!pack.IsDeleted || sticker.UploaderId != callerId)
+            {
+                return await _db.UserRecentStickers
+                    .AsNoTracking()
+                    .AnyAsync(r => r.UserId == callerId && r.StickerId == stickerId, ct);
+            }
+
+            return false;
         }
 
         if (sticker.State is not (StickerState.Ready or StickerState.Archived)
@@ -803,7 +869,7 @@ public sealed class StickerPersistence : IStickerPersistence
             return false;
         }
 
-        if (sticker.UploaderId == callerId)
+        if (!pack.IsDeleted && sticker.State == StickerState.Ready && sticker.UploaderId == callerId)
         {
             return true;
         }
@@ -831,7 +897,7 @@ public sealed class StickerPersistence : IStickerPersistence
             return true;
         }
 
-        if (sticker.State == StickerState.Ready && !pack.IsDeleted)
+        if (sticker.State == StickerState.Ready && (!pack.IsSystemPack || !pack.IsDeleted))
         {
             if (await _db.UserFavoriteStickers
                 .AsNoTracking()
@@ -935,6 +1001,14 @@ public sealed class StickerPersistence : IStickerPersistence
 
     private static bool IsUniqueConstraintViolation(DbUpdateException ex)
     {
-        return ex.InnerException is SqlException sqlEx && (sqlEx.Number == 2601 || sqlEx.Number == 2627);
+        for (Exception? current = ex.InnerException; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlEx && sqlEx.Number is 2601 or 2627)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

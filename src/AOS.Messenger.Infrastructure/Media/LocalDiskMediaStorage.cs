@@ -217,28 +217,45 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             throw new NotFoundException("Media object", "staged");
         }
 
-        if (!string.IsNullOrWhiteSpace(ifMatchETag))
-        {
-            var currentETag = await ComputeETagAsync(stagingPath, ct);
-            if (!string.Equals(currentETag, ifMatchETag.Trim(), StringComparison.Ordinal))
-            {
-                throw new ConflictException("The staged media object changed concurrently during promotion.");
-            }
-        }
-
         var permanentPath = ResolveSafePath(permanentKey);
         Directory.CreateDirectory(Path.GetDirectoryName(permanentPath)!);
 
         var tempPath = $"{permanentPath}.{Guid.NewGuid():N}.tmp";
         try
         {
+            var expectedETag = string.IsNullOrWhiteSpace(ifMatchETag) ? null : ifMatchETag.Trim();
+            using var sha256 = expectedETag is not null
+                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+                : null;
+
             await using (var src = new FileStream(stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true))
             await using (var dst = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
-                await src.CopyToAsync(dst, ct);
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await src.ReadAsync(buffer.AsMemory(), ct)) > 0)
+                {
+                    sha256?.AppendData(buffer, 0, read);
+                    await dst.WriteAsync(buffer.AsMemory(0, read), ct);
+                }
+            }
+
+            if (sha256 is not null)
+            {
+                var currentETag = $"\"{Convert.ToHexStringLower(sha256.GetHashAndReset())}\"";
+                if (!string.Equals(currentETag, expectedETag, StringComparison.Ordinal))
+                {
+                    TryDeleteFileQuietly(tempPath);
+                    throw new ConflictException("The staged media object changed concurrently during promotion.");
+                }
             }
 
             File.Move(tempPath, permanentPath, overwrite: false);
+        }
+        catch (FileNotFoundException)
+        {
+            TryDeleteFileQuietly(tempPath);
+            throw new NotFoundException("Media object", "staged");
         }
         catch (IOException ex) when (File.Exists(permanentPath))
         {
@@ -321,11 +338,23 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
         return Task.CompletedTask;
     }
 
+    public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
+        string prefix,
+        CancellationToken ct = default) =>
+        ListObjectsAsync(prefix, startAfterKey: null, ct);
+
     public async IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
         string prefix,
+        string? startAfterKey,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidatePrefix(prefix);
+        if (!string.IsNullOrEmpty(startAfterKey)
+            && !startAfterKey.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            throw new DomainException("Storage listing resume key must match the requested prefix.");
+        }
+
         await Task.Yield();
 
         var folderName = prefix.TrimEnd('/');
@@ -335,6 +364,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             yield break;
         }
 
+        var entries = new List<(string ObjectKey, string FilePath)>();
         foreach (var filePath in Directory.EnumerateFiles(dirPath, "*", SearchOption.TopDirectoryOnly))
         {
             ct.ThrowIfCancellationRequested();
@@ -349,6 +379,22 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             {
                 continue;
             }
+
+            var objectKey = $"{folderName}/{fileName}";
+            if (!string.IsNullOrEmpty(startAfterKey)
+                && string.CompareOrdinal(objectKey, startAfterKey) <= 0)
+            {
+                continue;
+            }
+
+            entries.Add((objectKey, filePath));
+        }
+
+        entries.Sort((a, b) => string.CompareOrdinal(a.ObjectKey, b.ObjectKey));
+
+        foreach (var (objectKey, filePath) in entries)
+        {
+            ct.ThrowIfCancellationRequested();
 
             FileInfo info;
             try
@@ -365,7 +411,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             }
 
             yield return new StoredObjectInfo(
-                $"{folderName}/{fileName}",
+                objectKey,
                 new DateTimeOffset(DateTime.SpecifyKind(info.LastWriteTimeUtc, DateTimeKind.Utc)),
                 info.Length);
         }

@@ -87,7 +87,8 @@ public sealed class MessageConfiguration : IEntityTypeConfiguration<Message>
         // Filtered index for sticker reference lookups (MediaCleanupService purge check)
         builder.HasIndex(m => m.StickerId)
             .HasDatabaseName("IX_Messages_StickerId")
-            .HasFilter("[StickerId] IS NOT NULL");
+            .HasFilter("[StickerId] IS NOT NULL")
+            .IncludeProperties(m => new { m.ConversationId, m.CreatedAtUtc, m.IsDeletedForEveryone });
 
         // Foreign key to Stickers (restrict delete; reusable assets outlive deleted messages)
         builder.HasOne<Sticker>()

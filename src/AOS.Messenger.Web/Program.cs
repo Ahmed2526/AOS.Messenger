@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using AOS.Messenger.Application;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Infrastructure;
@@ -68,6 +70,7 @@ builder.Services.AddControllersWithViews(options =>
         options.Filters.Add(new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute());
         options.Filters.Add(new AuthenticatedNoCacheFilter());
         options.Filters.Add(new AntiforgeryProblemDetailsFilter());
+        options.Filters.Add<AuthoritativeEmailRateLimitFilter>();
     })
     .AddJsonOptions(options =>
     {
@@ -80,8 +83,17 @@ builder.Services.AddControllersWithViews(options =>
         options.JsonSerializerOptions.Converters.Add(new StickerIdJsonConverter());
     });
 
-var dualEmailPolicy = new DualIpAndEmailRateLimiterPolicy();
-builder.Services.AddSingleton(dualEmailPolicy);
+builder.Services.AddSingleton(sp =>
+    new DualIpAndEmailRateLimiterPolicy(timeProvider: sp.GetRequiredService<TimeProvider>()));
+
+builder.Services.AddOptions<RateLimiterOptions>()
+    .Configure<DualIpAndEmailRateLimiterPolicy>((options, dualEmailPolicy) =>
+    {
+        foreach (var policyName in DualIpAndEmailRateLimiterPolicy.RegisteredPolicyNames)
+        {
+            options.AddPolicy(policyName, dualEmailPolicy);
+        }
+    });
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -90,6 +102,13 @@ builder.Services.AddRateLimiter(options =>
     {
         var httpContext = context.HttpContext;
         httpContext.Response.StatusCode = StatusCodes.Status429TooManyRequests;
+
+        if (!httpContext.Response.HasStarted
+            && context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter))
+        {
+            var retrySeconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+            httpContext.Response.Headers.RetryAfter = retrySeconds.ToString(CultureInfo.InvariantCulture);
+        }
 
         bool isApiOrJson = httpContext.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase)
             || httpContext.Request.Headers.Accept.Any(h => h?.Contains("application/json", StringComparison.OrdinalIgnoreCase) == true)
@@ -102,22 +121,49 @@ builder.Services.AddRateLimiter(options =>
             httpContext.Response.Headers.Pragma = "no-cache";
         }
 
-        if (isApiOrJson && !httpContext.Response.HasStarted)
+        if (!httpContext.Response.HasStarted)
         {
-            httpContext.Response.ContentType = "application/problem+json";
-
-            var problemDetails = new ProblemDetails
-            {
-                Status = StatusCodes.Status429TooManyRequests,
-                Title = "Too Many Requests",
-                Detail = "Rate limit exceeded. Please wait before trying again.",
-                Instance = httpContext.Request.Path.Value
-            };
-            problemDetails.Extensions["traceId"] = httpContext.TraceIdentifier;
-
             try
             {
-                await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+                if (isApiOrJson)
+                {
+                    httpContext.Response.ContentType = "application/problem+json";
+
+                    var problemDetails = new ProblemDetails
+                    {
+                        Status = StatusCodes.Status429TooManyRequests,
+                        Title = "Too Many Requests",
+                        Detail = "Rate limit exceeded. Please wait before trying again.",
+                        Instance = httpContext.Request.Path.Value
+                    };
+                    problemDetails.Extensions["traceId"] = httpContext.TraceIdentifier;
+
+                    await httpContext.Response.WriteAsync(JsonSerializer.Serialize(problemDetails), cancellationToken);
+                }
+                else
+                {
+                    httpContext.Response.ContentType = "text/html; charset=utf-8";
+                    var html = """
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="utf-8" />
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+                            <title>429 - Too Many Requests</title>
+                            <link rel="stylesheet" href="/css/app.css" />
+                        </head>
+                        <body class="min-h-screen flex items-center justify-center p-4 bg-[#F8F6F3] dark:bg-[#302F2C] text-[#2B2725] dark:text-[#F0E9E2] font-sans">
+                            <div class="bg-[#FFFFFF] dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-xl p-8 max-w-md w-full shadow-lg text-center">
+                                <div class="text-4xl font-bold text-[#B3929D] mb-2"><h1>429</h1></div>
+                                <div class="text-lg font-semibold mb-2"><h2>Too Many Requests</h2></div>
+                                <p class="text-sm text-[#6E6560] dark:text-[#C9C0B9] mb-6">Rate limit exceeded. Please wait before trying again.</p>
+                                <a href="/" class="inline-block px-5 py-2 bg-[#B3929D] hover:bg-[#A07860] text-white rounded-md font-medium text-sm transition-colors">Return Home</a>
+                            </div>
+                        </body>
+                        </html>
+                        """;
+                    await httpContext.Response.WriteAsync(html, cancellationToken);
+                }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested || httpContext.RequestAborted.IsCancellationRequested)
             {
@@ -136,12 +182,6 @@ builder.Services.AddRateLimiter(options =>
                 QueueProcessingOrder = System.Threading.RateLimiting.QueueProcessingOrder.OldestFirst,
                 QueueLimit = 0
             }));
-
-    // Dual IP + normalized-target-email rate limiting for email-triggering endpoints
-    foreach (var policyName in DualIpAndEmailRateLimiterPolicy.RegisteredPolicyNames)
-    {
-        options.AddPolicy(policyName, dualEmailPolicy);
-    }
 
     options.AddPolicy("search", httpContext =>
         System.Threading.RateLimiting.RateLimitPartition.GetFixedWindowLimiter(
@@ -317,6 +357,7 @@ app.UseMiddleware<RequestSizeLimitEnforcementMiddleware>();
 // enforcement and when the IP isn't already exhausted, avoiding global pre-auth/unbounded form buffering.
 app.Use(async (context, next) =>
 {
+    var dualEmailPolicy = context.RequestServices.GetRequiredService<DualIpAndEmailRateLimiterPolicy>();
     if (HttpMethods.IsPost(context.Request.Method)
         && context.Request.HasFormContentType
         && DualIpAndEmailRateLimiterPolicy.RequiresFormEmailExtraction(context.GetEndpoint())

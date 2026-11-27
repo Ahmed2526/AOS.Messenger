@@ -290,6 +290,10 @@ export function initNewConversationPage() {
     if (clearSearchBtn) {
         listen(clearSearchBtn, 'click', () => {
             clearTimeout(debounceTimer);
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
             if (searchInput) {
                 searchInput.value = '';
                 if (typeof searchInput.focus === 'function') searchInput.focus();
@@ -302,6 +306,10 @@ export function initNewConversationPage() {
     if (clearQueryBtn) {
         listen(clearQueryBtn, 'click', () => {
             clearTimeout(debounceTimer);
+            if (currentAbortController) {
+                currentAbortController.abort();
+                currentAbortController = null;
+            }
             if (searchInput) {
                 searchInput.value = '';
                 if (typeof searchInput.focus === 'function') searchInput.focus();

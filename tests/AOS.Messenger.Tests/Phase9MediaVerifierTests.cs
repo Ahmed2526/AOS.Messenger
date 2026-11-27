@@ -793,4 +793,121 @@ public sealed class Phase9MediaVerifierTests
         public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
+
+    [Fact]
+    public async Task MediaVerifier_RejectsAnimationExceedingMaxFramesInsteadOfTruncating()
+    {
+        using var gif = new MagickImageCollection();
+        for (int i = 0; i < 4; i++)
+        {
+            gif.Add(new MagickImage(new MagickColor((byte)(40 * i), 100, 150), 16, 16) { AnimationDelay = 10 });
+        }
+
+        using var ms = new MemoryStream();
+        gif.Write(ms, MagickFormat.Gif);
+        var bytes = ms.ToArray();
+
+        var media = CreatePendingMedia(MediaKind.Image, "four-frames.gif", "image/gif", bytes.Length);
+        using var verifier = CreateVerifier(
+            new StubMediaStorage(media.ObjectKey, bytes, "\"e-4frames\""),
+            new MediaOptions { MaxAnimationFrames = 3 });
+
+        await Assert.ThrowsAsync<DomainException>(() =>
+            verifier.VerifyAndSanitizeAsync(media, new MediaObjectMetadata(bytes.Length, "\"e-4frames\"", "image/gif")));
+    }
+
+    [Fact]
+    public void ImageFrameCounter_RejectsInvalidWebpRiffSizeAndChunkExceedingRiffEnd()
+    {
+        // riffPayloadSize = 2 (< 4 minimum for 'WEBP' FourCC)
+        var badRiffSize = "RIFF\x02\x00\x00\x00WEBPAAAA"u8.ToArray();
+        using (var s1 = new MemoryStream(badRiffSize))
+        {
+            Assert.Throws<DomainException>(() =>
+                ImageFrameCounter.ScanWebp(s1, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels));
+        }
+
+        // Valid riffPayloadSize = 16 -> riffEnd = 24, but chunk payload claims 40 bytes while file has 100 trailing bytes
+        using var ms2 = new MemoryStream();
+        ms2.Write("RIFF"u8);
+        Span<byte> le = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 16u);
+        ms2.Write(le);
+        ms2.Write("WEBP"u8);
+        ms2.Write("VP8X"u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 40u);
+        ms2.Write(le);
+        ms2.Write(new byte[100]);
+        ms2.Position = 0;
+
+        Assert.Throws<DomainException>(() =>
+            ImageFrameCounter.ScanWebp(ms2, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels));
+
+        // Odd-length payload (11 bytes) ending right at riffEnd without its required RIFF padding byte must fail
+        using var unpaddedOdd = new MemoryStream();
+        unpaddedOdd.Write("RIFF"u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 4u + 8u + 11u);
+        unpaddedOdd.Write(le);
+        unpaddedOdd.Write("WEBP"u8);
+        unpaddedOdd.Write("VP8 "u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 11u);
+        unpaddedOdd.Write(le);
+        unpaddedOdd.Write(new byte[11]);
+        unpaddedOdd.Position = 0;
+
+        Assert.Throws<DomainException>(() =>
+            ImageFrameCounter.ScanWebp(unpaddedOdd, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels));
+
+        // Valid odd-length chunk (11 bytes + 1 padding byte) inside riffEnd must succeed
+        using var paddedOdd = new MemoryStream();
+        paddedOdd.Write("RIFF"u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 4u + 8u + 12u);
+        paddedOdd.Write(le);
+        paddedOdd.Write("WEBP"u8);
+        paddedOdd.Write("VP8 "u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 11u);
+        paddedOdd.Write(le);
+        paddedOdd.Write(new byte[12]);
+        paddedOdd.Position = 0;
+
+        var oddScan = ImageFrameCounter.ScanWebp(paddedOdd, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels);
+        Assert.Equal(1, oddScan.FrameCount);
+    }
+
+    [Fact]
+    public async Task MediaVerifier_SemaphoreTimeout_ThrowsMediaProcessingBusyException()
+    {
+        using var img = new MagickImage(new MagickColor(10, 20, 30), 8, 8);
+        using var ms = new MemoryStream();
+        img.Write(ms, MagickFormat.Png);
+        var pngBytes = ms.ToArray();
+
+        var media = CreatePendingMedia(MediaKind.Image, "busy.png", "image/png", pngBytes.Length);
+        using var gate = new ImageProcessingGate(Options.Create(new MediaOptions
+        {
+            MaxImageProcessingConcurrency = 1,
+            ImageProcessingTimeoutSeconds = 1
+        }));
+        await gate.Semaphore.WaitAsync();
+        try
+        {
+            using var verifier = new MediaVerifier(
+                new StubMediaStorage(media.ObjectKey, pngBytes, "\"etag-busy\""),
+                Options.Create(new MediaOptions
+                {
+                    MaxImageProcessingConcurrency = 1,
+                    ImageProcessingTimeoutSeconds = 1
+                }),
+                NullLogger<MediaVerifier>.Instance,
+                MediaConstraints.MaxImageBytes,
+                gate);
+
+            await Assert.ThrowsAsync<MediaProcessingBusyException>(() =>
+                verifier.VerifyAndSanitizeAsync(media, new MediaObjectMetadata(pngBytes.Length, "\"etag-busy\"", "image/png")));
+        }
+        finally
+        {
+            gate.Semaphore.Release();
+        }
+    }
 }

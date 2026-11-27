@@ -49,6 +49,8 @@ import {
     clearStickerUrlCache
 } from './sticker-picker.js';
 import { createStickerCreator } from './sticker-creator.js';
+import { setupMediaDragGuard } from './media-drag-guard.js';
+import { createBottomScrollPinner } from './scroll-anchor.js';
 
 const DEFAULT_SHELL_TITLE = 'A♡S Messenger - Desktop App';
 
@@ -183,6 +185,22 @@ export function initChatShell(overrides = {}) {
     const typingContainerEl = document.getElementById('typing-indicator');
     const inputEl = document.getElementById('message-content-input');
     const streamEl = document.getElementById('message-stream');
+    const messagesContainerEl = document.getElementById('messages-container');
+
+    const bottomScrollPinner = createBottomScrollPinner({
+        streamEl,
+        containerEl: messagesContainerEl,
+        shouldBlockPin: () => !state.activeConversationId || state.pendingConversationId !== null || state.isLoadingOlder
+    });
+    if (typeof messageRenderer.setBottomScrollHandler === 'function') {
+        messageRenderer.setBottomScrollHandler((smooth) => {
+            if (smooth) {
+                bottomScrollPinner.pin({ smooth: true, settleMs: 2000, maxWindowMs: 4000 });
+            } else {
+                bottomScrollPinner.pin({ smooth: false, settleMs: 4000, maxWindowMs: 8000 });
+            }
+        });
+    }
 
     const getActiveConversationId = () => state.activeConversationId;
     const getCurrentUserId = () => state.currentUserId;
@@ -202,7 +220,12 @@ export function initChatShell(overrides = {}) {
         if (attachBtn && typeof attachBtn.setAttribute === 'function') attachBtn.setAttribute('aria-expanded', 'false');
     };
     stickerCreator = createStickerCreator({
-        onBeforeOpen: closeAllPopoversBeforeModal
+        onBeforeOpen: closeAllPopoversBeforeModal,
+        onPackCreated: (pack) => {
+            if (stickerPicker && typeof stickerPicker.refreshCatalog === 'function') {
+                stickerPicker.refreshCatalog(pack?.id || null);
+            }
+        }
     });
     stickerPicker = createStickerPicker({
         getActiveConversationId,
@@ -275,6 +298,7 @@ export function initChatShell(overrides = {}) {
         onConversationReconciled: (conversation) => {
             if (!conversation) return;
             messageRenderer.renderConversationHeader(conversation);
+            presence.refreshHeaderLastSeen();
             const peerName = conversation.otherParticipantName ?? conversation.OtherParticipantName;
             setDocumentBaseTitle(peerName ? `${peerName} - A♡S Messenger` : DEFAULT_SHELL_TITLE);
             if (composer) {
@@ -292,7 +316,10 @@ export function initChatShell(overrides = {}) {
                 messageActions.closeMobileActionSheetIfMessage(msgId);
             }
         },
-        onReconciledWindowReplaced: () => armTopPaginationObserver(),
+        onReconciledWindowReplaced: () => {
+            bottomScrollPinner.pin({ smooth: false, settleMs: 4000, maxWindowMs: 8000 });
+            armTopPaginationObserver();
+        },
         onUserProfileUpdated: (profile) => {
             if (!profile || expiredHandled) return;
             const userId = messageRenderer.getUserId(profile.userId ?? profile.UserId);
@@ -383,7 +410,7 @@ export function initChatShell(overrides = {}) {
                 const sentinelEl = document.getElementById('messages-top-sentinel');
                 if (sentinelEl) {
                     topPaginationObserver = new IntersectionObserver((entries) => {
-                        if (!topPaginationArmed || !state.activeConversationId || state.pendingConversationId !== null || !state.hasMore || state.isLoadingOlder) {
+                        if (!topPaginationArmed || bottomScrollPinner.isActive() || !state.activeConversationId || state.pendingConversationId !== null || !state.hasMore || state.isLoadingOlder) {
                             return;
                         }
                         if (!entries.some(e => e.isIntersecting)) {
@@ -408,6 +435,30 @@ export function initChatShell(overrides = {}) {
         }
     }
 
+    let pendingConfirmForm = null;
+    let lastConfirmFocusedEl = null;
+    let createdFallbackConfirmModal = null;
+
+    function isChatConfirmModalOpen() {
+        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('chat-confirm-modal')
+            : null;
+        return !!(modal && modal.classList && !modal.classList.contains('hidden'));
+    }
+
+    function closeChatConfirmModal({ restoreFocus = true } = {}) {
+        pendingConfirmForm = null;
+        const restoreEl = restoreFocus ? lastConfirmFocusedEl : null;
+        lastConfirmFocusedEl = null;
+        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('chat-confirm-modal')
+            : null;
+        if (modal && modal.classList) modal.classList.add('hidden');
+        if (restoreEl && typeof restoreEl.focus === 'function' && restoreEl.isConnected !== false) {
+            restoreEl.focus();
+        }
+    }
+
     router = createChatRouter({
         state,
         api: { getConversationBundle, getMessagesPage },
@@ -415,6 +466,8 @@ export function initChatShell(overrides = {}) {
         hooks: {
             getDraftText: () => composer.getText(),
             onBeforeSwitch: (_prevId, nextId) => {
+                closeChatConfirmModal({ restoreFocus: false });
+                bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 typingEmitter.resetForSwitch();
                 typingReceiver.resetForSwitch();
@@ -452,11 +505,16 @@ export function initChatShell(overrides = {}) {
 
                 signalrClient.replayBufferedEvents(nextId, bufferedEvents);
                 signalrClient.notifyActiveConversation(nextId);
+                presence.refreshHeaderLastSeen();
                 presence.fetchPresence();
                 markVisibleIncoming();
                 armTopPaginationObserver();
             },
+            onBeforeLoadOlder: () => {
+                bottomScrollPinner.disarm();
+            },
             onSwitchToEmpty: (prevId) => {
+                bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 setActiveRow(null);
                 mediaLightbox.resetForSwitch();
@@ -471,6 +529,8 @@ export function initChatShell(overrides = {}) {
                 signalrClient.leaveActiveConversation(prevId);
             },
             onSwitchError: () => {
+                closeChatConfirmModal({ restoreFocus: false });
+                bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 setActiveRow(null);
                 mediaLightbox.resetForSwitch();
@@ -493,6 +553,7 @@ export function initChatShell(overrides = {}) {
     router.init();
     hydrateAllAvatars(document);
     unbindAvatarLightbox = bindAvatarLightboxDelegation(document);
+    const mediaDragGuard = setupMediaDragGuard();
 
     if (state.activeConversationId) {
         document.querySelectorAll('.message-timestamp[data-created-at]').forEach((el) => {
@@ -502,6 +563,7 @@ export function initChatShell(overrides = {}) {
             }
         });
         setActiveRow(state.activeConversationId);
+        presence.refreshHeaderLastSeen();
         const initialName = state.activeMeta?.otherParticipantName ?? state.activeMeta?.OtherParticipantName;
         setDocumentBaseTitle(initialName ? `${initialName} - A♡S Messenger` : DEFAULT_SHELL_TITLE);
         composer.applyConversationPolicy(state.activeMeta);
@@ -526,7 +588,7 @@ export function initChatShell(overrides = {}) {
 
     const onStreamScroll = () => {
         if (!state.activeConversationId || state.pendingConversationId !== null) return;
-        if (streamEl && topPaginationArmed &&
+        if (streamEl && topPaginationArmed && !bottomScrollPinner.isActive() &&
             (streamEl.scrollHeight === 0 || streamEl.scrollHeight > streamEl.clientHeight + 24) &&
             streamEl.scrollTop <= 160) {
             router.loadOlderMessages();
@@ -560,6 +622,146 @@ export function initChatShell(overrides = {}) {
         }
     };
 
+    function ensureChatConfirmModal() {
+        if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return null;
+        const existing = document.getElementById('chat-confirm-modal');
+        if (existing) return existing;
+        if (typeof document.createElement !== 'function' || !document.body) return null;
+
+        const modal = document.createElement('div');
+        modal.id = 'chat-confirm-modal';
+        modal.setAttribute('role', 'dialog');
+        modal.setAttribute('aria-modal', 'true');
+        modal.setAttribute('aria-labelledby', 'chat-confirm-title');
+        modal.setAttribute('aria-describedby', 'chat-confirm-message');
+        modal.className = 'hidden fixed inset-0 z-[75] flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs';
+
+        const card = document.createElement('div');
+        card.className = 'bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-sm p-5 flex flex-col gap-3.5';
+
+        const titleEl = document.createElement('h3');
+        titleEl.id = 'chat-confirm-title';
+        titleEl.className = 'text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]';
+        const msgEl = document.createElement('p');
+        msgEl.id = 'chat-confirm-message';
+        msgEl.className = 'text-xs text-[#6E6560] dark:text-[#C9C0B9] mt-1 leading-relaxed break-words';
+        card.appendChild(titleEl);
+        card.appendChild(msgEl);
+
+        const actionsRow = document.createElement('div');
+        actionsRow.className = 'flex items-center justify-end gap-2 pt-1';
+        const cancelBtn = document.createElement('button');
+        cancelBtn.type = 'button';
+        cancelBtn.id = 'chat-confirm-cancel-btn';
+        cancelBtn.className = 'px-3.5 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-50';
+        cancelBtn.textContent = 'Cancel';
+        const acceptBtn = document.createElement('button');
+        acceptBtn.type = 'button';
+        acceptBtn.id = 'chat-confirm-accept-btn';
+        acceptBtn.className = 'px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold active:scale-[0.98] transition-all shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed';
+        acceptBtn.textContent = 'Delete';
+        actionsRow.appendChild(cancelBtn);
+        actionsRow.appendChild(acceptBtn);
+        card.appendChild(actionsRow);
+
+        modal.appendChild(card);
+        document.body.appendChild(modal);
+        createdFallbackConfirmModal = modal;
+        return modal;
+    }
+
+    function openChatConfirmModal(form, message) {
+        const modal = ensureChatConfirmModal();
+        if (!modal) return;
+        pendingConfirmForm = form;
+        lastConfirmFocusedEl = typeof document !== 'undefined' ? document.activeElement : null;
+
+        const actionType = typeof form.getAttribute === 'function'
+            ? form.getAttribute('data-header-action-form')
+            : null;
+        const titleText = actionType === 'clear'
+            ? 'Clear chat history?'
+            : actionType === 'delete'
+                ? 'Delete conversation?'
+                : 'Confirm action';
+        const acceptText = actionType === 'clear'
+            ? 'Clear history'
+            : actionType === 'delete'
+                ? 'Delete'
+                : 'Confirm';
+
+        const titleEl = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-title') : null;
+        const msgEl = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-message') : null;
+        const cancelBtn = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-cancel-btn') : null;
+        const acceptBtn = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-accept-btn') : null;
+        if (titleEl) titleEl.textContent = titleText;
+        if (msgEl) msgEl.textContent = message;
+        if (acceptBtn) acceptBtn.textContent = acceptText;
+        if (modal.classList) modal.classList.remove('hidden');
+        if (cancelBtn && typeof cancelBtn.focus === 'function') {
+            cancelBtn.focus();
+        } else if (acceptBtn && typeof acceptBtn.focus === 'function') {
+            acceptBtn.focus();
+        }
+    }
+
+    const onConfirmDocumentClick = (e) => {
+        if (!isChatConfirmModalOpen() || !e || !e.target) return;
+        const modal = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-modal') : null;
+        const cancelBtn = typeof e.target.closest === 'function'
+            ? e.target.closest('#chat-confirm-cancel-btn')
+            : (e.target.id === 'chat-confirm-cancel-btn' ? e.target : null);
+        if (cancelBtn || e.target === modal) {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            closeChatConfirmModal({ restoreFocus: true });
+            return;
+        }
+        const acceptBtn = typeof e.target.closest === 'function'
+            ? e.target.closest('#chat-confirm-accept-btn')
+            : (e.target.id === 'chat-confirm-accept-btn' ? e.target : null);
+        if (acceptBtn && pendingConfirmForm) {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            const confirmedForm = pendingConfirmForm;
+            closeChatConfirmModal({ restoreFocus: false });
+            if (typeof confirmedForm.setAttribute === 'function') {
+                confirmedForm.setAttribute('data-confirm-bypass', 'true');
+            }
+            if (typeof confirmedForm.requestSubmit === 'function') {
+                confirmedForm.requestSubmit();
+            } else if (typeof confirmedForm.submit === 'function') {
+                confirmedForm.submit();
+            }
+        }
+    };
+
+    const onConfirmDocumentKeyDown = (e) => {
+        if (!isChatConfirmModalOpen()) return;
+        if (e.key === 'Escape') {
+            if (typeof e.preventDefault === 'function') e.preventDefault();
+            closeChatConfirmModal({ restoreFocus: true });
+            return;
+        }
+        if (e.key === 'Tab' && typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+            const cancelBtn = document.getElementById('chat-confirm-cancel-btn');
+            const acceptBtn = document.getElementById('chat-confirm-accept-btn');
+            const focusables = [cancelBtn, acceptBtn].filter(btn => btn && !btn.disabled);
+            if (focusables.length === 0) return;
+
+            const currentIndex = focusables.indexOf(document.activeElement);
+            if (e.shiftKey) {
+                if (currentIndex <= 0) {
+                    if (typeof e.preventDefault === 'function') e.preventDefault();
+                    const targetBtn = focusables[focusables.length - 1];
+                    if (typeof targetBtn.focus === 'function') targetBtn.focus();
+                }
+            } else if (currentIndex < 0 || currentIndex === focusables.length - 1) {
+                if (typeof e.preventDefault === 'function') e.preventDefault();
+                const targetBtn = focusables[0];
+                if (typeof targetBtn.focus === 'function') targetBtn.focus();
+            }
+        }
+    };
+
     const onDocumentSubmit = (e) => {
         const form = e.target;
         if (!form || typeof form.getAttribute !== 'function') return;
@@ -570,9 +772,16 @@ export function initChatShell(overrides = {}) {
                 return;
             }
         }
+        if (form.getAttribute('data-confirm-bypass') === 'true') {
+            if (typeof form.removeAttribute === 'function') {
+                form.removeAttribute('data-confirm-bypass');
+            }
+            return;
+        }
         const promptMsg = form.getAttribute('data-confirm');
-        if (promptMsg && typeof window !== 'undefined' && typeof window.confirm === 'function' && !window.confirm(promptMsg)) {
+        if (promptMsg) {
             e.preventDefault();
+            openChatConfirmModal(form, promptMsg);
         }
     };
 
@@ -591,10 +800,16 @@ export function initChatShell(overrides = {}) {
     if (typeof document.addEventListener === 'function') {
         document.addEventListener('visibilitychange', onVisibilityChange);
         document.addEventListener('submit', onDocumentSubmit);
+        document.addEventListener('click', onConfirmDocumentClick);
+        document.addEventListener('keydown', onConfirmDocumentKeyDown);
     }
 
     function destroy() {
         disarmTopPaginationObserver();
+        if (typeof messageRenderer.setBottomScrollHandler === 'function') {
+            messageRenderer.setBottomScrollHandler(null);
+        }
+        bottomScrollPinner.destroy();
         if (scrollReadDebounce) {
             clearTimeout(scrollReadDebounce);
             scrollReadDebounce = null;
@@ -614,7 +829,14 @@ export function initChatShell(overrides = {}) {
         if (typeof document.removeEventListener === 'function') {
             document.removeEventListener('visibilitychange', onVisibilityChange);
             document.removeEventListener('submit', onDocumentSubmit);
+            document.removeEventListener('click', onConfirmDocumentClick);
+            document.removeEventListener('keydown', onConfirmDocumentKeyDown);
         }
+        closeChatConfirmModal({ restoreFocus: false });
+        if (createdFallbackConfirmModal && createdFallbackConfirmModal.parentNode && typeof createdFallbackConfirmModal.parentNode.removeChild === 'function') {
+            createdFallbackConfirmModal.parentNode.removeChild(createdFallbackConfirmModal);
+        }
+        createdFallbackConfirmModal = null;
         composer.destroy();
         router.destroy();
         typingEmitter.destroy();
@@ -629,6 +851,9 @@ export function initChatShell(overrides = {}) {
         messageActions.destroy();
         mediaUploader.destroy();
         mediaLightbox.destroy();
+        if (mediaDragGuard) {
+            mediaDragGuard.destroy();
+        }
         if (typeof unbindAvatarLightbox === 'function') {
             unbindAvatarLightbox();
             unbindAvatarLightbox = null;

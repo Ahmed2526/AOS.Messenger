@@ -29,6 +29,7 @@ import {
 } from './avatar-loader.js';
 import { setupPresence } from './presence.js';
 import { resetReceiptsState } from './receipts.js';
+import { setupMediaDragGuard } from './media-drag-guard.js';
 
 export function initSidebar(overrides = {}) {
     if (typeof document === 'undefined' || typeof document.getElementById !== 'function') {
@@ -36,15 +37,16 @@ export function initSidebar(overrides = {}) {
     }
 
     const searchInput = document.getElementById('conversationSearchInput');
-    if (searchInput && typeof searchInput.addEventListener === 'function') {
-        searchInput.addEventListener('input', (e) => {
-            const query = (e.target?.value || '').toLowerCase().trim();
-            const items = document.querySelectorAll('.conversation-item');
-            items.forEach((item) => {
-                const text = (item.getAttribute('data-search') || '').toLowerCase();
-                item.style.display = text.includes(query) ? '' : 'none';
-            });
+    const onSearchInput = (e) => {
+        const query = (e.target?.value || '').toLowerCase().trim();
+        const items = document.querySelectorAll('.conversation-item');
+        items.forEach((item) => {
+            const text = (item.getAttribute('data-search') || '').toLowerCase();
+            item.style.display = text.includes(query) ? '' : 'none';
         });
+    };
+    if (searchInput && typeof searchInput.addEventListener === 'function') {
+        searchInput.addEventListener('input', onSearchInput);
     }
 
     const sidebarListEl = document.getElementById('conversationList');
@@ -57,6 +59,8 @@ export function initSidebar(overrides = {}) {
     if (!sidebarListEl || hasDedicatedChatPage) {
         return null;
     }
+
+    const mediaDragGuard = setupMediaDragGuard();
 
     const state = overrides.state || createChatState();
     state.currentUserId = sidebarListEl.getAttribute('data-current-user-id') || state.currentUserId || null;
@@ -173,9 +177,13 @@ export function initSidebar(overrides = {}) {
         presence,
         handleSessionExpired,
         destroy: () => {
+            if (searchInput && typeof searchInput.removeEventListener === 'function') {
+                searchInput.removeEventListener('input', onSearchInput);
+            }
             if (typeof document.removeEventListener === 'function') {
                 document.removeEventListener('visibilitychange', onVisibilityChange);
             }
+            mediaDragGuard.destroy();
             presence.destroy();
             signalrClient.destroy();
         }

@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
+using AOS.Messenger.Application.DTOs;
 using AOS.Messenger.Domain.Constants;
 using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.Enums;
@@ -918,7 +919,53 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
         Assert.True(File.Exists(diskPath));
         Assert.Equal(HttpStatusCode.OK, (await charlieClient.GetAsync($"/api/stickers/{customStickerId}/url")).StatusCode);
 
-        // Soft-deleting the custom pack archives its remaining stickers (animStickerId), prunes favorites, and blocks sends ([B2])
+        // Soft-deleting the custom pack preserves starred stickers (animStickerId) and previously sent
+        // stickers in chat history (sentPackStickerId) so recipients can view/save/re-send them,
+        // while pruning owner's un-starred recents and allowing cleanup of unreferenced stickers (unusedPackStickerId).
+        var sentPackCreated = await UploadCustomStickerThroughApiAsync(
+            aliceClient,
+            aliceCsrf,
+            "sent_pack.png",
+            "image/png",
+            CreateTransparentPngBytes(320, 320),
+            customPackId,
+            "🌟 sent");
+        var sentPackStickerId = Guid.Parse(sentPackCreated.GetProperty("id").GetString()!);
+
+        var unusedPackCreated = await UploadCustomStickerThroughApiAsync(
+            aliceClient,
+            aliceCsrf,
+            "unused_pack.png",
+            "image/png",
+            CreateTransparentPngBytes(320, 320),
+            customPackId,
+            "🫥 unused");
+        var unusedPackStickerId = Guid.Parse(unusedPackCreated.GetProperty("id").GetString()!);
+
+        long abSentPackMsgId;
+        using (var sendPackAb = CreateCsrfRequest(
+            HttpMethod.Post,
+            $"/api/conversations/{convAbId}/messages",
+            aliceCsrf,
+            new { content = (string?)null, idempotencyKey = Guid.NewGuid().ToString("N"), stickerId = sentPackStickerId }))
+        {
+            var resp = await aliceClient.SendAsync(sendPackAb);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            abSentPackMsgId = doc.RootElement.GetProperty("id").GetInt64();
+        }
+
+        string animObjectKey;
+        string sentPackObjectKey;
+        string unusedPackObjectKey;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            animObjectKey = (await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(animStickerId))).ObjectKey!;
+            sentPackObjectKey = (await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(sentPackStickerId))).ObjectKey!;
+            unusedPackObjectKey = (await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(unusedPackStickerId))).ObjectKey!;
+        }
+
         using (var favAliceAnim = CreateCsrfRequest(
             HttpMethod.Post,
             "/api/stickers/favorites",
@@ -933,19 +980,101 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             Assert.Equal(HttpStatusCode.NoContent, (await aliceClient.SendAsync(delPack)).StatusCode);
         }
 
+        // Alice's starred animStickerId stays in Favorites (before even re-sending) & remains re-sendable
+        var aliceCatalogImmediateJson = await (await aliceClient.GetAsync("/api/stickers/catalog")).Content.ReadAsStringAsync();
+        using (var immediateDoc = JsonDocument.Parse(aliceCatalogImmediateJson))
+        {
+            Assert.Contains(
+                immediateDoc.RootElement.GetProperty("favorites").EnumerateArray(),
+                el => el.GetProperty("id").GetGuid() == animStickerId && el.GetProperty("isFavorited").GetBoolean());
+        }
+
+        long abAnimMsgId;
         using (var sendAnimDeletedPack = CreateCsrfRequest(
             HttpMethod.Post,
             $"/api/conversations/{convAbId}/messages",
             aliceCsrf,
             new { content = (string?)null, idempotencyKey = Guid.NewGuid().ToString("N"), stickerId = animStickerId }))
         {
-            Assert.Equal(HttpStatusCode.NotFound, (await aliceClient.SendAsync(sendAnimDeletedPack)).StatusCode);
+            var animResp = await aliceClient.SendAsync(sendAnimDeletedPack);
+            Assert.Equal(HttpStatusCode.OK, animResp.StatusCode);
+            using var animDoc = JsonDocument.Parse(await animResp.Content.ReadAsStringAsync());
+            abAnimMsgId = animDoc.RootElement.GetProperty("id").GetInt64();
         }
 
         var aliceCatalogAfterPackDel = await (await aliceClient.GetAsync("/api/stickers/catalog")).Content.ReadAsStringAsync();
-        Assert.DoesNotContain(animStickerId.ToString(), aliceCatalogAfterPackDel, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(animStickerId.ToString(), aliceCatalogAfterPackDel, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(sentPackStickerId.ToString(), aliceCatalogAfterPackDel, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(unusedPackStickerId.ToString(), aliceCatalogAfterPackDel, StringComparison.OrdinalIgnoreCase);
 
-        // 5. Once ALL messages are tombstoned, cleanup purges the archived sticker (even without manual favorites/recents clearing)!
+        // Un-starred sentPackStickerId & unusedPackStickerId are no longer sendable by Alice after pack deletion
+        using (var sendUnstarredPackSticker = CreateCsrfRequest(
+            HttpMethod.Post,
+            $"/api/conversations/{convAbId}/messages",
+            aliceCsrf,
+            new { content = (string?)null, idempotencyKey = Guid.NewGuid().ToString("N"), stickerId = sentPackStickerId }))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, (await aliceClient.SendAsync(sendUnstarredPackSticker)).StatusCode);
+        }
+        Assert.Equal(HttpStatusCode.NotFound, (await aliceClient.GetAsync($"/api/stickers/{unusedPackStickerId}/url")).StatusCode);
+
+        // Bob (recipient of abSentPackMsgId) can still view, save to Favorites, see it in catalog Favorites, and re-send sentPackStickerId after pack deletion
+        Assert.Equal(HttpStatusCode.OK, (await bobClient.GetAsync($"/api/stickers/{sentPackStickerId}/url")).StatusCode);
+        using (var bobFavSentPack = CreateCsrfRequest(
+            HttpMethod.Post,
+            "/api/stickers/favorites",
+            bobCsrf,
+            new { stickerId = sentPackStickerId, sourceConversationId = convAbId, sourceMessageId = abSentPackMsgId }))
+        {
+            var resp = await bobClient.SendAsync(bobFavSentPack);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            Assert.DoesNotContain("SecretCreator", await resp.Content.ReadAsStringAsync());
+        }
+
+        var bobCatalogJson = await (await bobClient.GetAsync("/api/stickers/catalog")).Content.ReadAsStringAsync();
+        using (var bobCatalogDoc = JsonDocument.Parse(bobCatalogJson))
+        {
+            Assert.Contains(
+                bobCatalogDoc.RootElement.GetProperty("favorites").EnumerateArray(),
+                el => el.GetProperty("id").GetGuid() == sentPackStickerId && el.GetProperty("isFavorited").GetBoolean());
+        }
+
+        long bcSentPackMsgId;
+        using (var bobResendSentPack = CreateCsrfRequest(
+            HttpMethod.Post,
+            $"/api/conversations/{convBcId}/messages",
+            bobCsrf,
+            new { content = (string?)null, idempotencyKey = Guid.NewGuid().ToString("N"), stickerId = sentPackStickerId }))
+        {
+            var resp = await bobClient.SendAsync(bobResendSentPack);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+            bcSentPackMsgId = doc.RootElement.GetProperty("id").GetInt64();
+        }
+
+        // Stranger Charlie still receives 404 for animStickerId
+        Assert.Equal(HttpStatusCode.NotFound, (await charlieClient.GetAsync($"/api/stickers/{animStickerId}/url")).StatusCode);
+
+        // Intermediate cleanup: unusedPackStickerId is purged, while animStickerId and sentPackStickerId are preserved
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cleanup = scope.ServiceProvider.GetRequiredService<MediaCleanupService>();
+            await cleanup.RunCleanupPassAsync();
+
+            var unusedRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(unusedPackStickerId));
+            var animRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(animStickerId));
+            var sentRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(sentPackStickerId));
+            Assert.Equal(StickerState.Archived, unusedRow.State);
+            Assert.NotNull(unusedRow.PurgedAtUtc);
+            Assert.Null(animRow.PurgedAtUtc);
+            Assert.Null(sentRow.PurgedAtUtc);
+        }
+        Assert.False(File.Exists(Path.Combine(_mediaTempRoot, unusedPackObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.True(File.Exists(Path.Combine(_mediaTempRoot, animObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.True(File.Exists(Path.Combine(_mediaTempRoot, sentPackObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+
+        // 5. Once ALL messages and Favorites referencing stickers are cleared, cleanup purges them too
         using (var delAb = CreateCsrfRequest(HttpMethod.Post, $"/api/conversations/{convAbId}/messages/{abMsgId}/delete-for-everyone", aliceCsrf))
         {
             Assert.Equal(HttpStatusCode.OK, (await aliceClient.SendAsync(delAb)).StatusCode);
@@ -954,9 +1083,63 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
         {
             Assert.Equal(HttpStatusCode.OK, (await bobClient.SendAsync(delBc)).StatusCode);
         }
+        using (var delAbAnim = CreateCsrfRequest(HttpMethod.Post, $"/api/conversations/{convAbId}/messages/{abAnimMsgId}/delete-for-everyone", aliceCsrf))
+        {
+            Assert.Equal(HttpStatusCode.OK, (await aliceClient.SendAsync(delAbAnim)).StatusCode);
+        }
+        using (var delAbSentPack = CreateCsrfRequest(HttpMethod.Post, $"/api/conversations/{convAbId}/messages/{abSentPackMsgId}/delete-for-everyone", aliceCsrf))
+        {
+            Assert.Equal(HttpStatusCode.OK, (await aliceClient.SendAsync(delAbSentPack)).StatusCode);
+        }
+        using (var delBcSentPack = CreateCsrfRequest(HttpMethod.Post, $"/api/conversations/{convBcId}/messages/{bcSentPackMsgId}/delete-for-everyone", bobCsrf))
+        {
+            Assert.Equal(HttpStatusCode.OK, (await bobClient.SendAsync(delBcSentPack)).StatusCode);
+        }
         using (var unfavBob = CreateCsrfRequest(HttpMethod.Delete, $"/api/stickers/favorites/{customStickerId}", bobCsrf))
         {
             Assert.Equal(HttpStatusCode.NoContent, (await bobClient.SendAsync(unfavBob)).StatusCode);
+        }
+        using (var unfavBobSentPack = CreateCsrfRequest(HttpMethod.Delete, $"/api/stickers/favorites/{sentPackStickerId}", bobCsrf))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, (await bobClient.SendAsync(unfavBobSentPack)).StatusCode);
+        }
+
+        // While Alice keeps animStickerId starred AND non-owner Bob keeps sentPackStickerId in recents (Step 0 Option A),
+        // cleanup preserves both stickers' R2 binaries.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var cleanup = scope.ServiceProvider.GetRequiredService<MediaCleanupService>();
+            await cleanup.RunCleanupPassAsync();
+
+            Assert.Null((await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(animStickerId))).PurgedAtUtc);
+            Assert.Null((await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(sentPackStickerId))).PurgedAtUtc);
+        }
+        Assert.True(File.Exists(Path.Combine(_mediaTempRoot, animObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.True(File.Exists(Path.Combine(_mediaTempRoot, sentPackObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.Equal(HttpStatusCode.OK, (await bobClient.GetAsync($"/api/stickers/{sentPackStickerId}/url")).StatusCode);
+
+        // Once Bob's recent reference to sentPackStickerId is cleared, cleanup archives and purges sentPackStickerId cleanly.
+        using (var scope = factory.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            await db.UserRecentStickers
+                .Where(r => r.StickerId == new StickerId(sentPackStickerId))
+                .ExecuteDeleteAsync();
+
+            var cleanup = scope.ServiceProvider.GetRequiredService<MediaCleanupService>();
+            await cleanup.RunCleanupPassAsync();
+
+            Assert.Null((await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(animStickerId))).PurgedAtUtc);
+            Assert.NotNull((await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(sentPackStickerId))).PurgedAtUtc);
+        }
+        Assert.True(File.Exists(Path.Combine(_mediaTempRoot, animObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+        Assert.False(File.Exists(Path.Combine(_mediaTempRoot, sentPackObjectKey.Replace('/', Path.DirectorySeparatorChar))));
+
+        // Once Alice un-favorites animStickerId as well, cleanup purges both customStickerId and animStickerId
+        using (var unfavAliceAnim = CreateCsrfRequest(HttpMethod.Delete, $"/api/stickers/favorites/{animStickerId}", aliceCsrf))
+        {
+            Assert.Equal(HttpStatusCode.NoContent, (await aliceClient.SendAsync(unfavAliceAnim)).StatusCode);
         }
         using (var scope = factory.Services.CreateScope())
         {
@@ -964,11 +1147,14 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             var cleanup = scope.ServiceProvider.GetRequiredService<MediaCleanupService>();
             await cleanup.RunCleanupPassAsync();
 
-            var purgedRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(customStickerId));
-            Assert.NotNull(purgedRow.PurgedAtUtc);
+            var purgedCustom = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(customStickerId));
+            var purgedAnim = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == new StickerId(animStickerId));
+            Assert.NotNull(purgedCustom.PurgedAtUtc);
+            Assert.NotNull(purgedAnim.PurgedAtUtc);
         }
 
         Assert.False(File.Exists(diskPath));
+        Assert.False(File.Exists(Path.Combine(_mediaTempRoot, animObjectKey.Replace('/', Path.DirectorySeparatorChar))));
     }
 
     // =========================================================================
@@ -1356,14 +1542,21 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             body.appendChild(raceHost);
             racePicker.mount(raceHost);
 
+            const unstarredPackSticker = {
+                ...customSticker,
+                id: '66666666-6666-6666-6666-666666666667',
+                staticUrl: '/api/stickers/66666666-6666-6666-6666-666666666667/image',
+                emojiTags: 'wave2',
+                isFavorited: false
+            };
             const load1 = racePicker.ensureLoaded();
             const load2 = racePicker.ensureLoaded({ force: true });
             await new Promise(r => setTimeout(r, 10));
             resolveCat2({
-                recents: [customSticker],
+                recents: [customSticker, unstarredPackSticker],
                 favorites: [customSticker],
                 systemPacks: [],
-                customPacks: [{ id: customPackId, name: 'My Custom Pack', isSystemPack: false, stickers: [customSticker] }]
+                customPacks: [{ id: customPackId, name: 'My Custom Pack', isSystemPack: false, stickers: [customSticker, unstarredPackSticker] }]
             });
             await load2;
             resolveCat1({
@@ -1375,7 +1568,7 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             await load1;
             assert.deepEqual(racePicker.getCustomPacks().map(p => p.id), [customPackId], 'Older ensureLoaded response must not overwrite newer force reload');
 
-            // Deleting active custom pack removes its stickers from both recents & favorites immediately
+            // Deleting active custom pack prunes un-starred recents while preserving starred stickers (Option A)
             const packTab = raceHost.querySelectorAll('button').find(b => b.getAttribute('data-sticker-tab') === `pack:${customPackId}`);
             assert.ok(packTab);
             packTab.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
@@ -1403,10 +1596,11 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             assert.equal(confirmModal.classList.contains('hidden'), true);
             const recentsTab = raceHost.querySelectorAll('button').find(b => b.getAttribute('data-sticker-tab') === 'recents');
             recentsTab.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
-            assert.equal(raceHost.querySelector(`[data-sticker-pick="${customStickerId}"]`), null, 'Deleted pack sticker must be pruned from recents');
+            assert.equal(raceHost.querySelector(`[data-sticker-pick="${unstarredPackSticker.id}"]`), null, 'Un-starred deleted pack sticker must be pruned from recents');
+            assert.ok(raceHost.querySelector(`[data-sticker-pick="${customStickerId}"]`), 'Starred sticker from deleted pack must remain in recents');
             const favTab = raceHost.querySelectorAll('button').find(b => b.getAttribute('data-sticker-tab') === 'favorites');
             favTab.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
-            assert.equal(raceHost.querySelector(`[data-sticker-pick="${customStickerId}"]`), null, 'Deleted pack sticker must be pruned from favorites');
+            assert.ok(raceHost.querySelector(`[data-sticker-pick="${customStickerId}"]`), 'Starred sticker from deleted pack must remain in favorites');
 
             // Force reload a non-favorited sticker and double-click its star button concurrently
             let resolveStar;
@@ -1432,6 +1626,72 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             resolveStar({ ...starSticker, isFavorited: true });
             await new Promise(r => setTimeout(r, 10));
             assert.equal(starSticker.id && starPicker.isFavorited(starSticker.id), true);
+
+            // Reopening the same sticker info modal while a favorite toggle is in flight disables the modal button,
+            // synchronizes its button label when the in-flight request completes, and does not leak onto a different sticker.
+            const infoModal = createEl('div'); infoModal.id = 'sticker-info-modal'; infoModal.classList.add('hidden');
+            const infoImg = createEl('img'); infoImg.id = 'sticker-info-img';
+            const infoPackName = createEl('div'); infoPackName.id = 'sticker-info-pack-name';
+            const infoAuthor = createEl('div'); infoAuthor.id = 'sticker-info-pack-author';
+            const infoAnimBadge = createEl('span'); infoAnimBadge.id = 'sticker-info-anim-badge';
+            const infoFavBtn = createEl('button'); infoFavBtn.id = 'sticker-info-fav-btn';
+            const infoFavIcon = createEl('span'); infoFavIcon.id = 'sticker-info-fav-icon';
+            const infoFavLabel = createEl('span'); infoFavLabel.id = 'sticker-info-fav-label';
+            infoFavBtn.appendChild(infoFavIcon);
+            infoFavBtn.appendChild(infoFavLabel);
+            for (const kid of [infoImg, infoPackName, infoAuthor, infoAnimBadge, infoFavBtn]) infoModal.appendChild(kid);
+            body.appendChild(infoModal);
+
+            let resolveInfoFav;
+            let infoFavCalls = 0;
+            const infoStickerS = { ...customSticker, id: '88888888-8888-8888-8888-888888888889', isFavorited: false };
+            const infoStickerT = { ...customSticker, id: '88888888-8888-8888-8888-888888888890', isFavorited: false };
+            const infoPicker = createStickerPicker({
+                getCurrentUserId: () => activeUserId,
+                getCatalogFn: async () => ({ recents: [infoStickerS, infoStickerT], favorites: [], systemPacks: [], customPacks: [] }),
+                addFavoriteFn: () => {
+                    infoFavCalls++;
+                    return new Promise((res) => { resolveInfoFav = res; });
+                }
+            });
+            await infoPicker.ensureLoaded({ force: true });
+            infoPicker.openStickerInfoModal(infoStickerS);
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(infoFavCalls, 1);
+            assert.equal(infoFavBtn.disabled, true);
+
+            // Close and reopen the SAME sticker S while request is still in flight
+            infoPicker.closeStickerInfoModal();
+            infoPicker.openStickerInfoModal(infoStickerS);
+            assert.equal(infoFavBtn.disabled, true, 'Reopening same sticker while favorite is in flight must keep button disabled');
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(infoFavCalls, 1, 'Duplicate click after reopen must not start a second toggle');
+
+            resolveInfoFav({ ...infoStickerS, isFavorited: true });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(infoFavLabel.textContent, 'Remove from Favorites', 'Reopened modal must reflect completed favorite status');
+            assert.equal(infoFavBtn.disabled, false);
+            infoPicker.destroy();
+
+            // Opening a DIFFERENT sticker T while S's toggle is in flight must not inherit S's completion state
+            let resolveInfoFavS2;
+            const infoPicker2 = createStickerPicker({
+                getCurrentUserId: () => activeUserId,
+                getCatalogFn: async () => ({ recents: [infoStickerS, infoStickerT], favorites: [], systemPacks: [], customPacks: [] }),
+                addFavoriteFn: () => new Promise((res) => { resolveInfoFavS2 = res; })
+            });
+            await infoPicker2.ensureLoaded({ force: true });
+            infoPicker2.openStickerInfoModal(infoStickerS);
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            infoPicker2.closeStickerInfoModal();
+            infoPicker2.openStickerInfoModal(infoStickerT);
+            assert.equal(infoFavBtn.disabled, false);
+            assert.equal(infoFavLabel.textContent, 'Add to Favorites');
+            resolveInfoFavS2({ ...infoStickerS, isFavorited: true });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(infoFavLabel.textContent, 'Add to Favorites', 'Completion for sticker S must not overwrite modal showing sticker T');
+            infoPicker2.destroy();
+            infoModal.remove();
 
             // Switching user mid-fetch must not leave sticker picker stuck in isLoading=true
             let resolveSwitchCat;
@@ -1635,36 +1895,57 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
                 assert.equal(sImg.src, 'https://r2.test/fresh-sticker');
             }
 
-            const infoModal = createEl('div'); infoModal.id = 'sticker-info-modal';
-            const infoImage = createEl('img'); infoImage.id = 'sticker-info-img';
-            infoModal.appendChild(infoImage);
-            body.appendChild(infoModal);
+            const staleInfoModal = createEl('div'); staleInfoModal.id = 'sticker-info-modal';
+            const staleInfoImage = createEl('img'); staleInfoImage.id = 'sticker-info-img';
+            const staleInfoFavBtn = createEl('button'); staleInfoFavBtn.id = 'sticker-info-fav-btn';
+            const staleInfoFavIcon = createEl('span'); staleInfoFavIcon.id = 'sticker-info-fav-icon';
+            const staleInfoFavLabel = createEl('span'); staleInfoFavLabel.id = 'sticker-info-fav-label';
+            staleInfoFavBtn.appendChild(staleInfoFavIcon);
+            staleInfoFavBtn.appendChild(staleInfoFavLabel);
+            staleInfoModal.appendChild(staleInfoImage);
+            staleInfoModal.appendChild(staleInfoFavBtn);
+            body.appendChild(staleInfoModal);
             const infoLookups = new Map();
-            const infoPicker = createStickerPicker({
-                getUrlFn: (id) => new Promise(resolve => infoLookups.set(id, resolve))
+            let resolveInfoFavA;
+            const staleInfoPicker = createStickerPicker({
+                getCurrentUserId: () => userId,
+                getUrlFn: (id) => new Promise(resolve => infoLookups.set(id, resolve)),
+                addFavoriteFn: () => new Promise(resolve => { resolveInfoFavA = resolve; })
             });
-            const infoA = { id: '11111111-2222-3333-4444-555555555555', packName: 'Old' };
-            const infoB = { id: '22222222-3333-4444-5555-666666666666', packName: 'Current' };
-            infoPicker.openStickerInfoModal(infoA);
-            const oldLoad = infoImage.onload;
+            const infoA = { id: '11111111-2222-3333-4444-555555555555', packName: 'Old', isFavorited: false };
+            const infoB = { id: '22222222-3333-4444-5555-666666666666', packName: 'Current', isFavorited: false };
+            staleInfoPicker.openStickerInfoModal(infoA);
+            const oldLoad = staleInfoImage.onload;
             await Promise.resolve();
-            infoPicker.openStickerInfoModal(infoB);
+
+            // [W4] Click favorite on infoA, then switch modal to infoB BEFORE infoA resolves -> infoB stays unstarred & enabled!
+            document.dispatchEvent({ type: 'click', target: staleInfoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(staleInfoFavBtn.disabled, true);
+            staleInfoPicker.openStickerInfoModal(infoB);
+            assert.equal(staleInfoFavBtn.disabled, false, '[W4] Switching modal sticker must re-enable favorite button immediately');
             await Promise.resolve();
             infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b' });
             await new Promise(resolve => setTimeout(resolve, 0));
             infoLookups.get(infoA.id)({ url: 'https://r2.test/info-a' });
             oldLoad();
-            await new Promise(resolve => setTimeout(resolve, 0));
-            assert.equal(infoImage.alt, 'Current');
-            assert.equal(infoImage.src, 'https://r2.test/info-b');
+            resolveInfoFavA({ id: infoA.id, packName: 'Old' });
+            await new Promise(resolve => setTimeout(resolve, 10));
+            assert.equal(staleInfoImage.alt, 'Current');
+            assert.equal(staleInfoImage.src, 'https://r2.test/info-b');
+            assert.equal(staleInfoPicker.isFavorited(infoA.id), true);
+            assert.equal(staleInfoPicker.isFavorited(infoB.id), false, '[W4] Late favorite resolution from closed modal sticker must not mutate newly opened sticker');
+            assert.equal(staleInfoFavLabel.textContent, 'Add to Favorites');
+            assert.equal(staleInfoFavBtn.getAttribute('aria-pressed'), 'false');
+            assert.equal(staleInfoFavBtn.disabled, false);
 
-            const pendingRetry = infoImage.onerror();
+            const pendingRetry = staleInfoImage.onerror();
             await Promise.resolve();
-            infoPicker.closeStickerInfoModal();
+            staleInfoPicker.closeStickerInfoModal();
             infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b-retried' });
             await pendingRetry;
-            assert.equal(infoImage.src, '');
-            infoPicker.destroy();
+            assert.equal(staleInfoImage.src, '');
+            staleInfoPicker.destroy();
+            staleInfoModal.remove();
 
             // [S3] Proactive coalesced /url resolution for cold custom stickers (no eager /image 302 src)
             const coldStickerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -1709,6 +1990,68 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             for (const cImg of coldImgs) {
                 assert.equal(cImg.src, 'https://r2.test/cold-prefetched');
             }
+
+            // 6. Step 7.5 regressions: static pack path safety, clearStickerUrlCache epoch guard, star icon DOM sync, inline onPackCreated
+            const { isSafeMediaUrl } = await import('{{JsUrl("media-lightbox.js")}}');
+            const { clearStickerUrlCache, resolveCachedStickerUrl, getCachedStickerUrl } = await import('{{JsUrl("sticker-picker.js")}}');
+            assert.equal(isSafeMediaUrl('/stickers/packs/starter/wave.webp'), true);
+            assert.equal(isSafeMediaUrl('/stickers/packs/../secret.webp'), false);
+
+            const staticWaveImg = createEl('img');
+            applyInitialStickerSrc(staticWaveImg, { id: '77777777-7777-7777-7777-777777777701', staticUrl: '/stickers/packs/starter/wave.webp' });
+            assert.equal(staticWaveImg.src, '/stickers/packs/starter/wave.webp');
+
+            let resolveClearedSticker;
+            const clearedStickerPromise = resolveCachedStickerUrl('88888888-8888-8888-8888-888888888801', {
+                getUrlFn: () => new Promise((res) => { resolveClearedSticker = res; })
+            });
+            await Promise.resolve();
+            clearStickerUrlCache();
+            resolveClearedSticker({
+                url: 'https://r2.test/should-not-cache',
+                expiresAtUtc: new Date(Date.now() + 600_000).toISOString()
+            });
+            assert.equal(await clearedStickerPromise, null);
+            assert.equal(getCachedStickerUrl('88888888-8888-8888-8888-888888888801'), null);
+
+            const rowFavId = '99999999-9999-9999-9999-999999999901';
+            const rowTrigger = createEl('button');
+            rowTrigger.setAttribute('data-sticker-info-trigger', 'true');
+            rowTrigger.setAttribute('data-sticker-id', rowFavId);
+            rowTrigger.setAttribute('data-sticker-favorited', 'false');
+            const rowStarIcon = createEl('span');
+            rowStarIcon.className = 'material-symbols-outlined text-[16px]';
+            rowStarIcon.textContent = 'star_outline';
+            rowTrigger.appendChild(rowStarIcon);
+            body.appendChild(rowTrigger);
+
+            const favSyncPicker = createStickerPicker({
+                getCurrentUserId: () => userId,
+                getCatalogFn: async () => ({ recents: [], favorites: [], systemPacks: [], customPacks: [] }),
+                addFavoriteFn: async () => ({ id: rowFavId, packId: customPackId, isSystem: false, isFavorited: true }),
+                removeFavoriteFn: async () => {}
+            });
+            await favSyncPicker.ensureLoaded({ force: true });
+            await favSyncPicker.toggleFavorite({ id: rowFavId, packId: customPackId, isSystem: false, isFavorited: false });
+            assert.equal(rowTrigger.getAttribute('data-sticker-favorited'), 'true');
+            assert.equal(rowStarIcon.textContent, 'star');
+            await favSyncPicker.toggleFavorite({ id: rowFavId, packId: customPackId, isSystem: false, isFavorited: true });
+            assert.equal(rowTrigger.getAttribute('data-sticker-favorited'), 'false');
+            assert.equal(rowStarIcon.textContent, 'star_outline');
+            favSyncPicker.destroy();
+
+            const createdPacksNotified = [];
+            const packCreator = createStickerCreator({
+                createPackFn: async (packName) => ({ id: 'aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb', name: packName }),
+                onPackCreated: (pack) => createdPacksNotified.push(pack)
+            });
+            packCreator.open({ customPacks: [] });
+            scNewPackInput.value = 'Inline Pack Without Upload';
+            document.dispatchEvent({ type: 'click', target: scNewPackSave, preventDefault() {}, stopPropagation() {} });
+            await new Promise(r => setTimeout(r, 15));
+            packCreator.close();
+            assert.equal(createdPacksNotified.length, 1);
+            assert.equal(createdPacksNotified[0].id, 'aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb');
 
             globalThis.window.confirm = origConfirm;
             globalThis.createImageBitmap = origCreatorBitmap;
@@ -2208,8 +2551,12 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             const picker = createStickerPicker({
                 getCurrentUserId: () => userId,
                 getCatalogFn: async () => ({
-                    recents: [],
-                    favorites: [],
+                    recents: [
+                        { id: stickerId2, packId, packName: xssPackName, isOwnedByCurrentUser: true, staticUrl: `/api/stickers/${stickerId2}/image`, emojiTags: 'bye' }
+                    ],
+                    favorites: [
+                        { id: stickerId2, packId, packName: xssPackName, isOwnedByCurrentUser: true, staticUrl: `/api/stickers/${stickerId2}/image`, emojiTags: 'bye' }
+                    ],
                     systemPacks: [],
                     customPacks: [{
                         id: packId,
@@ -2246,7 +2593,10 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             assert.equal(emojiPicker.isOpen(), true);
             assert.equal(emojiPicker.getMode(), 'stickers');
 
-            // 1. Custom sticker removal opens custom confirmation modal (never native confirm)
+            // 1. Switch to custom pack tab, then custom sticker removal opens custom confirmation modal (never native confirm)
+            const customPackTab = document.querySelector(`[data-sticker-tab="pack:${packId}"]`);
+            assert.ok(customPackTab);
+            customPackTab.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
             const delStickerBtn = document.querySelector(`[data-sticker-delete="${stickerId1}"]`);
             assert.ok(delStickerBtn);
             delStickerBtn.dispatchEvent({ type: 'click', preventDefault() {}, stopPropagation() {} });
@@ -2300,12 +2650,13 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             assert.equal(cancelBtn.disabled, false);
             assert.deepEqual(deletedPacks, []);
 
-            // Retry confirm succeeds -> pack deleted, modal closed
+            // Retry confirm succeeds -> pack deleted, modal closed, starred sticker stays in Favorites
             acceptBtn.dispatchEvent({ type: 'click', target: acceptBtn, preventDefault() {}, stopPropagation() {} });
             await new Promise(r => setTimeout(r, 15));
             assert.deepEqual(deletedPacks, [packId]);
             assert.equal(modal.classList.contains('hidden'), true);
             assert.equal(picker.getCustomPacks().length, 0);
+            assert.equal(picker.isFavorited(stickerId2), true);
             assert.equal(nativeDialogCalls, 0);
 
             emojiPicker.destroy();
@@ -2779,6 +3130,216 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
         Assert.Contains(events, e => e.StartsWith($"Delete:{MediaConstraints.StickerKeyPrefix}", StringComparison.Ordinal) && e != $"Delete:{stagingKey}" && e != $"Delete:{winnerObjKey}");
     }
 
+    [Fact]
+    public async Task StickerService_CancelAndPackDeleteRaces_AndControllerJsonValidation_EnforceInvariants()
+    {
+        var services = _fixture.CreateServiceCollection();
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var realPersistence = new AOS.Messenger.Infrastructure.Persistence.Repositories.StickerPersistence(db);
+        var userReader = scope.ServiceProvider.GetRequiredService<IUserReader>();
+        var signing = new LocalMediaSigningService(DataProtectionProvider.Create("Step3StickerTest"));
+        var storage = new LocalDiskMediaStorage(signing, _mediaTempRoot);
+        var processor = new StickerProcessor(storage, new ImageProcessingGate(Options.Create(new MediaOptions())));
+        var stickerService = new AOS.Messenger.Application.Services.StickerService(
+            realPersistence,
+            storage,
+            processor,
+            userReader,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AOS.Messenger.Application.Services.StickerService>.Instance);
+
+        var user = await SeedConfirmedUserAsync(scope.ServiceProvider, "stick_b3_w2", "Sticker B3W2");
+        var callerId = user.ToDomainUserId();
+        var now = DateTimeOffset.UtcNow;
+        var pack = await realPersistence.CreateCustomPackWithLimitCheckAsync(
+            StickerPack.CreateCustom(callerId, "Cancel Pack", "User", 0, now),
+            StickerConstraints.MaxCustomPacksPerUser);
+
+        // 1. Upload staged bytes -> CancelUploadAsync charges staged bytes to daily quota
+        var init1 = await stickerService.InitiateUploadAsync(
+            callerId,
+            new InitiateStickerUploadRequestDto(pack.Id, "s1.webp", "image/webp", 4096, "✨"));
+        var row1 = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == init1.StickerId);
+        var stagingPath1 = Path.Combine(_mediaTempRoot, row1.ObjectKey!.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(stagingPath1)!);
+        await File.WriteAllBytesAsync(stagingPath1, new byte[2048]);
+
+        await stickerService.CancelUploadAsync(callerId, init1.StickerId);
+        var cancelledRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == init1.StickerId);
+        Assert.Equal(StickerState.Failed, cancelledRow.State);
+        Assert.Equal(2048L, cancelledRow.VerifiedSizeBytes);
+        Assert.NotNull(cancelledRow.PurgedAtUtc);
+
+        // 1b. Cancelling when staging object is not found leaves PurgedAtUtc null so cleanup can measure any late PUT
+        var cancelClock = new AdjustableStickerTimeProvider(now);
+        var lateCancelSvc = new AOS.Messenger.Application.Services.StickerService(
+            realPersistence,
+            storage,
+            processor,
+            userReader,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AOS.Messenger.Application.Services.StickerService>.Instance,
+            timeProvider: cancelClock);
+        var initLate = await lateCancelSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateStickerUploadRequestDto(pack.Id, "late-put.webp", "image/webp", 4096, "🌙"));
+        await lateCancelSvc.CancelUploadAsync(callerId, initLate.StickerId);
+        var cancelledUnmeasured = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+        Assert.Equal(StickerState.Failed, cancelledUnmeasured.State);
+        Assert.Null(cancelledUnmeasured.VerifiedSizeBytes);
+        Assert.Null(cancelledUnmeasured.PurgedAtUtc);
+
+        // Simulate late PUT arriving after CancelUploadAsync returned
+        var latePath = Path.Combine(_mediaTempRoot, cancelledUnmeasured.ObjectKey!.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(latePath)!);
+        await File.WriteAllBytesAsync(latePath, new byte[1536]);
+
+        var cleanupServices = _fixture.CreateServiceCollection();
+        cleanupServices.AddSingleton<TimeProvider>(cancelClock);
+        cleanupServices.AddSingleton<IMediaStorage>(storage);
+        await using (var cleanupProvider = cleanupServices.BuildServiceProvider())
+        {
+            var cleanupSvc = new MediaCleanupService(
+                cleanupProvider.GetRequiredService<IServiceScopeFactory>(),
+                storage,
+                Options.Create(new MediaOptions { PresignedPutTtlMinutes = 5 }),
+                cancelClock,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<MediaCleanupService>.Instance);
+
+            // Before upload window closes, unmeasured cancelled row is preserved
+            await cleanupSvc.RunCleanupPassAsync(includePermanentOrphanSweep: false);
+            var stillPendingWindow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+            Assert.Null(stillPendingWindow.PurgedAtUtc);
+            Assert.True(File.Exists(latePath));
+
+            // After upload window closes, cleanup measures the late PUT bytes before deleting staging
+            cancelClock.Advance(TimeSpan.FromMinutes(6));
+            await cleanupSvc.RunCleanupPassAsync(includePermanentOrphanSweep: false);
+            var purgedLateRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+            Assert.NotNull(purgedLateRow.PurgedAtUtc);
+            Assert.Equal(1536L, purgedLateRow.VerifiedSizeBytes);
+            Assert.False(File.Exists(latePath));
+        }
+
+        // 2. Cancelling a sticker already committed to Ready throws ConflictException
+        var initReady = await stickerService.InitiateUploadAsync(
+            callerId,
+            new InitiateStickerUploadRequestDto(pack.Id, "s2.webp", "image/webp", 128, "🔥"));
+        var readyObjId = MediaConstraints.GenerateStorageObjectId();
+        await using (var winnerScope = provider.CreateAsyncScope())
+        {
+            var winnerDb = winnerScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var winner = await winnerDb.Stickers.SingleAsync(s => s.Id == initReady.StickerId);
+            winner.MarkReady(readyObjId, $"{MediaConstraints.StickerKeyPrefix}{readyObjId}", 64, 512, 512, false, now);
+            await winnerDb.SaveChangesAsync();
+        }
+        await Assert.ThrowsAsync<ConflictException>(() => stickerService.CancelUploadAsync(callerId, initReady.StickerId));
+
+        // 3. Deleted pack before final commit rejects completion cleanly in CommitReadyStickerIfPackActiveAsync & marks sticker Failed
+        var initDel = await stickerService.InitiateUploadAsync(
+            callerId,
+            new InitiateStickerUploadRequestDto(pack.Id, "s3.webp", "image/webp", 128, "🌊"));
+        var rowDel = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initDel.StickerId);
+        Assert.Equal(StickerState.Pending, rowDel.State);
+
+        // Soft-delete only the pack row in SQL while leaving the sticker Pending so execution reaches CommitReadyStickerIfPackActiveAsync
+        await db.StickerPacks
+            .Where(p => p.Id == pack.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.IsDeleted, true)
+                .SetProperty(p => p.UpdatedAtUtc, now.AddMinutes(1)));
+
+        var readyCandidate = await realPersistence.GetStickerByIdNoTrackingAsync(initDel.StickerId);
+        Assert.NotNull(readyCandidate);
+        var permDelId = MediaConstraints.GenerateStorageObjectId();
+        readyCandidate!.MarkReady(permDelId, $"{MediaConstraints.StickerKeyPrefix}{permDelId}", 64, 512, 512, false, now.AddMinutes(1));
+        await Assert.ThrowsAsync<DomainException>(() =>
+            realPersistence.CommitReadyStickerIfPackActiveAsync(readyCandidate, now.AddMinutes(1)));
+
+        var staleDelRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initDel.StickerId);
+        Assert.Equal(StickerState.Failed, staleDelRow.State);
+
+        // 4. POST /api/stickers/favorites rejects non-integer & overflow sourceMessageId with 400 (never 500)
+        using var factory = CreateFactory();
+        using var client = CreateHttpsClient(factory);
+        using var seedHttpScope = factory.Services.CreateScope();
+        var httpUser = await SeedConfirmedUserAsync(seedHttpScope.ServiceProvider, "stick_json", "Json Test");
+        var csrf = await LoginAndGetCsrfTokenAsync(client, httpUser.UserName!);
+
+        var badJsonReq = new HttpRequestMessage(HttpMethod.Post, "/api/stickers/favorites");
+        badJsonReq.Headers.Add("RequestVerificationToken", csrf);
+        badJsonReq.Headers.Add("X-Requested-With", "XMLHttpRequest");
+        badJsonReq.Content = new StringContent(
+            $"{{\"stickerId\":\"{Guid.NewGuid()}\",\"sourceConversationId\":\"{Guid.NewGuid()}\",\"sourceMessageId\":1.5}}",
+            Encoding.UTF8,
+            "application/json");
+        var badJsonResp = await client.SendAsync(badJsonReq);
+        Assert.Equal(HttpStatusCode.BadRequest, badJsonResp.StatusCode);
+
+        var overflowReq = new HttpRequestMessage(HttpMethod.Post, "/api/stickers/favorites");
+        overflowReq.Headers.Add("RequestVerificationToken", csrf);
+        overflowReq.Headers.Add("X-Requested-With", "XMLHttpRequest");
+        overflowReq.Content = new StringContent(
+            $"{{\"stickerId\":\"{Guid.NewGuid()}\",\"sourceConversationId\":\"{Guid.NewGuid()}\",\"sourceMessageId\":99999999999999999999999}}",
+            Encoding.UTF8,
+            "application/json");
+        var overflowResp = await client.SendAsync(overflowReq);
+        Assert.Equal(HttpStatusCode.BadRequest, overflowResp.StatusCode);
+
+        // 5. MessageService idempotent replay of a sticker message after archival succeeds cleanly
+        var peer = await SeedConfirmedUserAsync(scope.ServiceProvider, "stick_peer", "Sticker Peer");
+        var conv = Conversation.CreateDirect(callerId, peer.ToDomainUserId(), now);
+        db.Conversations.Add(conv);
+        await db.SaveChangesAsync();
+        var activePack = await realPersistence.CreateCustomPackWithLimitCheckAsync(
+            StickerPack.CreateCustom(callerId, "Active Replay Pack", "User", 0, now),
+            StickerConstraints.MaxCustomPacksPerUser);
+        var msgSticker = Sticker.CreatePendingCustom(activePack.Id, callerId, "image/webp", 128, "🎉", 0, now);
+        var createdMsgSticker = await realPersistence.TryCreatePendingStickerWithQuotaCheckAsync(
+            msgSticker,
+            StickerConstraints.MaxStickersPerCustomPack,
+            StickerConstraints.MaxTotalCustomStickersPerUser,
+            10,
+            1_000_000,
+            now.AddHours(-24));
+        var msgPermId = MediaConstraints.GenerateStorageObjectId();
+        createdMsgSticker.MarkReady(msgPermId, $"{MediaConstraints.StickerKeyPrefix}{msgPermId}", 64, 512, 512, false, now);
+        await realPersistence.CommitReadyStickerIfPackActiveAsync(createdMsgSticker, now);
+        await db.SaveChangesAsync();
+
+        var msgService = new AOS.Messenger.Application.Services.MessageService(
+            new AOS.Messenger.Infrastructure.Persistence.Repositories.MessagePersistence(db),
+            new AOS.Messenger.Infrastructure.Persistence.Repositories.ConversationPersistence(db),
+            new AOS.Messenger.Infrastructure.Persistence.Repositories.BlockPersistence(db),
+            userReader,
+            scope.ServiceProvider.GetService<IRealtimeNotifier>() ?? NoOpReplayNotifier.Instance,
+            new AOS.Messenger.Infrastructure.Persistence.Repositories.ReactionPersistence(db),
+            new AOS.Messenger.Infrastructure.Persistence.Repositories.MediaPersistence(db),
+            realPersistence,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AOS.Messenger.Application.Services.MessageService>.Instance,
+            TimeProvider.System);
+        var idemKey = Guid.NewGuid().ToString("N");
+        var sentDto = await msgService.SendMessageAsync(callerId, conv.Id, new SendMessageRequestDto(null, idemKey, StickerId: createdMsgSticker.Id));
+        await realPersistence.ArchiveStickerAndPruneReferencesAsync(createdMsgSticker.Id, callerId, now.AddMinutes(1));
+        var replayedDto = await msgService.SendMessageAsync(callerId, conv.Id, new SendMessageRequestDto(null, idemKey, StickerId: createdMsgSticker.Id));
+        Assert.Equal(sentDto.Id, replayedDto.Id);
+    }
+
+    private sealed class NoOpReplayNotifier : IRealtimeNotifier
+    {
+        public static readonly NoOpReplayNotifier Instance = new();
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
     private sealed class StubStickerRaceProcessor : IStickerProcessor
     {
         public Task<ProcessedStickerResult> ProcessStickerAsync(
@@ -2887,6 +3448,11 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             await _onUpdateRaceAsync();
             throw new ConflictException("Simulated concurrent sticker update conflict.");
         }
+        public async Task CommitReadyStickerIfPackActiveAsync(Sticker sticker, DateTimeOffset nowUtc, CancellationToken ct = default)
+        {
+            await _onUpdateRaceAsync();
+            throw new ConflictException("Simulated concurrent sticker commit conflict.");
+        }
         public Task ArchiveStickerAndPruneReferencesAsync(StickerId stickerId, UserId ownerUserId, DateTimeOffset nowUtc, CancellationToken ct = default) =>
             _inner.ArchiveStickerAndPruneReferencesAsync(stickerId, ownerUserId, nowUtc, ct);
         public Task<IReadOnlyList<StickerWithPackRecord>> GetUserFavoriteStickersAsync(UserId userId, CancellationToken ct = default) =>
@@ -2905,7 +3471,17 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             _inner.UpsertRecentStickerAsync(userId, stickerId, nowUtc, maxRecentCount, ct);
         public Task<bool> CanUserAccessStickerAsync(UserId callerId, StickerId stickerId, bool forSending, CancellationToken ct = default) =>
             _inner.CanUserAccessStickerAsync(callerId, stickerId, forSending, ct);
+        public Task<bool> CanUserAccessStickerAsync(UserId callerId, StickerWithPackRecord record, bool forSending, CancellationToken ct = default) =>
+            _inner.CanUserAccessStickerAsync(callerId, record, forSending, ct);
         public Task<bool> IsStickerVisibleInMessageAsync(UserId callerId, ConversationId conversationId, MessageId messageId, StickerId stickerId, CancellationToken ct = default) =>
             _inner.IsStickerVisibleInMessageAsync(callerId, conversationId, messageId, stickerId, ct);
+    }
+
+    private sealed class AdjustableStickerTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow;
+        public AdjustableStickerTimeProvider(DateTimeOffset utcNow) => _utcNow = utcNow;
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+        public void Advance(TimeSpan delta) => _utcNow = _utcNow.Add(delta);
     }
 }

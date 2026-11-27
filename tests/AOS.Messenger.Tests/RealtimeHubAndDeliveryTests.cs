@@ -9,6 +9,7 @@ using AOS.Messenger.Infrastructure.Identity;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
 using AOS.Messenger.Application.Services;
+using AOS.Messenger.Tests.TestDoubles;
 using AOS.Messenger.Web.Hubs;
 using AOS.Messenger.Web.Services;
 using Microsoft.AspNetCore.Http.Features;
@@ -84,8 +85,14 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
     public void ConnectionTracker_ActiveConversation_CanBeSetAndCleared()
     {
         var tracker = new InMemoryConnectionTracker();
+        var user = UserId.New();
         var convId = Guid.NewGuid();
 
+        // Unknown/disconnected connections must be ignored so stale writes cannot reinsert entries.
+        tracker.SetActiveConversation("unregistered-conn", convId);
+        Assert.Null(tracker.GetActiveConversation("unregistered-conn"));
+
+        tracker.AddConnection(user, "conn-focus-1");
         tracker.SetActiveConversation("conn-focus-1", convId);
         Assert.Equal(convId, tracker.GetActiveConversation("conn-focus-1"));
 
@@ -175,6 +182,7 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
         var user = UserId.New();
         var convId = Guid.NewGuid();
         currentUser.Id = user;
+        tracker.AddConnection(user, "test-conn-id");
 
         convService.AllowedConversations.Add(new ConversationId(convId));
 
@@ -313,7 +321,8 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
             blockPersistence,
             userReader,
             realtimeNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var req = new SendMessageRequestDto("Persistent and realtime", "broadcast-key-1");
         var result = await service.SendMessageAsync(userA, conv.Id, req);
@@ -360,7 +369,8 @@ public sealed class RealtimeHubAndDeliveryTests : IClassFixture<SqlTestDatabaseF
             blockPersistence,
             userReader,
             realtimeNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var req = new SendMessageRequestDto("Should survive broadcast failure", "resilient-key-1");
         var result = await service.SendMessageAsync(userA, conv.Id, req);

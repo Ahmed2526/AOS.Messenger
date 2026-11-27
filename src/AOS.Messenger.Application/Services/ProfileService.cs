@@ -19,13 +19,18 @@ public sealed class ProfileService : IProfileService
         IUserReader userReader,
         IUserWriter userWriter,
         IBlockPersistence blockPersistence,
-        IRealtimeNotifier? realtimeNotifier = null,
+        IRealtimeNotifier realtimeNotifier,
         ILogger<ProfileService>? logger = null)
     {
+        ArgumentNullException.ThrowIfNull(userReader);
+        ArgumentNullException.ThrowIfNull(userWriter);
+        ArgumentNullException.ThrowIfNull(blockPersistence);
+        ArgumentNullException.ThrowIfNull(realtimeNotifier);
+
         _userReader = userReader;
         _userWriter = userWriter;
         _blockPersistence = blockPersistence;
-        _realtimeNotifier = realtimeNotifier ?? NullRealtimeNotifier.Instance;
+        _realtimeNotifier = realtimeNotifier;
         _logger = logger;
     }
 

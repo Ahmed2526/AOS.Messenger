@@ -18,6 +18,7 @@ using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
 using AOS.Messenger.Infrastructure.Storage;
 using ImageMagick;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -26,6 +27,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace AOS.Messenger.Tests;
@@ -847,6 +850,22 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
         Assert.True(File.Exists(Path.Combine(_mediaTempRoot, softDelThumbKey.Replace('/', Path.DirectorySeparatorChar))));
         Assert.False(File.Exists(Path.Combine(_mediaTempRoot, orphanAvatarKey.Replace('/', Path.DirectorySeparatorChar))));
         Assert.False(File.Exists(Path.Combine(_mediaTempRoot, orphanThumbKey.Replace('/', Path.DirectorySeparatorChar))));
+
+        // [S1] Uploaded PendingAvatarUploads metadata rows older than PurgedMetadataRetentionHours are swept while active user avatar files stay intact
+        timeProvider.Advance(TimeSpan.FromHours(50));
+        using (var scope = sp.CreateScope())
+        {
+            var cleanup = scope.ServiceProvider.GetRequiredService<MediaCleanupService>();
+            var retentionRes = await cleanup.RunCleanupPassAsync();
+            Assert.True(retentionRes.MetadataRowsDeletedCount >= 1);
+
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.False(await db.PendingAvatarUploads.AsNoTracking().AnyAsync(p => p.CreatedAtUtc < timeProvider.GetUtcNow().AddHours(-49) && p.State == MediaState.Uploaded));
+
+            var liveUser = await db.Users.AsNoTracking().SingleAsync(u => u.Id == userAId);
+            Assert.False(string.IsNullOrWhiteSpace(liveUser.AvatarObjectKey));
+            Assert.True(File.Exists(Path.Combine(_mediaTempRoot, liveUser.AvatarObjectKey!.Replace('/', Path.DirectorySeparatorChar))));
+        }
     }
 
     // =========================================================================
@@ -997,8 +1016,8 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
                 createElement: (t) => createEl(t),
                 createDocumentFragment: () => ({ nodeType: 11, children: [], appendChild(c) { this.children.push(c); return c; } }),
                 getElementById: (id) => walk(body, n => n.id === id)[0] || null,
-                querySelector: (s) => walk(body, n => n !== body && matchesSingle(n, s))[0] || null,
-                querySelectorAll: (s) => walk(body, n => n !== body && matchesSingle(n, s)),
+                querySelector: (s) => walk(body, n => n !== body && s.split(',').some(p => matchesSingle(n, p.trim())))[0] || null,
+                querySelectorAll: (s) => walk(body, n => n !== body && s.split(',').some(p => matchesSingle(n, p.trim()))),
                 addEventListener(t, fn) { if (!docListeners.has(t)) docListeners.set(t, new Set()); docListeners.get(t).add(fn); },
                 removeEventListener(t, fn) { docListeners.get(t)?.delete(fn); },
                 dispatchEvent(e) { for (const fn of docListeners.get(e.type) || []) fn(e); }
@@ -1010,10 +1029,10 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             const { validateAvatarSourceFile } = await import('{{JsUrl("avatar-cropper.js")}}');
             const { createMessageBubbleElement } = await import('{{JsUrl("message-renderer.js")}}');
 
-            // 1. Safe URL validation ([S2]: dead /stickers/packs/*.webp is rejected)
+            // 1. Safe URL validation ([W8]: static pack WebP paths /stickers/packs/*.webp are allowlisted)
             assert.equal(isSafeMediaUrl('/api/users/11111111-1111-1111-1111-111111111111/avatar?size=thumb'), true);
             assert.equal(isSafeMediaUrl('/api/stickers/11111111-1111-1111-1111-111111111111/image'), true);
-            assert.equal(isSafeMediaUrl('/stickers/packs/aos-greetings/hi.webp'), false);
+            assert.equal(isSafeMediaUrl('/stickers/packs/aos-greetings/hi.webp'), true);
             assert.equal(isSafeMediaUrl('/stickers/packs/../../secret.webp'), false);
             assert.equal(isSafeMediaUrl('\\\\evil\\share'), false);
 
@@ -1348,6 +1367,31 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
                 getAvatarUrlFn: async () => ({ url: 'https://r2.example.com/fresh-avatar' })
             }), 'https://r2.example.com/fresh-avatar');
 
+            // Concurrent updateUserAvatarAcrossDom calls for the SAME new version (profile onUploaded + SignalR ReceiveUserProfileUpdated)
+            // must coalesce onto one fetch and keep the hydrated <img> visible (not cleared back to fallback initials)
+            const dualUpdateUser = 'b1b1b1b1-c2c2-d3d3-e4e4-f5f5f5f5f5f5';
+            const dualSlot = createEl('div');
+            dualSlot.setAttribute('data-avatar-slot', 'true');
+            dualSlot.setAttribute('data-avatar-user-id', dualUpdateUser);
+            dualSlot.setAttribute('data-avatar-version', '');
+            dualSlot.setAttribute('data-avatar-name', 'Dual User');
+            body.appendChild(dualSlot);
+            let dualUrlCalls = 0;
+            let resolveDualUrl;
+            const dualGetUrlFn = () => {
+                dualUrlCalls++;
+                return new Promise(resolve => { resolveDualUrl = resolve; });
+            };
+            const updateCall1 = avatarLoader.updateUserAvatarAcrossDom(dualUpdateUser, 'v-dual-new', 'Dual User', { getAvatarUrlFn: dualGetUrlFn });
+            const updateCall2 = avatarLoader.updateUserAvatarAcrossDom(dualUpdateUser, 'v-dual-new', 'Dual User', { getAvatarUrlFn: dualGetUrlFn });
+            assert.equal(dualUrlCalls, 1, 'Simultaneous updateUserAvatarAcrossDom calls for the same version must coalesce without self-eviction');
+            resolveDualUrl({ url: 'https://r2.example.com/dual-new-thumb', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            await Promise.all([updateCall1, updateCall2]);
+            const dualImg = dualSlot.querySelector('[data-avatar-img]');
+            assert.ok(dualImg);
+            assert.equal(dualImg.src, 'https://r2.example.com/dual-new-thumb');
+            assert.equal(dualImg.classList.contains('hidden'), false, 'Same-version concurrent avatar update must leave <img> visible immediately');
+
             const imageLoader = createCachedImageLoader();
             let resolveImage;
             let imageLookups = 0;
@@ -1476,6 +1520,77 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
 
             cropper.destroy();
             assert.equal(docListeners.get('keydown')?.size || 0, initialKeydownCount, 'destroy() must remove document keydown listeners');
+
+            // [W5] destroy() while completion backoff polling is sleeping must abort signal, hide modal, and cancel remaining retries
+            let destroyUploaded = 0;
+            const destroyErrors = [];
+            const destroyCompleteSignals = [];
+            const destroyStatusSignals = [];
+            let resolveDestroyInit;
+            let rejectDestroyCompletion;
+            const origSetTimeout = globalThis.setTimeout;
+            const origClearTimeout = globalThis.clearTimeout;
+            const capturedRetryTimers = [];
+            const clearedTimerIds = new Set();
+            globalThis.setTimeout = (fn, delay, ...args) => {
+                const id = origSetTimeout(fn, delay, ...args);
+                if (delay >= 500) {
+                    capturedRetryTimers.push({ id, delay });
+                }
+                return id;
+            };
+            globalThis.clearTimeout = (id) => {
+                clearedTimerIds.add(id);
+                return origClearTimeout(id);
+            };
+            try {
+                const destroyCropper = createAvatarCropper({
+                    onUploaded: () => { destroyUploaded++; },
+                    onError: (msg) => { destroyErrors.push(msg); },
+                    api: {
+                        initiateAvatarUpload: () => new Promise((res) => { resolveDestroyInit = res; }),
+                        completeAvatarUpload: (_id, { signal } = {}) => {
+                            destroyCompleteSignals.push(signal);
+                            return new Promise((_res, rej) => { rejectDestroyCompletion = rej; });
+                        },
+                        getAvatarUploadStatus: async (_id, { signal } = {}) => {
+                            destroyStatusSignals.push(signal);
+                            throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+                        }
+                    },
+                    createXhr: () => ({ upload: {}, status: 200, open() {}, setRequestHeader() {}, send() { this.onload(); }, abort() {} })
+                });
+
+                assert.equal(await destroyCropper.open(validFile), true);
+                document.getElementById('avatar-cropper-save-btn').dispatchEvent({ type: 'click', preventDefault() {} });
+                await new Promise(r => setTimeout(r, 10));
+                resolveDestroyInit({ uploadId: 'up-destroy', uploadUrl: 'https://r2.example.com/up-destroy' });
+                await new Promise(r => setTimeout(r, 10));
+                assert.equal(destroyCompleteSignals.length, 1);
+                assert.equal(destroyCompleteSignals[0].aborted, false);
+
+                // Trigger 503 during first poll so completeAndReconcile enters 500ms backoff sleep
+                rejectDestroyCompletion(new TypeError('Connection dropped'));
+                await new Promise(r => setTimeout(r, 15));
+                assert.equal(destroyStatusSignals.length, 1);
+                assert.equal(capturedRetryTimers.length, 1, 'Expected 500ms backoff retry timer to be scheduled');
+                assert.equal(clearedTimerIds.has(capturedRetryTimers[0].id), false);
+
+                destroyCropper.destroy();
+                assert.equal(clearedTimerIds.has(capturedRetryTimers[0].id), true, '[W5] destroy() must explicitly clear the scheduled 500ms retry timer');
+                assert.equal(destroyCompleteSignals[0].aborted, true, '[W5] destroy() must abort completion signal');
+                assert.equal(destroyStatusSignals[0].aborted, true, '[W5] destroy() must abort polling status signal');
+                assert.equal(destroyStatusSignals.length, 1, '[W5] destroy() must stop queued polling timers cleanly');
+                assert.equal(destroyCropper.isOpen(), false);
+                assert.equal(document.getElementById('avatar-cropper-modal').classList.contains('hidden'), true);
+                assert.equal(destroyUploaded, 0);
+                assert.deepEqual(destroyErrors, []);
+                assert.equal(docListeners.get('keydown')?.size || 0, initialKeydownCount);
+            } finally {
+                globalThis.setTimeout = origSetTimeout;
+                globalThis.clearTimeout = origClearTimeout;
+            }
+
             document.createElement = origCreateElement;
             globalThis.createImageBitmap = origCreateImageBitmap;
 
@@ -1587,13 +1702,30 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             ncErr.appendChild(ncLoginLink);
             for (const node of [ncInput, ncResults, ncEmpty, ncLoading, ncNoRes, ncErr]) body.appendChild(node);
 
+            const ncClearBtn = document.createElement('button');
+            ncClearBtn.id = 'clear-search-btn';
+            body.appendChild(ncClearBtn);
+
             let ncMode = '429';
             let ncSessionExpired = 0;
             let ncLastFetchInit = null;
+            let pendingSearchSignal = null;
             configureApiClient({
                 onSessionExpired: () => { ncSessionExpired++; },
                 fetchImpl: async (_url, init) => {
                     ncLastFetchInit = init;
+                    if (ncMode === 'hang') {
+                        pendingSearchSignal = init?.signal || null;
+                        return await new Promise((_res, rej) => {
+                            if (init?.signal) {
+                                init.signal.addEventListener('abort', () => {
+                                    const err = new Error('Aborted');
+                                    err.name = 'AbortError';
+                                    rej(err);
+                                });
+                            }
+                        });
+                    }
                     if (ncMode === '429') {
                         return {
                             ok: false,
@@ -1639,8 +1771,66 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             assert.equal(ncNoRes.classList.contains('hidden'), false);
             assert.equal(ncErr.classList.contains('hidden'), true);
 
+            // Clearing search aborts in-flight AbortController immediately
+            ncMode = 'hang';
+            const hangingSearch = nc.performSearch('slowpeer');
+            assert.equal(pendingSearchSignal?.aborted, false);
+            ncClearBtn.dispatchEvent({ type: 'click', preventDefault() {} });
+            assert.equal(pendingSearchSignal?.aborted, true);
+            await hangingSearch;
+
             nc.destroy();
             configureApiClient({ fetchImpl: null, onSessionExpired: null });
+
+            // [Step 7.5] Avatar v1 -> v2 evicts stale v1 full blob ObjectURL, and concurrent bypassCache does not clobber normal resolveAvatarUrl
+            const verPeer = '99999999-9999-9999-9999-999999999902';
+            const verRevokes = [];
+            let verSeq = 0;
+            const verUrlFn = async (uid, { size }) => ({
+                url: `https://r2.example.com/avatars/${uid}/${size}/${++verSeq}`,
+                expiresAtUtc: new Date(Date.now() + 600_000).toISOString(),
+                size
+            });
+            const verFetchFn = async () => ({
+                ok: true,
+                status: 200,
+                headers: { get: () => 'image/webp' },
+                blob: async () => ({ size: 1024, type: 'image/webp' })
+            });
+            await avatarLoader.openAvatarLightbox(verPeer, 'v1', 'Ver Peer', {
+                getAvatarUrlFn: verUrlFn,
+                fetchFn: verFetchFn,
+                createObjectUrlFn: () => `blob:https://localhost/ver-${verSeq}`,
+                revokeObjectUrlFn: (u) => verRevokes.push(u)
+            });
+            avatarLoader.closeAvatarLightbox();
+            assert.equal(verRevokes.length, 0);
+            avatarLoader.evictUserAvatarCache(verPeer, { preserveVersion: 'v2' });
+            assert.equal(verRevokes.length, 1);
+
+            let resNormUrl, resBypassUrl;
+            const pNorm = avatarLoader.resolveAvatarUrl(verPeer, 'v2', {
+                size: 'thumb',
+                getAvatarUrlFn: () => new Promise(r => { resNormUrl = r; })
+            });
+            const pBypass = avatarLoader.resolveAvatarUrl(verPeer, 'v2', {
+                size: 'thumb',
+                bypassCache: true,
+                getAvatarUrlFn: () => new Promise(r => { resBypassUrl = r; })
+            });
+            resBypassUrl({ url: 'https://r2.example.com/avatars/bypass', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            resNormUrl({ url: 'https://r2.example.com/avatars/normal', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            assert.equal(await pBypass, 'https://r2.example.com/avatars/bypass');
+            assert.equal(await pNorm, 'https://r2.example.com/avatars/normal');
+
+            let resClearedUrl;
+            const pCleared = avatarLoader.resolveAvatarUrl(verPeer, 'v3', {
+                size: 'thumb',
+                getAvatarUrlFn: () => new Promise(r => { resClearedUrl = r; })
+            });
+            avatarLoader.clearAvatarUrlCache();
+            resClearedUrl({ url: 'https://r2.example.com/avatars/late', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            assert.equal(await pCleared, null);
 
             console.log('OK_MILESTONE_B_FRONTEND');
             """;
@@ -1733,6 +1923,287 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
         Assert.True(firstDeleteIdx > conflictReadIdx, "Orphan object deletion must occur after HandleConcurrentConflictAsync.");
         Assert.DoesNotContain(events, e => e is "Delete:avatars/winner-full" or "Delete:avatars/winner-thumb");
         Assert.Contains(events, e => e.StartsWith("Delete:avatars/", StringComparison.Ordinal) && e is not "Delete:avatars/winner-full" and not "Delete:avatars/winner-thumb");
+    }
+
+    [Fact]
+    public async Task AvatarService_CompleteUploadAsync_PreservesLiveObjectsOnPostCommitConflict_AndPreservesStagingOnPreCommitConflict()
+    {
+        var services = _fixture.CreateServiceCollection();
+        services.AddScoped<IAvatarPersistence, AvatarPersistence>();
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<ApplicationUser>>();
+        var realPersistence = scope.ServiceProvider.GetRequiredService<IAvatarPersistence>();
+        var userReader = scope.ServiceProvider.GetRequiredService<IUserReader>();
+        var blockPersistence = scope.ServiceProvider.GetRequiredService<IBlockPersistence>();
+        var realtimeNotifier = scope.ServiceProvider.GetRequiredService<IRealtimeNotifier>();
+
+        var user = new ApplicationUser
+        {
+            Id = Guid.NewGuid(),
+            UserName = $"avatar_postcommit_{Guid.NewGuid():N}",
+            Email = $"avatar_postcommit_{Guid.NewGuid():N}@example.com",
+            EmailConfirmed = true,
+            DisplayName = "Post Commit User",
+            CreatedAtUtc = DateTimeOffset.UtcNow
+        };
+        Assert.True((await userManager.CreateAsync(user, "Password123!")).Succeeded);
+        var callerId = user.ToDomainUserId();
+
+        var now = new DateTimeOffset(2026, 6, 2, 10, 0, 0, TimeSpan.Zero);
+        var timeProvider = new AdjustableTimeProvider(now);
+        var events = new List<string>();
+        var storage = new RecordingRaceMediaStorage(events, contentLength: 128);
+
+        // 1. Simulated ConflictException AFTER real SQL CommitUserAvatarAsync succeeded:
+        //    must return committed version, preserve live full+thumb keys, and clean up staging key.
+        var postCommitPersistence = new InterceptingAvatarPersistence(
+            realPersistence,
+            events,
+            async (upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct) =>
+            {
+                await realPersistence.CommitUserAvatarAsync(
+                    upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct);
+                throw new ConflictException("Simulated post-commit transient failure.");
+            });
+
+        var postCommitSvc = new AvatarService(
+            postCommitPersistence,
+            storage,
+            new StubRaceAvatarProcessor(),
+            userReader,
+            blockPersistence,
+            realtimeNotifier,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AvatarService>.Instance,
+            timeProvider: timeProvider);
+
+        var init1 = await postCommitSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateAvatarUploadRequestDto("postcommit.png", "image/png", 128));
+        var row1 = await db.PendingAvatarUploads.AsNoTracking().SingleAsync(p => p.Id == init1.UploadId);
+
+        var result1 = await postCommitSvc.CompleteUploadAsync(callerId, init1.UploadId);
+        var userAfterCommit = await db.Users.AsNoTracking().SingleAsync(u => u.Id == user.Id);
+        Assert.False(string.IsNullOrWhiteSpace(result1.AvatarVersion));
+        Assert.Equal(userAfterCommit.AvatarVersion, result1.AvatarVersion);
+        Assert.DoesNotContain($"Delete:{userAfterCommit.AvatarObjectKey}", events);
+        Assert.DoesNotContain($"Delete:{userAfterCommit.AvatarThumbnailObjectKey}", events);
+        Assert.Contains($"Delete:{row1.ObjectKey}", events);
+
+        // Direct duplicate call to real SQL AvatarPersistence.CommitUserAvatarAsync must throw clean ConflictException
+        var committedRow = await realPersistence.GetPendingByIdNoTrackingAsync(init1.UploadId);
+        Assert.NotNull(committedRow);
+        await Assert.ThrowsAsync<ConflictException>(() => realPersistence.CommitUserAvatarAsync(
+            committedRow!,
+            "avatars/dup-full",
+            "avatars/dup-thumb",
+            AvatarConstraints.CanonicalAvatarContentType,
+            4,
+            2,
+            "dupver1234567890",
+            now.AddSeconds(1)));
+
+        // 2. Pre-commit ConflictException while upload remains Pending:
+        //    must clean up promoted full+thumb objects while keeping staging intact for retry.
+        events.Clear();
+        timeProvider.Advance(TimeSpan.FromSeconds(5));
+        var preCommitPersistence = new InterceptingAvatarPersistence(
+            realPersistence,
+            events,
+            (_, _, _, _, _, _, _, _, _) => throw new ConflictException("Simulated pre-commit conflict."));
+
+        var preCommitSvc = new AvatarService(
+            preCommitPersistence,
+            storage,
+            new StubRaceAvatarProcessor(),
+            userReader,
+            blockPersistence,
+            realtimeNotifier,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AvatarService>.Instance,
+            timeProvider: timeProvider);
+
+        var init2 = await preCommitSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateAvatarUploadRequestDto("precommit.png", "image/png", 128));
+        var row2 = await db.PendingAvatarUploads.AsNoTracking().SingleAsync(p => p.Id == init2.UploadId);
+
+        await Assert.ThrowsAsync<ConflictException>(() => preCommitSvc.CompleteUploadAsync(callerId, init2.UploadId));
+        Assert.DoesNotContain($"Delete:{row2.ObjectKey}", events);
+        Assert.Equal(2, events.Count(e => e.StartsWith("Delete:", StringComparison.Ordinal)));
+
+        // 3. Post-commit conflict when GetUserAvatarMetadataAsync lookup fails:
+        //    must retain promoted full+thumb objects (never delete potentially live objects on lookup failure).
+        events.Clear();
+        timeProvider.Advance(TimeSpan.FromSeconds(5));
+        var failingLookupPersistence = new InterceptingAvatarPersistence(
+            realPersistence,
+            events,
+            async (upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct) =>
+            {
+                await realPersistence.CommitUserAvatarAsync(
+                    upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct);
+                throw new ConflictException("Simulated post-commit transient failure.");
+            },
+            onGetMetadata: (_, _) => throw new InvalidOperationException("Simulated transient metadata lookup failure."));
+
+        var lookupFailSvc = new AvatarService(
+            failingLookupPersistence,
+            storage,
+            new StubRaceAvatarProcessor(),
+            userReader,
+            blockPersistence,
+            realtimeNotifier,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AvatarService>.Instance,
+            timeProvider: timeProvider);
+
+        var init3 = await lookupFailSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateAvatarUploadRequestDto("lookupfail.png", "image/png", 128));
+        var row3 = await db.PendingAvatarUploads.AsNoTracking().SingleAsync(p => p.Id == init3.UploadId);
+
+        var result3 = await lookupFailSvc.CompleteUploadAsync(callerId, init3.UploadId);
+        var userAfterLookupFail = await db.Users.AsNoTracking().SingleAsync(u => u.Id == user.Id);
+        Assert.Equal(userAfterLookupFail.AvatarVersion, result3.AvatarVersion);
+        Assert.DoesNotContain($"Delete:{userAfterLookupFail.AvatarObjectKey}", events);
+        Assert.DoesNotContain($"Delete:{userAfterLookupFail.AvatarThumbnailObjectKey}", events);
+        Assert.Contains($"Delete:{row3.ObjectKey}", events);
+    }
+
+    [Fact]
+    public async Task AvatarService_SameTickRemoveThenInitiateThenComplete_AppliesNewAvatar_AndMissingStagingRaceReconciles()
+    {
+        var services = _fixture.CreateServiceCollection();
+        var frozenClock = new AdjustableTimeProvider(new DateTimeOffset(2026, 11, 26, 14, 0, 0, TimeSpan.Zero));
+        services.AddSingleton<TimeProvider>(frozenClock);
+
+        await using var provider = services.BuildServiceProvider();
+        await using var scope = provider.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var avatarPersistence = new AvatarPersistence(db);
+        var signing = new LocalMediaSigningService(
+            DataProtectionProvider.Create("AvatarB5Test"));
+        var storage = new LocalDiskMediaStorage(signing, _mediaTempRoot);
+        var processor = new AvatarProcessor(storage, new ImageProcessingGate(Options.Create(new MediaOptions())));
+        var userReader = scope.ServiceProvider.GetRequiredService<IUserReader>();
+        var blockPersistence = scope.ServiceProvider.GetRequiredService<IBlockPersistence>();
+        var avatarSvc = new AvatarService(
+            avatarPersistence,
+            storage,
+            processor,
+            userReader,
+            blockPersistence,
+            NoOpAvatarRealtimeNotifier.Instance,
+            NullLogger<AvatarService>.Instance,
+            Options.Create(new MediaOptions()),
+            frozenClock);
+
+        var user = await SeedConfirmedUserAsync(scope.ServiceProvider, "avatar_b5", "Avatar B5");
+        var userId = user.ToDomainUserId();
+        var pngBytes = CreateExifJpegBytes(64, 64);
+
+        // First remove avatar, then initiate + complete ALL at the same clock tick
+        await avatarSvc.RemoveAvatarAsync(userId);
+        var initiated = await avatarSvc.InitiateUploadAsync(
+            userId,
+            new InitiateAvatarUploadRequestDto("same-tick.jpg", "image/jpeg", pngBytes.Length));
+        var uploadRow = await db.PendingAvatarUploads.AsNoTracking().SingleAsync(p => p.Id == initiated.UploadId);
+        var diskPath = Path.Combine(_mediaTempRoot, uploadRow.ObjectKey.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(diskPath)!);
+        await File.WriteAllBytesAsync(diskPath, pngBytes);
+
+        var completed = await avatarSvc.CompleteUploadAsync(userId, initiated.UploadId);
+        Assert.False(string.IsNullOrWhiteSpace(completed.AvatarVersion));
+        var committedUser = await db.Users.AsNoTracking().SingleAsync(u => u.Id == user.Id);
+        Assert.NotNull(committedUser.AvatarObjectKey);
+
+        var initRace = await avatarSvc.InitiateUploadAsync(
+            userId,
+            new InitiateAvatarUploadRequestDto("missing-race.png", "image/png", 128));
+        var winnerVersion = AvatarConstraints.GenerateAvatarVersion();
+        var nullMetaStorage = new MissingStagingAvatarStorage();
+        var racePersistence = new MissingStagingConflictAvatarPersistence(avatarPersistence, async () =>
+        {
+            await using var winScope = provider.CreateAsyncScope();
+            var winDb = winScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var winUpload = await winDb.PendingAvatarUploads.SingleAsync(p => p.Id == initRace.UploadId);
+            winUpload.MarkCompleted(128, frozenClock.GetUtcNow().AddSeconds(1));
+            var winUser = await winDb.Users.SingleAsync(u => u.Id == user.Id);
+            winUser.AvatarVersion = winnerVersion;
+            winUser.AvatarUpdatedAtUtc = frozenClock.GetUtcNow().AddSeconds(1);
+            await winDb.SaveChangesAsync();
+        });
+
+        var raceSvc = new AvatarService(
+            racePersistence,
+            nullMetaStorage,
+            new StubRaceAvatarProcessor(),
+            userReader,
+            blockPersistence,
+            NoOpAvatarRealtimeNotifier.Instance,
+            NullLogger<AvatarService>.Instance,
+            Options.Create(new MediaOptions()),
+            frozenClock);
+
+        var reconciled = await raceSvc.CompleteUploadAsync(userId, initRace.UploadId);
+        Assert.Equal(winnerVersion, reconciled.AvatarVersion);
+    }
+
+    private sealed class MissingStagingAvatarStorage : IMediaStorage
+    {
+        public string GeneratePresignedPutUrl(string objectKey, string contentType, long contentLength, TimeSpan expiresIn, DateTimeOffset nowUtc) => string.Empty;
+        public string GeneratePresignedGetUrl(string objectKey, string responseContentType, string responseContentDisposition, TimeSpan expiresIn, DateTimeOffset nowUtc) => string.Empty;
+        public Task<MediaObjectMetadata?> GetObjectMetadataAsync(string objectKey, CancellationToken ct = default) => Task.FromResult<MediaObjectMetadata?>(null);
+        public Task<byte[]> ReadByteRangeAsync(string objectKey, long offset, int length, string? ifMatchETag = null, CancellationToken ct = default) => Task.FromResult(Array.Empty<byte>());
+        public Task DownloadToStreamAsync(string objectKey, Stream destination, long maxBytes, string? ifMatchETag = null, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PromoteByCopyAsync(string stagingKey, string permanentKey, string verifiedContentType, string? contentDisposition, string? ifMatchETag = null, CancellationToken ct = default) => Task.CompletedTask;
+        public Task PromoteFromStreamAsync(string stagingKey, string permanentKey, Stream content, long contentLength, string verifiedContentType, string? contentDisposition, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteObjectAsync(string objectKey, CancellationToken ct = default) => Task.CompletedTask;
+        public async IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default) { await Task.CompletedTask; yield break; }
+    }
+
+    private sealed class MissingStagingConflictAvatarPersistence : IAvatarPersistence
+    {
+        private readonly IAvatarPersistence _inner;
+        private readonly Func<Task> _onUpdateAsync;
+
+        public MissingStagingConflictAvatarPersistence(IAvatarPersistence inner, Func<Task> onUpdateAsync)
+        {
+            _inner = inner;
+            _onUpdateAsync = onUpdateAsync;
+        }
+
+        public Task<PendingAvatarUpload> TryCreatePendingWithQuotaCheckAsync(PendingAvatarUpload upload, int maxConcurrentPending, long dailyQuotaBytes, DateTimeOffset dailyQuotaWindowStartUtc, CancellationToken ct = default) =>
+            _inner.TryCreatePendingWithQuotaCheckAsync(upload, maxConcurrentPending, dailyQuotaBytes, dailyQuotaWindowStartUtc, ct);
+        public Task<PendingAvatarUpload?> GetPendingByIdAsync(AvatarUploadId id, CancellationToken ct = default) =>
+            _inner.GetPendingByIdAsync(id, ct);
+        public Task<PendingAvatarUpload?> GetPendingByIdNoTrackingAsync(AvatarUploadId id, CancellationToken ct = default) =>
+            _inner.GetPendingByIdNoTrackingAsync(id, ct);
+        public async Task UpdatePendingAsync(PendingAvatarUpload upload, CancellationToken ct = default)
+        {
+            await _onUpdateAsync();
+            throw new ConflictException("Simulated missing-staging race conflict.");
+        }
+        public Task<AvatarCommitResult> CommitUserAvatarAsync(PendingAvatarUpload upload, string fullObjectKey, string thumbObjectKey, string contentType, long fullSizeBytes, long thumbSizeBytes, string avatarVersion, DateTimeOffset nowUtc, CancellationToken ct = default) =>
+            _inner.CommitUserAvatarAsync(upload, fullObjectKey, thumbObjectKey, contentType, fullSizeBytes, thumbSizeBytes, avatarVersion, nowUtc, ct);
+        public Task<AvatarRemoveResult> RemoveUserAvatarAsync(UserId userId, DateTimeOffset nowUtc, CancellationToken ct = default) =>
+            _inner.RemoveUserAvatarAsync(userId, nowUtc, ct);
+        public Task<UserAvatarMetadata?> GetUserAvatarMetadataAsync(UserId targetUserId, CancellationToken ct = default) =>
+            _inner.GetUserAvatarMetadataAsync(targetUserId, ct);
+    }
+
+    private sealed class NoOpAvatarRealtimeNotifier : IRealtimeNotifier
+    {
+        public static readonly NoOpAvatarRealtimeNotifier Instance = new();
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class StubRaceAvatarProcessor : IAvatarProcessor
@@ -1834,8 +2305,53 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
 
         public Task<UserAvatarMetadata?> GetUserAvatarMetadataAsync(UserId targetUserId, CancellationToken ct = default) =>
             _inner.GetUserAvatarMetadataAsync(targetUserId, ct);
+    }
 
-        public Task<IReadOnlyList<UserId>> GetNotifyPeerUserIdsAsync(UserId userId, CancellationToken ct = default) =>
-            _inner.GetNotifyPeerUserIdsAsync(userId, ct);
+    private sealed class InterceptingAvatarPersistence : IAvatarPersistence
+    {
+        private readonly IAvatarPersistence _inner;
+        private readonly List<string> _events;
+        private readonly Func<PendingAvatarUpload, string, string, string, long, long, string, DateTimeOffset, CancellationToken, Task<AvatarCommitResult>> _onCommit;
+        private readonly Func<UserId, CancellationToken, Task<UserAvatarMetadata?>>? _onGetMetadata;
+
+        public InterceptingAvatarPersistence(
+            IAvatarPersistence inner,
+            List<string> events,
+            Func<PendingAvatarUpload, string, string, string, long, long, string, DateTimeOffset, CancellationToken, Task<AvatarCommitResult>> onCommit,
+            Func<UserId, CancellationToken, Task<UserAvatarMetadata?>>? onGetMetadata = null)
+        {
+            _inner = inner;
+            _events = events;
+            _onCommit = onCommit;
+            _onGetMetadata = onGetMetadata;
+        }
+
+        public Task<PendingAvatarUpload> TryCreatePendingWithQuotaCheckAsync(
+            PendingAvatarUpload upload, int maxConcurrentPending, long dailyQuotaBytes, DateTimeOffset dailyQuotaWindowStartUtc, CancellationToken ct = default) =>
+            _inner.TryCreatePendingWithQuotaCheckAsync(upload, maxConcurrentPending, dailyQuotaBytes, dailyQuotaWindowStartUtc, ct);
+
+        public Task<PendingAvatarUpload?> GetPendingByIdAsync(AvatarUploadId id, CancellationToken ct = default) =>
+            _inner.GetPendingByIdAsync(id, ct);
+
+        public async Task<PendingAvatarUpload?> GetPendingByIdNoTrackingAsync(AvatarUploadId id, CancellationToken ct = default)
+        {
+            _events.Add("GetPendingByIdNoTracking");
+            return await _inner.GetPendingByIdNoTrackingAsync(id, ct);
+        }
+
+        public Task UpdatePendingAsync(PendingAvatarUpload upload, CancellationToken ct = default) =>
+            _inner.UpdatePendingAsync(upload, ct);
+
+        public Task<AvatarCommitResult> CommitUserAvatarAsync(
+            PendingAvatarUpload upload, string fullObjectKey, string thumbObjectKey, string contentType, long fullSizeBytes, long thumbSizeBytes, string avatarVersion, DateTimeOffset nowUtc, CancellationToken ct = default) =>
+            _onCommit(upload, fullObjectKey, thumbObjectKey, contentType, fullSizeBytes, thumbSizeBytes, avatarVersion, nowUtc, ct);
+
+        public Task<AvatarRemoveResult> RemoveUserAvatarAsync(UserId userId, DateTimeOffset nowUtc, CancellationToken ct = default) =>
+            _inner.RemoveUserAvatarAsync(userId, nowUtc, ct);
+
+        public Task<UserAvatarMetadata?> GetUserAvatarMetadataAsync(UserId targetUserId, CancellationToken ct = default) =>
+            _onGetMetadata is not null
+                ? _onGetMetadata(targetUserId, ct)
+                : _inner.GetUserAvatarMetadataAsync(targetUserId, ct);
     }
 }

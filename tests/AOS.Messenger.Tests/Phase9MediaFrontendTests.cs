@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Text;
 using Xunit;
 
 namespace AOS.Messenger.Tests;
@@ -25,51 +23,6 @@ public sealed class Phase9MediaFrontendTests
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         Assert.True(File.Exists(path), $"JS module not found: {path}");
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeModuleScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start node process for ES module verification.");
-
-        var outputBuilder = new StringBuilder();
-        var errorBuilder = new StringBuilder();
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) outputBuilder.AppendLine(e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) errorBuilder.AppendLine(e.Data);
-        };
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        if (!process.WaitForExit(15000))
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException("Node ES module verification timed out.");
-        }
-
-        process.WaitForExit();
-        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
     }
 
     private const string MockDomPrelude = """
@@ -266,7 +219,7 @@ public sealed class Phase9MediaFrontendTests
         """;
 
     [Fact]
-    public void MessageRenderer_MediaFormattingEditingTombstoneAndWipe_BehaveAccuratelyInNode()
+    public async Task MessageRenderer_MediaFormattingEditingTombstoneAndWipe_BehaveAccuratelyInNode()
     {
         var rendererUrl = JsUrl("message-renderer.js");
         var lightboxUrl = JsUrl("media-lightbox.js");
@@ -482,13 +435,13 @@ public sealed class Phase9MediaFrontendTests
             console.log('OK_RENDERER');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
         Assert.Contains("OK_RENDERER", output);
     }
 
     [Fact]
-    public void MediaUploader_And_MediaLightbox_EnforceConcurrencyRetryExpiryDedupAndNavigationInNode()
+    public async Task MediaUploader_And_MediaLightbox_EnforceConcurrencyRetryExpiryDedupAndNavigationInNode()
     {
         var uploaderUrl = JsUrl("media-uploader.js");
         var lightboxUrl = JsUrl("media-lightbox.js");
@@ -756,27 +709,118 @@ public sealed class Phase9MediaFrontendTests
             assert.ok(cancelledIds.includes('00000000-0000-0000-0000-000000000099'));
             uploaderCancelRace.destroy();
 
+            // [PR3-M3] 503 during completeMediaUpload preserves mediaId so Retry runs completion ONLY & Cancel cleans pending slot;
+            //           409 during completeMediaUpload cancels old mediaId and re-uploads from scratch on Retry.
+            let m3InitCalls = 0;
+            let m3PutCalls = 0;
+            let m3CompleteCalls = 0;
+            let m3CancelCalls = [];
+            let m3NextCompleteStatus = 503;
+            const m3Api = {
+                async initiateMediaUpload(_cId, dto) {
+                    const id = `00000000-0000-0000-0000-00000000020${++m3InitCalls}`;
+                    return { mediaId: id, uploadUrl: `https://r2.example.com/upload/${id}`, requiredContentType: dto.contentType };
+                },
+                async completeMediaUpload(_cId, mediaId) {
+                    m3CompleteCalls++;
+                    if (m3NextCompleteStatus !== 200) {
+                        const err = new Error(`Status ${m3NextCompleteStatus}`);
+                        err.status = m3NextCompleteStatus;
+                        throw err;
+                    }
+                    return { id: mediaId, kind: 'image' };
+                },
+                async cancelMediaUpload(_cId, mediaId) {
+                    m3CancelCalls.push(mediaId);
+                },
+                async sendMessage(_cId, payload) {
+                    return { id: 901, conversationId: convId, attachments: payload.mediaIds.map(id => ({ id, kind: 'image' })) };
+                }
+            };
+            const m3CreateXhr = () => ({
+                withCredentials: true,
+                status: 200,
+                upload: {},
+                open() {},
+                setRequestHeader() {},
+                abort() { this.onabort?.(); },
+                send() {
+                    m3PutCalls++;
+                    this.status = 200;
+                    this.onload?.();
+                }
+            });
+            const m3Uploader = createMediaUploader({ state, api: m3Api, createXhr: m3CreateXhr, nowFn: () => nowMs });
+            m3Uploader.init();
+            m3Uploader.setLocked(false);
+
+            // Case A: 503 timeout preserves mediaId -> Retry skips initiate & PUT and succeeds on complete only
+            m3Uploader.addFiles([{ name: 'timeout.png', type: 'image/png', size: 120 }]);
+            const job503 = m3Uploader.startUploadJob({ conversationId: convId });
+            await job503.promise;
+            assert.equal(job503.status, 'failed');
+            assert.equal(job503.retryable, true);
+            assert.equal(job503.items[0].mediaId, '00000000-0000-0000-0000-000000000201');
+            assert.equal(m3CancelCalls.length, 0);
+
+            m3NextCompleteStatus = 200;
+            m3Uploader.retryJob(job503.id);
+            await job503.promise;
+            assert.equal(m3InitCalls, 1, '503 retry must not re-initiate upload');
+            assert.equal(m3PutCalls, 1, '503 retry must not re-PUT to R2');
+            assert.equal(m3CompleteCalls, 2, '503 retry must invoke completeMediaUpload only');
+
+            // Case B: 503 followed by Cancel cancels the pending server upload
+            m3NextCompleteStatus = 503;
+            m3Uploader.addFiles([{ name: 'cancel503.png', type: 'image/png', size: 120 }]);
+            const job503Cancel = m3Uploader.startUploadJob({ conversationId: convId });
+            await job503Cancel.promise;
+            assert.equal(job503Cancel.items[0].mediaId, '00000000-0000-0000-0000-000000000202');
+            await m3Uploader.cancelJob(job503Cancel.id);
+            assert.ok(m3CancelCalls.includes('00000000-0000-0000-0000-000000000202'));
+
+            // Case C: 409 staged conflict cancels old mediaId and clears it so Retry performs a fresh upload
+            m3NextCompleteStatus = 409;
+            m3Uploader.addFiles([{ name: 'conflict409.png', type: 'image/png', size: 120 }]);
+            const job409 = m3Uploader.startUploadJob({ conversationId: convId });
+            await job409.promise;
+            assert.equal(job409.items[0].mediaId, null);
+            assert.ok(m3CancelCalls.includes('00000000-0000-0000-0000-000000000203'));
+            m3NextCompleteStatus = 200;
+            m3Uploader.retryJob(job409.id);
+            await job409.promise;
+            assert.equal(m3InitCalls, 4);
+            assert.equal(m3PutCalls, 4);
+            m3Uploader.destroy();
+
             uploader.destroy();
             lightbox.destroy();
 
             console.log('OK_UPLOADER_AND_LIGHTBOX');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
         Assert.Contains("OK_UPLOADER_AND_LIGHTBOX", output);
     }
 
     [Fact]
-    public void MediaLightbox_And_MemoryCache_PreventRepeatFetches_AndEnforceBoundsAndEvictionInNode()
+    public async Task MediaLightbox_And_MemoryCache_PreventRepeatFetches_AndEnforceBoundsAndEvictionInNode()
     {
         var lightboxUrl = JsUrl("media-lightbox.js");
         var cacheUrl = JsUrl("memory-image-cache.js");
+        var rendererUrl = JsUrl("message-renderer.js");
 
         var script = MockDomPrelude + $$"""
             import assert from 'node:assert/strict';
             import { createMediaLightbox } from '{{lightboxUrl}}';
             import { createMemoryImageCache } from '{{cacheUrl}}';
+            import {
+                resolveCachedMediaUrl,
+                clearMediaUrlCache,
+                evictMediaUrlCacheForMessage,
+                hydrateMediaElements
+            } from '{{rendererUrl}}';
 
             // Build lightbox DOM
             const lbModal = document.createElement('div'); lbModal.id = 'media-lightbox-modal'; lbModal.classList.add('hidden');
@@ -1012,11 +1056,97 @@ public sealed class Phase9MediaFrontendTests
             assert.equal(fallbackErrLightbox.getCacheStats().count, 0);
             fallbackErrLightbox.destroy();
 
+            // 10. Step 7.5: lightbox clickedIdx aligns with filtered galleryItems; resolveCachedMediaUrl epoch & coalescing; detached video guard
+            const clickLightbox = createMediaLightbox({
+                getMediaUrlFn: async (_c, _m, mediaId) => ({ url: `https://r2.example.com/photos/${mediaId}` }),
+                fetchFn: async () => { throw new TypeError('cors'); }
+            });
+            const rowWithInvalid = document.createElement('div');
+            rowWithInvalid.className = 'message-bubble-row';
+            const badTrigger = document.createElement('button');
+            badTrigger.setAttribute('data-lightbox-trigger', 'true');
+            badTrigger.setAttribute('data-conversation-id', convId);
+            badTrigger.setAttribute('data-message-id', '300');
+            badTrigger.setAttribute('data-media-id', '');
+            const goodTrigger1 = document.createElement('button');
+            goodTrigger1.setAttribute('data-lightbox-trigger', 'true');
+            goodTrigger1.setAttribute('data-conversation-id', convId);
+            goodTrigger1.setAttribute('data-message-id', '300');
+            goodTrigger1.setAttribute('data-media-id', 'good-1');
+            const goodTrigger2 = document.createElement('button');
+            goodTrigger2.setAttribute('data-lightbox-trigger', 'true');
+            goodTrigger2.setAttribute('data-conversation-id', convId);
+            goodTrigger2.setAttribute('data-message-id', '300');
+            goodTrigger2.setAttribute('data-media-id', 'good-2');
+            rowWithInvalid.appendChild(badTrigger);
+            rowWithInvalid.appendChild(goodTrigger1);
+            rowWithInvalid.appendChild(goodTrigger2);
+            document.body.appendChild(rowWithInvalid);
+            document.dispatchEvent({ type: 'click', target: goodTrigger1, preventDefault() {} });
+            assert.equal(document.getElementById('media-lightbox-counter').textContent, '1 / 2');
+            clickLightbox.destroy();
+
+            let coalesceUrlCalls = 0;
+            let resolveCoalesce;
+            const c1 = resolveCachedMediaUrl(convId, '401', 'm401', {
+                getMediaUrlFn: () => {
+                    coalesceUrlCalls++;
+                    return new Promise(r => { resolveCoalesce = r; });
+                }
+            });
+            const c2 = resolveCachedMediaUrl(convId, '401', 'm401', {
+                getMediaUrlFn: () => {
+                    coalesceUrlCalls++;
+                    return Promise.resolve({ url: 'https://r2.example.com/other' });
+                }
+            });
+            assert.equal(coalesceUrlCalls, 1);
+            resolveCoalesce({ url: 'https://r2.example.com/coalesced', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            assert.equal(await c1, 'https://r2.example.com/coalesced');
+            assert.equal(await c2, 'https://r2.example.com/coalesced');
+
+            let resEvictedMsgUrl;
+            const pEvictedMsg = resolveCachedMediaUrl(convId, '402', 'm402', {
+                getMediaUrlFn: () => new Promise(r => { resEvictedMsgUrl = r; })
+            });
+            evictMediaUrlCacheForMessage('402');
+            resEvictedMsgUrl({ url: 'https://r2.example.com/stale-402', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            assert.equal(await pEvictedMsg, null);
+
+            let resClearedMediaUrl;
+            const pClearedMedia = resolveCachedMediaUrl(convId, '403', 'm403', {
+                getMediaUrlFn: () => new Promise(r => { resClearedMediaUrl = r; })
+            });
+            clearMediaUrlCache();
+            resClearedMediaUrl({ url: 'https://r2.example.com/stale-403', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            assert.equal(await pClearedMedia, null);
+
+            // Detached <video> does not assign video.src after await
+            const origIO = globalThis.IntersectionObserver;
+            delete globalThis.IntersectionObserver;
+            const vidHost = document.createElement('div');
+            const detachedVideo = document.createElement('video');
+            detachedVideo.setAttribute('data-media-video', 'true');
+            detachedVideo.setAttribute('data-conversation-id', convId);
+            detachedVideo.setAttribute('data-message-id', '404');
+            detachedVideo.setAttribute('data-media-id', 'm404');
+            detachedVideo.isConnected = true;
+            vidHost.appendChild(detachedVideo);
+            let resVideoUrl;
+            hydrateMediaElements(vidHost, {
+                getMediaUrlFn: () => new Promise(r => { resVideoUrl = r; })
+            });
+            detachedVideo.isConnected = false;
+            resVideoUrl({ url: 'https://r2.example.com/video-404.mp4', expiresAtUtc: new Date(Date.now() + 600_000).toISOString() });
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(Boolean(detachedVideo.src), false);
+            if (origIO) globalThis.IntersectionObserver = origIO;
+
             lightbox.destroy();
             console.log('OK_MEDIA_LIGHTBOX_MEMORY_CACHE');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed ({exitCode}):\nSTDOUT:\n{output}\nSTDERR:\n{error}");
         Assert.Contains("OK_MEDIA_LIGHTBOX_MEMORY_CACHE", output);
     }

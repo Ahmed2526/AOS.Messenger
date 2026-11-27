@@ -166,41 +166,55 @@ public sealed class IdentityService : IIdentityService
 
     public async Task<bool> SoftDeleteAccountAsync(UserId userId, CancellationToken ct = default)
     {
-        var user = await _userManager.FindByIdAsync(userId.Value.ToString());
-        if (user is null)
+        var deleted = false;
+        var strategy = _dbContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            return false;
-        }
+            _dbContext.ChangeTracker.Clear();
 
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
-        try
-        {
-            var now = _timeProvider.GetUtcNow();
-            user.IsDeleted = true;
-            user.DeletedAtUtc = now;
-            user.ScheduledPermanentDeletionAtUtc = now.AddDays(30);
-
-            await _userManager.UpdateSecurityStampAsync(user);
-            await _userManager.UpdateAsync(user);
-
-            var sessions = await _dbContext.UserSessions
-                .Where(s => s.UserId == userId.Value && !s.IsRevoked)
-                .ToListAsync(ct);
-
-            foreach (var session in sessions)
+            var user = await _userManager.FindByIdAsync(userId.Value.ToString());
+            if (user is null)
             {
-                session.IsRevoked = true;
-                session.RevokedAtUtc = now;
-                _sessionCache.Invalidate(session.Id);
+                deleted = false;
+                return;
             }
 
-            await _dbContext.SaveChangesAsync(ct);
-            await transaction.CommitAsync(ct);
-        }
-        catch
+            await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
+            try
+            {
+                var now = _timeProvider.GetUtcNow();
+                user.IsDeleted = true;
+                user.DeletedAtUtc = now;
+                user.ScheduledPermanentDeletionAtUtc = now.AddDays(30);
+
+                await _userManager.UpdateSecurityStampAsync(user);
+                await _userManager.UpdateAsync(user);
+
+                var sessions = await _dbContext.UserSessions
+                    .Where(s => s.UserId == userId.Value && !s.IsRevoked)
+                    .ToListAsync(ct);
+
+                foreach (var session in sessions)
+                {
+                    session.IsRevoked = true;
+                    session.RevokedAtUtc = now;
+                    _sessionCache.Invalidate(session.Id);
+                }
+
+                await _dbContext.SaveChangesAsync(ct);
+                await transaction.CommitAsync(ct);
+                deleted = true;
+            }
+            catch
+            {
+                await transaction.RollbackAsync(ct);
+                throw;
+            }
+        });
+
+        if (!deleted)
         {
-            await transaction.RollbackAsync(ct);
-            throw;
+            return false;
         }
 
         await _terminator.DisconnectUserSessionsAsync(userId, ct);
@@ -322,47 +336,63 @@ public sealed class IdentityService : IIdentityService
     public async Task<(bool Succeeded, IEnumerable<string> Errors)> ResetPasswordAsync(
         ResetPasswordDto dto, CancellationToken ct = default)
     {
-        var user = await _userManager.FindByEmailAsync(dto.Email.Trim());
-        if (user is null || user.IsDeleted)
+        var trimmedEmail = dto.Email.Trim();
+        (bool Succeeded, IEnumerable<string> Errors, Guid UserGuid) outcome = (false, [], Guid.Empty);
+        var strategy = _dbContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            _passwordHasher.VerifyHashedPassword(DummyUser, DummyPasswordHash, dto.NewPassword);
-            return (false, ["User not found."]);
-        }
+            _dbContext.ChangeTracker.Clear();
 
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
-        try
-        {
-            var result = await _userManager.ResetPasswordAsync(user, dto.Token, dto.NewPassword);
-            if (!result.Succeeded)
+            var user = await _userManager.FindByEmailAsync(trimmedEmail);
+            if (user is null || user.IsDeleted)
+            {
+                _passwordHasher.VerifyHashedPassword(DummyUser, DummyPasswordHash, dto.NewPassword);
+                outcome = (false, ["User not found."], Guid.Empty);
+                return;
+            }
+
+            await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
+            try
+            {
+                var result = await _userManager.ResetPasswordAsync(user, dto.Token, dto.NewPassword);
+                if (!result.Succeeded)
+                {
+                    await transaction.RollbackAsync(ct);
+                    outcome = (false, result.Errors.Select(e => e.Description).ToArray(), Guid.Empty);
+                    return;
+                }
+
+                await _userManager.UpdateSecurityStampAsync(user);
+
+                var now = _timeProvider.GetUtcNow();
+                var sessions = await _dbContext.UserSessions
+                    .Where(s => s.UserId == user.Id && !s.IsRevoked)
+                    .ToListAsync(ct);
+
+                foreach (var session in sessions)
+                {
+                    session.IsRevoked = true;
+                    session.RevokedAtUtc = now;
+                    _sessionCache.Invalidate(session.Id);
+                }
+
+                await _dbContext.SaveChangesAsync(ct);
+                await transaction.CommitAsync(ct);
+                outcome = (true, [], user.Id);
+            }
+            catch
             {
                 await transaction.RollbackAsync(ct);
-                return (false, result.Errors.Select(e => e.Description));
+                throw;
             }
+        });
 
-            await _userManager.UpdateSecurityStampAsync(user);
-
-            var now = _timeProvider.GetUtcNow();
-            var sessions = await _dbContext.UserSessions
-                .Where(s => s.UserId == user.Id && !s.IsRevoked)
-                .ToListAsync(ct);
-
-            foreach (var session in sessions)
-            {
-                session.IsRevoked = true;
-                session.RevokedAtUtc = now;
-                _sessionCache.Invalidate(session.Id);
-            }
-
-            await _dbContext.SaveChangesAsync(ct);
-            await transaction.CommitAsync(ct);
-        }
-        catch
+        if (!outcome.Succeeded)
         {
-            await transaction.RollbackAsync(ct);
-            throw;
+            return (false, outcome.Errors);
         }
 
-        await _terminator.DisconnectUserSessionsAsync(user.ToDomainUserId(), ct);
+        await _terminator.DisconnectUserSessionsAsync(new UserId(outcome.UserGuid), ct);
 
         return (true, []);
     }
@@ -370,49 +400,64 @@ public sealed class IdentityService : IIdentityService
     public async Task<(bool Succeeded, IEnumerable<string> Errors)> ChangePasswordAsync(
         UserId userId, string currentPassword, string newPassword, CancellationToken ct = default)
     {
-        var user = await _userManager.FindByIdAsync(userId.Value.ToString());
-        if (user is null)
+        (bool Succeeded, IEnumerable<string> Errors) outcome = (false, []);
+        var strategy = _dbContext.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            _passwordHasher.VerifyHashedPassword(DummyUser, DummyPasswordHash, newPassword);
-            return (false, ["User not found."]);
-        }
+            _dbContext.ChangeTracker.Clear();
 
-        if (user.IsDeleted)
-        {
-            throw new ForbiddenException("Account is deleted");
-        }
+            var user = await _userManager.FindByIdAsync(userId.Value.ToString());
+            if (user is null)
+            {
+                _passwordHasher.VerifyHashedPassword(DummyUser, DummyPasswordHash, newPassword);
+                outcome = (false, ["User not found."]);
+                return;
+            }
 
-        await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
-        try
-        {
-            var result = await _userManager.ChangePasswordAsync(user, currentPassword, newPassword);
-            if (!result.Succeeded)
+            if (user.IsDeleted)
+            {
+                throw new ForbiddenException("Account is deleted");
+            }
+
+            await using var transaction = await _dbContext.Database.BeginTransactionAsync(ct);
+            try
+            {
+                var result = await _userManager.ChangePasswordAsync(user, currentPassword, newPassword);
+                if (!result.Succeeded)
+                {
+                    await transaction.RollbackAsync(ct);
+                    outcome = (false, result.Errors.Select(e => e.Description).ToArray());
+                    return;
+                }
+
+                await _userManager.UpdateSecurityStampAsync(user);
+
+                var now = _timeProvider.GetUtcNow();
+                var sessions = await _dbContext.UserSessions
+                    .Where(s => s.UserId == user.Id && !s.IsRevoked)
+                    .ToListAsync(ct);
+
+                foreach (var session in sessions)
+                {
+                    session.IsRevoked = true;
+                    session.RevokedAtUtc = now;
+                    _sessionCache.Invalidate(session.Id);
+                }
+
+                await _dbContext.SaveChangesAsync(ct);
+                await transaction.CommitAsync(ct);
+                outcome = (true, []);
+            }
+            catch
             {
                 await transaction.RollbackAsync(ct);
-                return (false, result.Errors.Select(e => e.Description));
+                throw;
             }
+        });
 
-            await _userManager.UpdateSecurityStampAsync(user);
-
-            var now = _timeProvider.GetUtcNow();
-            var sessions = await _dbContext.UserSessions
-                .Where(s => s.UserId == user.Id && !s.IsRevoked)
-                .ToListAsync(ct);
-
-            foreach (var session in sessions)
-            {
-                session.IsRevoked = true;
-                session.RevokedAtUtc = now;
-                _sessionCache.Invalidate(session.Id);
-            }
-
-            await _dbContext.SaveChangesAsync(ct);
-            await transaction.CommitAsync(ct);
-        }
-        catch
+        if (!outcome.Succeeded)
         {
-            await transaction.RollbackAsync(ct);
-            throw;
+            return outcome;
         }
 
         await _terminator.DisconnectUserSessionsAsync(userId, ct);

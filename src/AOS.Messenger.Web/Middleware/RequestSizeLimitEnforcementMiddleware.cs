@@ -1,10 +1,13 @@
+using System.IO.Pipelines;
+using Microsoft.AspNetCore.Http.Features;
 using Microsoft.AspNetCore.Http.Metadata;
 
 namespace AOS.Messenger.Web.Middleware;
 
 /// <summary>
-/// Enforces endpoint <see cref="IRequestSizeLimitMetadata"/> body-size limits uniformly across both
-/// <c>Content-Length</c> and chunked/unframed request streams (covering both Kestrel and TestServer).
+/// Enforces endpoint <see cref="IRequestSizeLimitMetadata"/> body-size limits uniformly across
+/// <c>Content-Length</c>, Kestrel native <see cref="IHttpMaxRequestBodySizeFeature"/>,
+/// <see cref="HttpRequest.Body"/>, and <see cref="IRequestBodyPipeFeature"/> (<see cref="HttpRequest.BodyReader"/>).
 /// </summary>
 public sealed class RequestSizeLimitEnforcementMiddleware
 {
@@ -20,10 +23,11 @@ public sealed class RequestSizeLimitEnforcementMiddleware
     {
         ArgumentNullException.ThrowIfNull(context);
 
-        var maxBodySize = context.GetEndpoint()?
-            .Metadata
-            .GetMetadata<IRequestSizeLimitMetadata>()?
-            .MaxRequestBodySize;
+        var endpoint = context.GetEndpoint();
+        var sizeLimitMetadata = endpoint?.Metadata.GetOrderedMetadata<IRequestSizeLimitMetadata>();
+        var maxBodySize = sizeLimitMetadata is { Count: > 0 }
+            ? sizeLimitMetadata[^1].MaxRequestBodySize
+            : null;
 
         if (!maxBodySize.HasValue)
         {
@@ -38,16 +42,39 @@ public sealed class RequestSizeLimitEnforcementMiddleware
                 StatusCodes.Status413PayloadTooLarge);
         }
 
+        var maxBodySizeFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+        if (maxBodySizeFeature is not null && !maxBodySizeFeature.IsReadOnly)
+        {
+            maxBodySizeFeature.MaxRequestBodySize = maxBodySize.Value;
+        }
+
         var originalBody = context.Request.Body;
-        context.Request.Body = new BoundedRequestBodyStream(originalBody, maxBodySize.Value);
+        var originalPipeFeature = context.Features.Get<IRequestBodyPipeFeature>();
+        var boundedStream = new BoundedRequestBodyStream(originalBody, maxBodySize.Value);
+        var boundedPipeReader = PipeReader.Create(boundedStream, new StreamPipeReaderOptions(leaveOpen: true));
+
+        context.Request.Body = boundedStream;
+        context.Features.Set<IRequestBodyPipeFeature>(new BoundedRequestBodyPipeFeature(boundedPipeReader));
         try
         {
             await _next(context);
         }
         finally
         {
+            boundedPipeReader.Complete();
             context.Request.Body = originalBody;
+            context.Features.Set<IRequestBodyPipeFeature?>(originalPipeFeature);
         }
+    }
+
+    private sealed class BoundedRequestBodyPipeFeature : IRequestBodyPipeFeature
+    {
+        public BoundedRequestBodyPipeFeature(PipeReader reader)
+        {
+            Reader = reader;
+        }
+
+        public PipeReader Reader { get; }
     }
 
     private sealed class BoundedRequestBodyStream : Stream

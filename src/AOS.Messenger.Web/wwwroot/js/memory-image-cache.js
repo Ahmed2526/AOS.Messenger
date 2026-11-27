@@ -347,6 +347,10 @@ export function parkLoadedFallbackImage(primaryImg) {
         freshPrimary.id = primaryImg.id;
     }
     freshPrimary.alt = '';
+    freshPrimary.draggable = false;
+    if (typeof freshPrimary.setAttribute === 'function') {
+        freshPrimary.setAttribute('draggable', 'false');
+    }
     freshPrimary.className = primaryImg.className || '';
     if (freshPrimary.classList && typeof freshPrimary.classList.add === 'function') {
         freshPrimary.classList.add('hidden');
@@ -446,6 +450,7 @@ export function createCachedImageLoader({
         if (!cacheKey) return false;
         const active = inFlight.get(cacheKey);
         if (active) {
+            active.evicted = true;
             abortEntry(active);
             inFlight.delete(cacheKey);
         }
@@ -459,6 +464,7 @@ export function createCachedImageLoader({
         scopeEpochs.set(normScope, getScopeEpoch(normScope) + 1);
         for (const [key, entry] of Array.from(inFlight.entries())) {
             if (entry.scopeKey === normScope) {
+                entry.evicted = true;
                 abortEntry(entry);
                 inFlight.delete(key);
             }
@@ -470,10 +476,30 @@ export function createCachedImageLoader({
         return cache.deleteWhere(matcher);
     }
 
+    function evictScopeExcept(scopeKey, keepCacheKey) {
+        const normScope = normScopeKey(scopeKey);
+        if (!normScope) return 0;
+        if (!keepCacheKey) {
+            return evictScope(normScope);
+        }
+
+        const keepKey = String(keepCacheKey);
+        for (const [key, entry] of Array.from(inFlight.entries())) {
+            if (entry.scopeKey === normScope && key !== keepKey) {
+                entry.evicted = true;
+                abortEntry(entry);
+                inFlight.delete(key);
+            }
+        }
+
+        return cache.deleteWhere((meta, key) => normScopeKey(meta?.scopeKey) === normScope && key !== keepKey);
+    }
+
     function clear() {
         globalEpoch++;
         scopeEpochs.clear();
         for (const entry of inFlight.values()) {
+            entry.evicted = true;
             abortEntry(entry);
         }
         inFlight.clear();
@@ -526,7 +552,14 @@ export function createCachedImageLoader({
         const activeCreateUrl = callCreateUrlFn || createObjectUrlFn;
         const activeRevokeUrl = callRevokeUrlFn || revokeObjectUrlFn;
 
-        const isStale = () => Boolean(signal?.aborted) || !isEpochValid(startGlobalEpoch, normScope, startScopeEpoch);
+        const flightEntry = {
+            promise: null,
+            controller,
+            scopeKey: normScope,
+            evicted: false
+        };
+
+        const isStale = () => Boolean(signal?.aborted) || flightEntry.evicted || !isEpochValid(startGlobalEpoch, normScope, startScopeEpoch);
 
         const promise = (async () => {
             let resolvedUrl = '';
@@ -636,11 +669,8 @@ export function createCachedImageLoader({
             }
         });
 
-        inFlight.set(cacheKey, {
-            promise,
-            controller,
-            scopeKey: normScope
-        });
+        flightEntry.promise = promise;
+        inFlight.set(cacheKey, flightEntry);
 
         return promise;
     }
@@ -652,6 +682,7 @@ export function createCachedImageLoader({
         setElement,
         evictKey,
         evictScope,
+        evictScopeExcept,
         clear,
         getEpochs,
         stats: () => ({

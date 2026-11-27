@@ -93,7 +93,7 @@ public sealed class MessagePersistence : IMessagePersistence
             await _db.SaveChangesAsync(ct);
             return new PersistMessageResult(message, IsNewlyCreated: true);
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex)
         {
             _db.Entry(message).State = EntityState.Detached;
 
@@ -103,6 +103,7 @@ public sealed class MessagePersistence : IMessagePersistence
                 return ValidateExistingIdempotentMessage(existingAfterRace, message);
             }
 
+            ThrowIfTranslatedSqlFailure(ex);
             throw;
         }
     }
@@ -133,49 +134,65 @@ public sealed class MessagePersistence : IMessagePersistence
                 System.Data.IsolationLevel.RepeatableRead,
                 ct);
 
-            var isStickerSendable = await (
-                from s in _db.Stickers.AsNoTracking()
-                join p in _db.StickerPacks.AsNoTracking() on s.PackId equals p.Id
-                where s.Id == stickerId
-                      && s.State == StickerState.Ready
-                      && s.PurgedAtUtc == null
-                      && !p.IsDeleted
-                      && (p.IsSystemPack
-                          || (!string.IsNullOrEmpty(s.ObjectKey)
-                              && (s.UploaderId == attemptMessage.SenderId
-                                  || _db.UserFavoriteStickers.Any(f => f.UserId == attemptMessage.SenderId && f.StickerId == stickerId)
-                                  || _db.UserRecentStickers.Any(r => r.UserId == attemptMessage.SenderId && r.StickerId == stickerId))))
-                select s.Id).AnyAsync(ct);
-
-            if (!isStickerSendable)
-            {
-                await tx.RollbackAsync(ct);
-                _db.ChangeTracker.Clear();
-                throw new NotFoundException("Sticker", stickerId.Value);
-            }
-
             try
             {
+                var isStickerSendable = await (
+                    from s in _db.Stickers.AsNoTracking()
+                    join p in _db.StickerPacks.AsNoTracking() on s.PackId equals p.Id
+                    where s.Id == stickerId
+                          && s.State == StickerState.Ready
+                          && s.PurgedAtUtc == null
+                          && (p.IsSystemPack
+                              ? !p.IsDeleted
+                              : (!string.IsNullOrEmpty(s.ObjectKey)
+                                 && ((!p.IsDeleted && s.UploaderId == attemptMessage.SenderId)
+                                     || _db.UserFavoriteStickers.Any(f => f.UserId == attemptMessage.SenderId && f.StickerId == stickerId)
+                                     || (_db.UserRecentStickers.Any(r => r.UserId == attemptMessage.SenderId && r.StickerId == stickerId)
+                                         && (!p.IsDeleted || s.UploaderId != attemptMessage.SenderId)))))
+                    select s.Id).AnyAsync(ct);
+
+                if (!isStickerSendable)
+                {
+                    await tx.RollbackAsync(ct);
+                    _db.ChangeTracker.Clear();
+
+                    var existingBeforeStickerCheck = await GetByIdempotencyKeyAsync(
+                        attemptMessage.SenderId,
+                        attemptMessage.IdempotencyKey,
+                        ct);
+                    if (existingBeforeStickerCheck is not null)
+                    {
+                        persistedResult = ValidateExistingIdempotentMessage(existingBeforeStickerCheck, attemptMessage);
+                        return;
+                    }
+
+                    throw new NotFoundException("Sticker", stickerId.Value);
+                }
+
                 _db.Messages.Add(attemptMessage);
                 await _db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
                 persistedResult = new PersistMessageResult(attemptMessage, IsNewlyCreated: true);
             }
-            catch (DbUpdateException)
+            catch (Exception ex) when (ex is DbUpdateException or SqlException)
             {
                 await tx.RollbackAsync(ct);
                 _db.ChangeTracker.Clear();
 
-                var existingAfterRace = await GetByIdempotencyKeyAsync(
-                    attemptMessage.SenderId,
-                    attemptMessage.IdempotencyKey,
-                    ct);
-                if (existingAfterRace is not null)
+                if (ex is DbUpdateException)
                 {
-                    persistedResult = ValidateExistingIdempotentMessage(existingAfterRace, attemptMessage);
-                    return;
+                    var existingAfterRace = await GetByIdempotencyKeyAsync(
+                        attemptMessage.SenderId,
+                        attemptMessage.IdempotencyKey,
+                        ct);
+                    if (existingAfterRace is not null)
+                    {
+                        persistedResult = ValidateExistingIdempotentMessage(existingAfterRace, attemptMessage);
+                        return;
+                    }
                 }
 
+                ThrowIfTranslatedSqlFailure(ex);
                 throw;
             }
         });
@@ -267,18 +284,22 @@ public sealed class MessagePersistence : IMessagePersistence
                 _db.Messages.Add(attemptMessage);
                 await _db.SaveChangesAsync(ct);
             }
-            catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+            catch (DbUpdateException ex)
             {
                 await tx.RollbackAsync(ct);
                 _db.ChangeTracker.Clear();
 
-                var resolvedAfterRace = await ResolveExistingIdempotentMediaMessageAsync(message, mediaIds, ct);
-                if (resolvedAfterRace is not null)
+                if (IsUniqueConstraintViolation(ex))
                 {
-                    persistedResult = resolvedAfterRace;
-                    return;
+                    var resolvedAfterRace = await ResolveExistingIdempotentMediaMessageAsync(message, mediaIds, ct);
+                    if (resolvedAfterRace is not null)
+                    {
+                        persistedResult = resolvedAfterRace;
+                        return;
+                    }
                 }
 
+                ThrowIfTranslatedSqlFailure(ex);
                 throw;
             }
 
@@ -291,17 +312,28 @@ public sealed class MessagePersistence : IMessagePersistence
 
                 foreach (var target in orderedTargets)
                 {
-                    var rowsAffected = await _db.Media
-                        .Where(m => m.Id == target.MediaId
-                                    && m.UploaderId == attemptMessage.SenderId
-                                    && m.ConversationId == attemptMessage.ConversationId
-                                    && m.State == MediaState.Uploaded
-                                    && m.MessageId == null)
-                        .ExecuteUpdateAsync(setters => setters
-                            .SetProperty(m => m.State, MediaState.Attached)
-                            .SetProperty(m => m.MessageId, (MessageId?)attemptMessage.Id)
-                            .SetProperty(m => m.DisplayOrder, target.DisplayOrder)
-                            .SetProperty(m => m.AttachedAtUtc, (DateTimeOffset?)attachedAtUtc), ct);
+                    int rowsAffected;
+                    try
+                    {
+                        rowsAffected = await _db.Media
+                            .Where(m => m.Id == target.MediaId
+                                        && m.UploaderId == attemptMessage.SenderId
+                                        && m.ConversationId == attemptMessage.ConversationId
+                                        && m.State == MediaState.Uploaded
+                                        && m.MessageId == null)
+                            .ExecuteUpdateAsync(setters => setters
+                                .SetProperty(m => m.State, MediaState.Attached)
+                                .SetProperty(m => m.MessageId, (MessageId?)attemptMessage.Id)
+                                .SetProperty(m => m.DisplayOrder, target.DisplayOrder)
+                                .SetProperty(m => m.AttachedAtUtc, (DateTimeOffset?)attachedAtUtc), ct);
+                    }
+                    catch (Exception ex) when (ex is DbUpdateException or SqlException)
+                    {
+                        await tx.RollbackAsync(ct);
+                        _db.ChangeTracker.Clear();
+                        ThrowIfTranslatedSqlFailure(ex);
+                        throw;
+                    }
 
                     if (rowsAffected != 1)
                     {
@@ -408,8 +440,9 @@ public sealed class MessagePersistence : IMessagePersistence
         {
             var cursorTime = cursorCreatedAtUtc.Value;
             var cId = cursorId;
-            query = query.Where(m => m.CreatedAtUtc < cursorTime ||
-                (m.CreatedAtUtc == cursorTime && m.Id < cId));
+            query = query.Where(m => m.CreatedAtUtc <= cursorTime
+                                     && (m.CreatedAtUtc < cursorTime
+                                         || (m.CreatedAtUtc == cursorTime && m.Id < cId)));
         }
 
         return await query
@@ -616,5 +649,24 @@ public sealed class MessagePersistence : IMessagePersistence
         }
 
         return false;
+    }
+
+    private static void ThrowIfTranslatedSqlFailure(Exception ex)
+    {
+        for (Exception? current = ex; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlEx)
+            {
+                if (sqlEx.Number == 1205)
+                {
+                    throw new ConflictException("A concurrent database conflict occurred. Please try again.", ex);
+                }
+
+                if (sqlEx.Number == 547)
+                {
+                    throw new ConflictException("The referenced conversation, sticker, or reply target was modified concurrently. Please try again.", ex);
+                }
+            }
+        }
     }
 }

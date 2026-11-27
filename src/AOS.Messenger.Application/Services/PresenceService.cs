@@ -72,12 +72,26 @@ public sealed class PresenceService : IPresenceService
             return new Dictionary<Guid, UserPresenceDto>();
         }
 
-        var lastSeenBatch = await _userPresencePersistence.GetLastSeenBatchAsync(eligiblePeerIds, ct);
+        var onlineStatus = new Dictionary<UserId, bool>(eligiblePeerIds.Count);
+        var offlinePeerIds = new List<UserId>();
+        foreach (var peerId in eligiblePeerIds)
+        {
+            var isOnline = _onlinePresenceTracker.IsUserOnline(peerId);
+            onlineStatus[peerId] = isOnline;
+            if (!isOnline)
+            {
+                offlinePeerIds.Add(peerId);
+            }
+        }
+
+        var lastSeenBatch = offlinePeerIds.Count > 0
+            ? await _userPresencePersistence.GetLastSeenBatchAsync(offlinePeerIds, ct)
+            : new Dictionary<UserId, DateTimeOffset?>();
 
         var result = new Dictionary<Guid, UserPresenceDto>(eligiblePeerIds.Count);
         foreach (var peerId in eligiblePeerIds)
         {
-            var isOnline = _onlinePresenceTracker.IsUserOnline(peerId);
+            var isOnline = onlineStatus[peerId];
             DateTimeOffset? lastSeen = null;
             if (!isOnline)
             {

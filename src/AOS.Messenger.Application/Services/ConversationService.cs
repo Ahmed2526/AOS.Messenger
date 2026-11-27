@@ -27,18 +27,24 @@ public sealed class ConversationService : IConversationService
         IUserReader userReader,
         IBlockPersistence blockPersistence,
         IBlockService blockService,
+        IMediaPersistence mediaPersistence,
         IOnlinePresenceTracker? onlinePresenceTracker = null,
         IUserPresencePersistence? userPresencePersistence = null,
-        TimeProvider? timeProvider = null,
-        IMediaPersistence? mediaPersistence = null)
+        TimeProvider? timeProvider = null)
     {
+        ArgumentNullException.ThrowIfNull(conversationPersistence);
+        ArgumentNullException.ThrowIfNull(userReader);
+        ArgumentNullException.ThrowIfNull(blockPersistence);
+        ArgumentNullException.ThrowIfNull(blockService);
+        ArgumentNullException.ThrowIfNull(mediaPersistence);
+
         _conversationPersistence = conversationPersistence;
         _userReader = userReader;
         _blockPersistence = blockPersistence;
         _blockService = blockService;
+        _mediaPersistence = mediaPersistence;
         _onlinePresenceTracker = onlinePresenceTracker ?? NullOnlinePresenceTracker.Instance;
         _userPresencePersistence = userPresencePersistence;
-        _mediaPersistence = mediaPersistence ?? NullMediaPersistence.Instance;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -274,7 +280,9 @@ public sealed class ConversationService : IConversationService
                 }
                 else
                 {
-                    lastMessagePreview = lastMessage.Content;
+                    lastMessagePreview = MediaPreviewFormatter.FormatPreview(
+                        lastMessage.Content,
+                        (IReadOnlyList<Media>?)null);
                 }
             }
 

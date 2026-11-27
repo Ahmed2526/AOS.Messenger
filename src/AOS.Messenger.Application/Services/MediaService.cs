@@ -246,6 +246,11 @@ public sealed class MediaService : IMediaService
             throw new DomainException("Uploaded file was not found in staging storage. Please upload again.");
         }
 
+        if (string.IsNullOrWhiteSpace(stagingMeta.ETag))
+        {
+            throw new MediaStorageException("Uploaded media metadata is missing required ETag.");
+        }
+
         var maxAllowedBytes = MediaConstraints.GetMaxSizeBytes(media.Kind);
         if (stagingMeta.ContentLength <= 0
             || stagingMeta.ContentLength > maxAllowedBytes
@@ -402,13 +407,21 @@ public sealed class MediaService : IMediaService
             }
 
             var reloaded = await _mediaPersistence.GetByIdNoTrackingAsync(mediaId, ct);
-            if (reloaded is not null && reloaded.State == MediaState.Uploaded)
+            if (reloaded?.State != MediaState.Pending)
             {
                 await BestEffortDeleteStorageAsync(stagingKey, mediaId, CancellationToken.None);
+            }
+
+            if (reloaded is not null && reloaded.State == MediaState.Uploaded)
+            {
                 return ToAttachmentDto(reloaded);
             }
 
-            await BestEffortDeleteStorageAsync(stagingKey, mediaId, CancellationToken.None);
+            if (reloaded is not null && reloaded.State == MediaState.Failed)
+            {
+                throw new DomainException(reloaded.FailureReason ?? "Media upload verification failed.");
+            }
+
             throw;
         }
 
@@ -472,20 +485,23 @@ public sealed class MediaService : IMediaService
 
         if (media.State == MediaState.Failed)
         {
-            if (media.PurgedAtUtc is null && await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, ct))
+            if (media.PurgedAtUtc is null)
             {
-                if (thumbKeyToDelete is not null)
+                var mainDeleted = await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, CancellationToken.None);
+                var thumbDeleted = thumbKeyToDelete is null
+                    || await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, CancellationToken.None);
+
+                if (mainDeleted && thumbDeleted)
                 {
-                    await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, ct);
-                }
-                media.MarkPurged(_timeProvider.GetUtcNow());
-                try
-                {
-                    await _mediaPersistence.UpdateAsync(media, ct);
-                }
-                catch (ConflictException)
-                {
-                    // Cleanup or concurrent purge won cleanly.
+                    media.MarkPurged(_timeProvider.GetUtcNow());
+                    try
+                    {
+                        await _mediaPersistence.UpdateAsync(media, CancellationToken.None);
+                    }
+                    catch (ConflictException)
+                    {
+                        // Cleanup or concurrent purge won cleanly.
+                    }
                 }
             }
 
@@ -510,17 +526,15 @@ public sealed class MediaService : IMediaService
             throw;
         }
 
-        var deleted = await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, ct);
-        if (thumbKeyToDelete is not null)
-        {
-            await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, ct);
-        }
-        if (deleted)
+        var deleted = await BestEffortDeleteStorageAsync(objectKeyToDelete, mediaId, CancellationToken.None);
+        var thumbPurged = thumbKeyToDelete is null
+            || await BestEffortDeleteStorageAsync(thumbKeyToDelete, mediaId, CancellationToken.None);
+        if (deleted && thumbPurged)
         {
             media.MarkPurged(_timeProvider.GetUtcNow());
             try
             {
-                await _mediaPersistence.UpdateAsync(media, ct);
+                await _mediaPersistence.UpdateAsync(media, CancellationToken.None);
             }
             catch (ConflictException)
             {
@@ -549,44 +563,25 @@ public sealed class MediaService : IMediaService
         ArgumentNullException.ThrowIfNull(messageId);
         ArgumentNullException.ThrowIfNull(mediaId);
 
-        var conversation = await _conversationPersistence.GetByIdAsync(conversationId, ct);
-        if (conversation is null)
+        var authContext = await _mediaPersistence.GetAuthorizedDownloadContextAsync(
+            callerId,
+            conversationId,
+            messageId,
+            mediaId,
+            ct);
+
+        if (!authContext.ConversationExists)
         {
             throw new NotFoundException("Conversation", conversationId.Value);
         }
 
-        if (!conversation.HasParticipant(callerId))
+        if (!authContext.IsParticipant)
         {
             throw new ForbiddenException("User is not a participant in this conversation.");
         }
 
-        var message = await _messagePersistence.GetByIdAsync(conversationId, messageId, ct);
-        if (message is null || message.IsDeletedForEveryone)
-        {
-            throw new NotFoundException("Media", mediaId.Value);
-        }
-
-        var cutoff = await GetEffectiveCutoffUtcAsync(conversationId, callerId, ct);
-        if (cutoff.HasValue && message.CreatedAtUtc < cutoff.Value)
-        {
-            throw new NotFoundException("Media", mediaId.Value);
-        }
-
-        var isHiddenForCaller = await _messagePersistence.IsMessageDeletedForUserAsync(
-            conversationId,
-            messageId,
-            callerId,
-            ct);
-        if (isHiddenForCaller)
-        {
-            throw new NotFoundException("Media", mediaId.Value);
-        }
-
-        var media = await _mediaPersistence.GetByIdNoTrackingAsync(mediaId, ct);
-        if (media is null
-            || media.ConversationId != conversationId
-            || media.MessageId != messageId
-            || media.State != MediaState.Attached)
+        var media = authContext.Media;
+        if (media is null)
         {
             throw new NotFoundException("Media", mediaId.Value);
         }
@@ -709,27 +704,6 @@ public sealed class MediaService : IMediaService
             _logger.LogWarning(ex, "Best-effort storage cleanup failed for media {MediaId}.", mediaId.Value);
             return false;
         }
-    }
-
-    private async Task<DateTimeOffset?> GetEffectiveCutoffUtcAsync(
-        ConversationId conversationId,
-        UserId callerId,
-        CancellationToken ct)
-    {
-        var userState = await _conversationPersistence.GetUserStateAsync(conversationId, callerId, ct);
-        if (userState is null)
-        {
-            return null;
-        }
-
-        DateTimeOffset? cutoff = userState.ClearedAtUtc;
-        if (userState.DeletedAtUtc.HasValue &&
-            (!cutoff.HasValue || userState.DeletedAtUtc.Value > cutoff.Value))
-        {
-            cutoff = userState.DeletedAtUtc.Value;
-        }
-
-        return cutoff;
     }
 
     private static MediaAttachmentDto ToAttachmentDto(Media media)

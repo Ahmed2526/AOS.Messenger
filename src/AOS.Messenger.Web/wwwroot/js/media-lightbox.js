@@ -33,7 +33,8 @@ export function isSafeMediaUrl(rawUrl) {
         return /^\/dev-media\/download(?:\?|$)/i.test(trimmed) ||
                /^\/api\/conversations\/[0-9a-f-]+\/messages\/\d+\/media\/[0-9a-f-]+(?:\?|$)/i.test(trimmed) ||
                /^\/api\/users\/[0-9a-f-]+\/avatar(?:\?|$)/i.test(trimmed) ||
-               /^\/api\/stickers\/[0-9a-f-]+\/image(?:\?|$)/i.test(trimmed);
+               /^\/api\/stickers\/[0-9a-f-]+\/image(?:\?|$)/i.test(trimmed) ||
+               /^\/stickers\/packs\/[a-z0-9-]+\/[a-z0-9-]+\.webp$/i.test(trimmed);
     }
 
     try {
@@ -570,18 +571,21 @@ export function createMediaLightbox({
                 ? Array.from(row.querySelectorAll('[data-lightbox-trigger="true"]'))
                 : [trigger];
 
-            const galleryItems = triggers
+            const validEntries = triggers
                 .map(btn => ({
-                    conversationId: btn.getAttribute('data-conversation-id') || '',
-                    messageId: btn.getAttribute('data-message-id') || '',
-                    mediaId: btn.getAttribute('data-media-id') || '',
-                    fileName: btn.getAttribute('data-file-name') || 'Image'
+                    btn,
+                    item: {
+                        conversationId: btn.getAttribute('data-conversation-id') || '',
+                        messageId: btn.getAttribute('data-message-id') || '',
+                        mediaId: btn.getAttribute('data-media-id') || '',
+                        fileName: btn.getAttribute('data-file-name') || 'Image'
+                    }
                 }))
-                .filter(it => it.conversationId && it.messageId && it.mediaId);
+                .filter(entry => entry.item.conversationId && entry.item.messageId && entry.item.mediaId);
 
-            if (galleryItems.length > 0) {
-                const clickedIdx = Math.max(0, triggers.indexOf(trigger));
-                open(galleryItems, clickedIdx);
+            if (validEntries.length > 0) {
+                const clickedIdx = Math.max(0, validEntries.findIndex(entry => entry.btn === trigger));
+                open(validEntries.map(entry => entry.item), clickedIdx);
             }
             return;
         }

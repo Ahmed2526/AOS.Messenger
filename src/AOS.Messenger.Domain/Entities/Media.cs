@@ -165,6 +165,11 @@ public sealed class Media : Entity<MediaId>
             throw new DomainException($"Image height must be between 1 and {MediaConstraints.MaxImageHeight} pixels.");
         }
 
+        if (width.HasValue && height.HasValue && (long)width.Value * height.Value > MediaConstraints.MaxImagePixels)
+        {
+            throw new DomainException($"Image resolution exceeds the maximum allowed {MediaConstraints.MaxImagePixels:N0} pixels.");
+        }
+
         if (durationMs.HasValue && durationMs.Value <= 0)
         {
             throw new DomainException("Media duration must be positive when specified.");

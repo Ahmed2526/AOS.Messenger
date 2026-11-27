@@ -151,7 +151,7 @@ export function validateSelectedFile(file) {
 }
 
 function createBlobPreviewUrl(file, kind) {
-    if (kind !== 'image' && kind !== 'video') return null;
+    if (kind !== 'image') return null;
     if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
         try {
             return URL.createObjectURL(file);
@@ -321,7 +321,9 @@ export function createMediaUploader({
                 const thumb = document.createElement('img');
                 thumb.src = item.previewUrl;
                 thumb.alt = item.fileName;
-                thumb.className = 'w-10 h-10 rounded-lg object-cover shrink-0';
+                thumb.draggable = false;
+                thumb.setAttribute('draggable', 'false');
+                thumb.className = 'w-10 h-10 rounded-lg object-cover shrink-0 select-none';
                 chip.appendChild(thumb);
             } else {
                 const iconBox = document.createElement('div');
@@ -630,44 +632,50 @@ export function createMediaUploader({
     async function uploadSingleItem(job, item) {
         if (job.cancelled || isTerminated) return;
 
-        let initiatedMediaId = null;
+        let initiatedMediaId = item.stagedReady && item.mediaId ? item.mediaId : null;
+        let stage = item.stagedReady && item.mediaId ? 'completing' : 'initiating';
         try {
-            item.status = 'initiating';
             item.errorMessage = '';
-            item.progress = 0;
-            item.abortController = typeof AbortController === 'function' ? new AbortController() : null;
-            renderIfActive(job);
+            if (!initiatedMediaId) {
+                item.status = 'initiating';
+                item.progress = 0;
+                item.abortController = typeof AbortController === 'function' ? new AbortController() : null;
+                renderIfActive(job);
 
-            const initResp = await api.initiateMediaUpload(
-                job.conversationId,
-                {
-                    fileName: item.fileName,
-                    contentType: item.contentType,
-                    sizeBytes: item.sizeBytes
-                },
-                { signal: item.abortController?.signal }
-            );
-            initiatedMediaId = initResp?.mediaId ?? initResp?.MediaId ?? null;
-            if (job.cancelled || isTerminated) {
-                if (initiatedMediaId) {
-                    Promise.resolve(api.cancelMediaUpload(job.conversationId, initiatedMediaId)).catch(() => {});
+                const initResp = await api.initiateMediaUpload(
+                    job.conversationId,
+                    {
+                        fileName: item.fileName,
+                        contentType: item.contentType,
+                        sizeBytes: item.sizeBytes
+                    },
+                    { signal: item.abortController?.signal }
+                );
+                initiatedMediaId = initResp?.mediaId ?? initResp?.MediaId ?? null;
+                if (job.cancelled || isTerminated) {
+                    if (initiatedMediaId) {
+                        Promise.resolve(api.cancelMediaUpload(job.conversationId, initiatedMediaId)).catch(() => {});
+                    }
+                    return;
                 }
-                return;
+                const uploadUrl = initResp?.uploadUrl ?? initResp?.UploadUrl;
+                const requiredMime = initResp?.requiredContentType ?? initResp?.RequiredContentType ?? item.contentType;
+                item.mediaId = initiatedMediaId;
+
+                if (!initiatedMediaId || !uploadUrl) {
+                    throw new Error('Invalid upload initialization response.');
+                }
+
+                stage = 'uploading';
+                item.status = 'uploading';
+                renderIfActive(job);
+
+                await putFileWithXhr(job, item, uploadUrl, requiredMime);
+                if (job.cancelled || isTerminated) return;
             }
-            const uploadUrl = initResp?.uploadUrl ?? initResp?.UploadUrl;
-            const requiredMime = initResp?.requiredContentType ?? initResp?.RequiredContentType ?? item.contentType;
-            item.mediaId = initiatedMediaId;
 
-            if (!initiatedMediaId || !uploadUrl) {
-                throw new Error('Invalid upload initialization response.');
-            }
-
-            item.status = 'uploading';
-            renderIfActive(job);
-
-            await putFileWithXhr(job, item, uploadUrl, requiredMime);
-            if (job.cancelled || isTerminated) return;
-
+            stage = 'completing';
+            item.stagedReady = true;
             item.status = 'completing';
             item.progress = 100;
             item.abortController = typeof AbortController === 'function' ? new AbortController() : null;
@@ -680,6 +688,7 @@ export function createMediaUploader({
             );
             if (job.cancelled || isTerminated) return;
 
+            item.stagedReady = false;
             item.status = 'verified';
             item.verifiedAtMs = nowFn();
             item.errorMessage = '';
@@ -696,12 +705,28 @@ export function createMediaUploader({
                 return;
             }
 
-            if (initiatedMediaId && item.status !== 'completing') {
+            const nonRetryable = status === 400 || status === 403 || status === 413;
+            const isTransientCompletingFailure = stage === 'completing'
+                && (status === 0 || status === 408 || status === 429 || status >= 500);
+
+            if (isTransientCompletingFailure && initiatedMediaId) {
+                // Keep staged mediaId so Retry only re-runs completion and Cancel can still release the pending quota slot.
+                item.mediaId = initiatedMediaId;
+                item.stagedReady = true;
+                item.verifiedAtMs = null;
+                item.status = 'failed';
+                item.retryable = true;
+                item.errorMessage = err?.message || 'Upload verification timed out. Retry to finish.';
+                renderIfActive(job);
+                return;
+            }
+
+            if (initiatedMediaId) {
                 Promise.resolve(api.cancelMediaUpload(job.conversationId, initiatedMediaId)).catch(() => {});
             }
 
-            const nonRetryable = status === 400 || status === 403 || status === 413;
             item.mediaId = null;
+            item.stagedReady = false;
             item.verifiedAtMs = null;
             item.status = 'failed';
             item.retryable = !nonRetryable;
@@ -797,6 +822,7 @@ export function createMediaUploader({
             if (status === 409 || err?.code === 'CONFLICT') {
                 for (const item of job.items) {
                     item.mediaId = null;
+                    item.stagedReady = false;
                     item.verifiedAtMs = null;
                     item.status = 'failed';
                     item.progress = 0;
@@ -847,6 +873,7 @@ export function createMediaUploader({
                 status: 'queued',
                 progress: 0,
                 mediaId: null,
+                stagedReady: false,
                 verifiedAtMs: null,
                 retryable: true,
                 errorMessage: '',
@@ -888,11 +915,17 @@ export function createMediaUploader({
                 anyInvalidated = true;
             }
             if (item.status === 'verified' || item.retryable) {
-                item.status = 'queued';
-                item.mediaId = null;
-                item.verifiedAtMs = null;
-                item.progress = 0;
-                item.errorMessage = '';
+                if (item.stagedReady && item.mediaId) {
+                    item.status = 'queued';
+                    item.errorMessage = '';
+                } else {
+                    item.status = 'queued';
+                    item.mediaId = null;
+                    item.stagedReady = false;
+                    item.verifiedAtMs = null;
+                    item.progress = 0;
+                    item.errorMessage = '';
+                }
             }
         }
 

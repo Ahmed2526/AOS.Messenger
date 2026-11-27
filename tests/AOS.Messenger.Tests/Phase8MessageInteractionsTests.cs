@@ -16,6 +16,7 @@ using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure.Identity;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
+using AOS.Messenger.Tests.TestDoubles;
 using AOS.Messenger.Web.Controllers;
 using AOS.Messenger.Web.Converters;
 using Microsoft.AspNetCore.Authentication;
@@ -93,7 +94,8 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             new NullRealtimeNotifier(),
             reactionPersistence,
             logger,
-            fakeTime);
+            fakeTime,
+            NullMediaPersistence.Instance);
 
         return (service, db, fakeTime);
     }
@@ -837,7 +839,8 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             notifier,
             new ReactionPersistence(db),
             scope.ServiceProvider.GetRequiredService<ILogger<MessageService>>(),
-            fakeTime);
+            fakeTime,
+            NullMediaPersistence.Instance);
 
         var userA = await SeedUserAsync(db, "alice_rt", "Alice");
         var userB = await SeedUserAsync(db, "bob_rt", "Bob");
@@ -1242,20 +1245,124 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
         var idB = new UserId(userB.Id);
         var conv = await SeedConversationAsync(db, idA, idB);
 
-        // Index 99 is the high surrogate of 🚀
-        var contentWithBoundaryEmoji = new string('a', 99) + "🚀" + " trailing text";
+        // Index 96 is the high surrogate of 🚀 (strict <= 100 char preview reserve 3 chars for '...')
+        var contentWithBoundaryEmoji = new string('a', 96) + "🚀" + " trailing text";
         var parent = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto(contentWithBoundaryEmoji, Guid.NewGuid().ToString("N")));
         var reply = await service.SendMessageAsync(idB, conv.Id, new SendMessageRequestDto("Reply check", Guid.NewGuid().ToString("N"), parent.Id));
 
         Assert.NotNull(reply.ReplyTo);
         var sendPreview = reply.ReplyTo.PreviewContent;
-        Assert.Equal(new string('a', 99) + "...", sendPreview);
+        Assert.Equal(new string('a', 96) + "...", sendPreview);
+        Assert.True(sendPreview.Length <= 100);
         Assert.DoesNotContain(sendPreview.EnumerateRunes(), r => r.Value == 0xFFFD);
 
         var page = await service.GetMessagesAsync(idA, conv.Id, null);
         var fetchedReply = page.Messages.First(m => m.Id == reply.Id);
         Assert.NotNull(fetchedReply.ReplyTo);
-        Assert.Equal(new string('a', 99) + "...", fetchedReply.ReplyTo.PreviewContent);
+        Assert.Equal(new string('a', 96) + "...", fetchedReply.ReplyTo.PreviewContent);
+    }
+
+    [Fact]
+    public async Task MessageService_CursorsAndPreviewsAndDeleteIdempotency_EnforceHardeningRules()
+    {
+        using var scope = _fixture.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var fakeTime = new TestTimeProvider(new DateTimeOffset(2026, 11, 26, 10, 0, 0, TimeSpan.Zero));
+        var deletingBroadcasts = 0;
+        var notifier = new CountingDeleteNotifier(() => Interlocked.Increment(ref deletingBroadcasts));
+        var service = new MessageService(
+            new MessagePersistence(db),
+            new ConversationPersistence(db),
+            new BlockPersistence(db),
+            new UserReader(db),
+            notifier,
+            new ReactionPersistence(db),
+            scope.ServiceProvider.GetRequiredService<ILogger<MessageService>>(),
+            fakeTime,
+            NullMediaPersistence.Instance);
+
+        var userA = await SeedUserAsync(db, "cursor_a", "Cursor A");
+        userA.AvatarVersion = "vcaller1";
+        var userB = await SeedUserAsync(db, "cursor_b", "Cursor B");
+        userB.AvatarVersion = "vpeer1";
+        await db.SaveChangesAsync();
+
+        var idA = new UserId(userA.Id);
+        var idB = new UserId(userB.Id);
+        var conv = await SeedConversationAsync(db, idA, idB);
+
+        var longMsg = new string('z', 150);
+        await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto(longMsg, Guid.NewGuid().ToString("N")));
+        fakeTime.Advance(TimeSpan.FromSeconds(1));
+        var second = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("second", Guid.NewGuid().ToString("N")));
+        fakeTime.Advance(TimeSpan.FromSeconds(1));
+        var third = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("third", Guid.NewGuid().ToString("N")));
+
+        // 1. PageSize = 1 emits Base64Url cursor (no +, /, =) and fetches older page cleanly
+        var p1 = await service.GetMessagesAsync(idA, conv.Id, null, pageSize: 1);
+        Assert.NotNull(p1.NextCursor);
+        Assert.DoesNotContain("+", p1.NextCursor);
+        Assert.DoesNotContain("/", p1.NextCursor);
+        Assert.DoesNotContain("=", p1.NextCursor);
+
+        var p2 = await service.GetMessagesAsync(idA, conv.Id, p1.NextCursor, pageSize: 1);
+        Assert.Single(p2.Messages);
+        Assert.Equal(second.Id, p2.Messages[0].Id);
+
+        // Legacy standard Base64 cursor remains accepted while oversized or zero-id cursors throw DomainException
+        var legacyCursor = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{third.CreatedAtUtc.UtcTicks}:{third.Id.Value}"));
+        var legacyPage = await service.GetMessagesAsync(idA, conv.Id, legacyCursor, pageSize: 1);
+        Assert.Equal(second.Id, Assert.Single(legacyPage.Messages).Id);
+
+        await Assert.ThrowsAsync<DomainException>(() => service.GetMessagesAsync(idA, conv.Id, new string('A', 129)));
+        var zeroIdCursor = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{third.CreatedAtUtc.UtcTicks}:0"));
+        await Assert.ThrowsAsync<DomainException>(() => service.GetMessagesAsync(idA, conv.Id, zeroIdCursor));
+
+        // 2. DeleteForMe falling back to plain-text > 100 char message truncates preview to <= 100 chars
+        await service.DeleteForMeAsync(idA, conv.Id, third.Id);
+        await service.DeleteForMeAsync(idA, conv.Id, second.Id);
+        var lastDto = notifier.LastDeletedForMe;
+        Assert.NotNull(lastDto);
+        Assert.NotNull(lastDto.NewLastMessagePreview);
+        Assert.True(lastDto.NewLastMessagePreview!.Length <= 100);
+        Assert.EndsWith("...", lastDto.NewLastMessagePreview);
+
+        // 3. DeleteForEveryoneAsync called twice is idempotent and broadcasts only once
+        fakeTime.Advance(TimeSpan.FromSeconds(1));
+        var fourth = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("fourth", Guid.NewGuid().ToString("N")));
+        await service.DeleteForEveryoneAsync(idA, conv.Id, fourth.Id);
+        var secondDel = await service.DeleteForEveryoneAsync(idA, conv.Id, fourth.Id);
+        Assert.Equal(fourth.Id.Value, secondDel.MessageId);
+        Assert.Equal(1, deletingBroadcasts);
+
+        // 4. Caller's own SenderAvatarVersion stays populated in a blocked conversation while peer's is redacted
+        await new BlockPersistence(db).AddBlockAsync(UserBlock.Create(idB, idA, fakeTime.GetUtcNow()));
+        var blockedRead = await service.GetMessagesAsync(idA, conv.Id, null, pageSize: 10);
+        Assert.All(blockedRead.Messages.Where(m => m.SenderId == idA), m => Assert.Equal("vcaller1", m.SenderAvatarVersion));
+    }
+
+    private sealed class CountingDeleteNotifier : IRealtimeNotifier
+    {
+        private readonly Action _onDeleteForEveryone;
+        public MessageDeletedForMeDto? LastDeletedForMe { get; private set; }
+        public CountingDeleteNotifier(Action onDeleteForEveryone) => _onDeleteForEveryone = onDeleteForEveryone;
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default)
+        {
+            _onDeleteForEveryone();
+            return Task.CompletedTask;
+        }
+        public Task NotifyMessageDeletedForMeAsync(UserId callerUserId, MessageDeletedForMeDto message, CancellationToken ct = default)
+        {
+            LastDeletedForMe = message;
+            return Task.CompletedTask;
+        }
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Fact]
@@ -1298,7 +1405,8 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             notifier,
             new ReactionPersistence(db),
             scope.ServiceProvider.GetRequiredService<ILogger<MessageService>>(),
-            fakeTime);
+            fakeTime,
+            NullMediaPersistence.Instance);
 
         var userA = await SeedUserAsync(db, "alice_noop", "Alice");
         var userB = await SeedUserAsync(db, "bob_noop", "Bob");
@@ -1336,7 +1444,8 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             notifier,
             new ReactionPersistence(db),
             scope.ServiceProvider.GetRequiredService<ILogger<MessageService>>(),
-            fakeTime);
+            fakeTime,
+            NullMediaPersistence.Instance);
 
         var userA = await SeedUserAsync(db, "alice_delcut", "Alice");
         var userB = await SeedUserAsync(db, "bob_delcut", "Bob");
@@ -1427,9 +1536,36 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             new UserReader(db),
             new BlockPersistence(db),
             new BlockService(new BlockPersistence(db), new UserReader(db), time),
+            NullMediaPersistence.Instance,
             timeProvider: time);
         var list = await convService.GetConversationListAsync(idB);
         Assert.DoesNotContain(list, c => c.Id == conv.Id);
+    }
+
+    [Fact]
+    public async Task SendMessage_IdempotentReplyReplay_AfterDeleteForMeOnParent_OmitsInvisibleParent()
+    {
+        var (service, db, time) = CreateService();
+        var userA = await SeedUserAsync(db, "alice_repvis", "Alice");
+        var userB = await SeedUserAsync(db, "bob_repvis", "Bob");
+        var idA = new UserId(userA.Id);
+        var idB = new UserId(userB.Id);
+        var conv = await SeedConversationAsync(db, idA, idB);
+
+        var parent = await service.SendMessageAsync(idB, conv.Id, new SendMessageRequestDto("Secret Parent", Guid.NewGuid().ToString("N")));
+        time.Advance(TimeSpan.FromSeconds(5));
+        var replyKey = Guid.NewGuid().ToString("N");
+        var initialReply = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("Reply Body", replyKey, parent.Id));
+        Assert.NotNull(initialReply.ReplyTo);
+        Assert.Equal(parent.Id.Value, initialReply.ReplyTo!.MessageId);
+
+        // Hide the parent message via DeleteForMe for Alice
+        await service.DeleteForMeAsync(idA, conv.Id, parent.Id);
+
+        // Replaying the idempotent reply returns the existing reply without leaking the hidden parent preview
+        var replayed = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("Reply Body", replyKey, parent.Id));
+        Assert.Equal(initialReply.Id, replayed.Id);
+        Assert.Null(replayed.ReplyTo);
     }
 
     private static MessageService CreateScopedMessageService(IServiceProvider provider)
@@ -1442,6 +1578,7 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
             new NullRealtimeNotifier(),
             new ReactionPersistence(provider.GetRequiredService<ApplicationDbContext>()),
             provider.GetRequiredService<ILogger<MessageService>>(),
-            TimeProvider.System);
+            TimeProvider.System,
+            NullMediaPersistence.Instance);
     }
 }

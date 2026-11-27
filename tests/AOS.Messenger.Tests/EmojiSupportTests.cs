@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using AOS.Messenger.Application.Common;
@@ -12,6 +11,7 @@ using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure.Identity;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
+using AOS.Messenger.Tests.TestDoubles;
 using AOS.Messenger.Web.Helpers;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -47,51 +47,6 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         Assert.True(File.Exists(path), $"JS module not found: {path}");
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeModuleScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start node process for ES module verification.");
-
-        var outputBuilder = new StringBuilder();
-        var errorBuilder = new StringBuilder();
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) outputBuilder.AppendLine(e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) errorBuilder.AppendLine(e.Data);
-        };
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        if (!process.WaitForExit(15000))
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException("Node ES module verification timed out.");
-        }
-
-        process.WaitForExit();
-        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
     }
 
     private static async Task<ApplicationUser> SeedUserAsync(ApplicationDbContext db, string userName, string displayName)
@@ -136,7 +91,8 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
             NoOpRealtimeNotifier.Instance,
             new ReactionPersistence(db),
             scope.ServiceProvider.GetRequiredService<ILogger<MessageService>>(),
-            fakeTime);
+            fakeTime,
+            NullMediaPersistence.Instance);
 
         return (service, db, fakeTime);
     }
@@ -337,7 +293,7 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
     }
 
     [Fact]
-    public void ClientModules_EmojiUtilsPickerAndAutocomplete_VerifyWhatsAppBehavior()
+    public async Task ClientModules_EmojiUtilsPickerAndAutocomplete_VerifyWhatsAppBehavior()
     {
         var utilsUrl = JsUrl("emoji-utils.js");
         var dataUrl = JsUrl("emoji-data.js");
@@ -715,7 +671,7 @@ public sealed class EmojiSupportTests : IClassFixture<SqlTestDatabaseFixture>
             console.log('ALL_EMOJI_CLIENT_CHECKS_PASSED');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node verification failed (exit {exitCode}).\nSTDOUT:\n{output}\nSTDERR:\n{error}");
         Assert.Contains("ALL_EMOJI_CLIENT_CHECKS_PASSED", output);
     }

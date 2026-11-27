@@ -1610,4 +1610,139 @@ public sealed class Phase9MediaServicesAndCleanupTests : IClassFixture<SqlTestDa
             CancellationToken ct = default) =>
             throw new ConflictException(_message);
     }
+
+    [Fact]
+    public async Task MediaCleanupService_RetiresDeletedPackStickersInSqlBeforeDeletingStorage_AndGatesPermanentOrphanSweep()
+    {
+        var services = _fixture.CreateServiceCollection();
+        var clock = new TestCleanupTimeProvider(new DateTimeOffset(2026, 11, 26, 12, 0, 0, TimeSpan.Zero));
+        services.AddSingleton<TimeProvider>(clock);
+
+        var tempRoot = Path.Combine(Path.GetTempPath(), $"aos_cleanup_step4_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempRoot);
+        try
+        {
+            await using var provider = services.BuildServiceProvider();
+            await using var seedScope = provider.CreateAsyncScope();
+            var db = seedScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var owner = await SeedUserAsync(db, "clean_step4", "Clean Step4");
+            var ownerId = owner.ToDomainUserId();
+            var now = clock.GetUtcNow();
+
+            var pack = StickerPack.CreateCustom(ownerId, "Temp Pack", "Clean", 1, now);
+            db.StickerPacks.Add(pack);
+            await db.SaveChangesAsync();
+
+            var objId = MediaConstraints.GenerateStorageObjectId();
+            var stickerKey = $"{MediaConstraints.StickerKeyPrefix}{objId}";
+            var sticker = Sticker.CreatePendingCustom(pack.Id, ownerId, "image/webp", 512, "✨", 1, now);
+            sticker.MarkReady(objId, stickerKey, 256, 512, 512, false, now);
+            db.Stickers.Add(sticker);
+            pack.MarkDeleted(now.AddMinutes(1));
+            await db.SaveChangesAsync();
+
+            var signing = new LocalMediaSigningService(
+                DataProtectionProvider.Create("Step4CleanupTest"));
+            var innerStorage = new LocalDiskMediaStorage(signing, tempRoot);
+
+            var stickerDiskPath = Path.Combine(tempRoot, "stickers", objId);
+            Directory.CreateDirectory(Path.GetDirectoryName(stickerDiskPath)!);
+            await File.WriteAllBytesAsync(stickerDiskPath, "webp-bytes"u8.ToArray());
+
+            var orphanPendingId = MediaConstraints.GenerateStorageObjectId();
+            var orphanPendingPath = Path.Combine(tempRoot, "pending", orphanPendingId);
+            Directory.CreateDirectory(Path.GetDirectoryName(orphanPendingPath)!);
+            await File.WriteAllBytesAsync(orphanPendingPath, "pending-orphan"u8.ToArray());
+            File.SetLastWriteTimeUtc(orphanPendingPath, now.AddHours(-3).UtcDateTime);
+
+            var orphanMediaId = MediaConstraints.GenerateStorageObjectId();
+            var orphanMediaPath = Path.Combine(tempRoot, "media", orphanMediaId);
+            Directory.CreateDirectory(Path.GetDirectoryName(orphanMediaPath)!);
+            await File.WriteAllBytesAsync(orphanMediaPath, "perm-orphan"u8.ToArray());
+            File.SetLastWriteTimeUtc(orphanMediaPath, now.AddHours(-3).UtcDateTime);
+
+            StickerState? stateObservedInsideDelete = null;
+            var spyStorage = new InspectingDeleteMediaStorage(innerStorage, async key =>
+            {
+                if (string.Equals(key, stickerKey, StringComparison.Ordinal))
+                {
+                    await using var inspectScope = provider.CreateAsyncScope();
+                    var inspectDb = inspectScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+                    var row = await inspectDb.Stickers.AsNoTracking().SingleAsync(s => s.Id == sticker.Id);
+                    stateObservedInsideDelete = row.State;
+                }
+            });
+
+            var cleanup = new MediaCleanupService(
+                provider.GetRequiredService<IServiceScopeFactory>(),
+                spyStorage,
+                Options.Create(new MediaOptions { OrphanGracePeriodHours = 1 }),
+                clock,
+                NullLogger<MediaCleanupService>.Instance);
+
+            // includePermanentOrphanSweep: false cleans pending/ but skips media/ orphans
+            await cleanup.RunCleanupPassAsync(includePermanentOrphanSweep: false);
+
+            Assert.Equal(StickerState.Archived, stateObservedInsideDelete);
+            Assert.False(File.Exists(stickerDiskPath));
+            Assert.False(File.Exists(orphanPendingPath));
+            Assert.True(File.Exists(orphanMediaPath));
+
+            // Full pass sweeps permanent orphans too
+            await cleanup.RunCleanupPassAsync(includePermanentOrphanSweep: true);
+            Assert.False(File.Exists(orphanMediaPath));
+        }
+        finally
+        {
+            if (Directory.Exists(tempRoot))
+            {
+                Directory.Delete(tempRoot, recursive: true);
+            }
+        }
+    }
+
+    private sealed class TestCleanupTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow;
+        public TestCleanupTimeProvider(DateTimeOffset utcNow) => _utcNow = utcNow;
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+    }
+
+    private sealed class InspectingDeleteMediaStorage : IMediaStorage
+    {
+        private readonly IMediaStorage _inner;
+        private readonly Func<string, Task> _onDelete;
+
+        public InspectingDeleteMediaStorage(IMediaStorage inner, Func<string, Task> onDelete)
+        {
+            _inner = inner;
+            _onDelete = onDelete;
+        }
+
+        public string GeneratePresignedPutUrl(string objectKey, string contentType, long contentLength, TimeSpan expiresIn, DateTimeOffset nowUtc) =>
+            _inner.GeneratePresignedPutUrl(objectKey, contentType, contentLength, expiresIn, nowUtc);
+        public string GeneratePresignedGetUrl(string objectKey, string responseContentType, string responseContentDisposition, TimeSpan expiresIn, DateTimeOffset nowUtc) =>
+            _inner.GeneratePresignedGetUrl(objectKey, responseContentType, responseContentDisposition, expiresIn, nowUtc);
+        public Task<MediaObjectMetadata?> GetObjectMetadataAsync(string objectKey, CancellationToken ct = default) =>
+            _inner.GetObjectMetadataAsync(objectKey, ct);
+        public Task<byte[]> ReadByteRangeAsync(string objectKey, long offset, int length, string? ifMatchETag = null, CancellationToken ct = default) =>
+            _inner.ReadByteRangeAsync(objectKey, offset, length, ifMatchETag, ct);
+        public Task DownloadToStreamAsync(string objectKey, Stream destination, long maxBytes, string? ifMatchETag = null, CancellationToken ct = default) =>
+            _inner.DownloadToStreamAsync(objectKey, destination, maxBytes, ifMatchETag, ct);
+        public Task PromoteByCopyAsync(string stagingKey, string permanentKey, string verifiedContentType, string? contentDisposition, string? ifMatchETag = null, CancellationToken ct = default) =>
+            _inner.PromoteByCopyAsync(stagingKey, permanentKey, verifiedContentType, contentDisposition, ifMatchETag, ct);
+        public Task PromoteFromStreamAsync(string stagingKey, string permanentKey, Stream content, long contentLength, string verifiedContentType, string? contentDisposition, CancellationToken ct = default) =>
+            _inner.PromoteFromStreamAsync(stagingKey, permanentKey, content, contentLength, verifiedContentType, contentDisposition, ct);
+        public async Task DeleteObjectAsync(string objectKey, CancellationToken ct = default)
+        {
+            await _onDelete(objectKey);
+            await _inner.DeleteObjectAsync(objectKey, ct);
+        }
+
+        public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, CancellationToken ct = default) =>
+            _inner.ListObjectsAsync(prefix, ct);
+
+        public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, string? startAfterKey, CancellationToken ct = default) =>
+            _inner.ListObjectsAsync(prefix, startAfterKey, ct);
+    }
 }

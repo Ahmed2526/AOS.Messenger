@@ -133,7 +133,14 @@ public sealed class InMemoryConnectionTracker : IConnectionTracker, IOnlinePrese
     public void SetActiveConversation(string connectionId, Guid conversationId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionId);
-        _activeConversations[connectionId] = conversationId;
+
+        lock (_syncRoot)
+        {
+            if (_connections.ContainsKey(connectionId))
+            {
+                _activeConversations[connectionId] = conversationId;
+            }
+        }
     }
 
     public void ClearActiveConversation(string connectionId)

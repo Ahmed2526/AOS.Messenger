@@ -67,14 +67,6 @@ export function findSidebarItem(convId) {
     const lowerId = normalizedId.toLowerCase();
     if (!lowerId) return null;
 
-    if (typeof document.querySelector === 'function') {
-        const direct = document.querySelector(`.conversation-item[data-conversation-id="${normalizedId}"]`) ||
-                       document.querySelector(`.conversation-item[data-conversation-id="${lowerId}"]`) ||
-                       document.querySelector(`.conversation-item[href*="${normalizedId}"]`) ||
-                       document.querySelector(`.conversation-item[href*="${lowerId}"]`);
-        if (direct) return direct;
-    }
-
     const items = getSidebarItems();
     for (let i = 0; i < items.length; i++) {
         const candidate = items[i];
@@ -82,6 +74,12 @@ export function findSidebarItem(convId) {
             ? candidate.getAttribute('data-conversation-id')
             : null;
         if (candidateId && String(candidateId).toLowerCase() === lowerId) {
+            return candidate;
+        }
+        const href = candidate && typeof candidate.getAttribute === 'function'
+            ? candidate.getAttribute('href')
+            : null;
+        if (href && String(href).toLowerCase().includes(lowerId)) {
             return candidate;
         }
     }
@@ -492,6 +490,8 @@ function patchSidebarConversationItemElement(link, summary, activeConvId = null)
 
     const targetHref = `/chat/${encodeURIComponent(f.convId)}`;
     if (link.href !== targetHref) link.href = targetHref;
+    link.draggable = false;
+    link.setAttribute('draggable', 'false');
     link.setAttribute('data-conversation-link', 'true');
     if (f.isActive) {
         link.setAttribute('aria-current', 'page');
@@ -571,6 +571,8 @@ export function createSidebarConversationItemElement(summary, activeConvId = nul
 
     const link = document.createElement('a');
     link.href = `/chat/${encodeURIComponent(f.convId)}`;
+    link.draggable = false;
+    link.setAttribute('draggable', 'false');
     link.setAttribute('data-conversation-link', 'true');
     if (f.isActive) {
         link.setAttribute('aria-current', 'page');

@@ -4,6 +4,14 @@ using AOS.Messenger.Domain.ValueObjects;
 namespace AOS.Messenger.Application.Common.Interfaces;
 
 /// <summary>
+/// Single-query authorization and metadata projection for media download requests.
+/// </summary>
+public sealed record AuthorizedMediaDownloadContext(
+    bool ConversationExists,
+    bool IsParticipant,
+    Media? Media);
+
+/// <summary>
 /// Persistence contract for media quota enforcement, metadata lookups, and lifecycle updates.
 /// </summary>
 public interface IMediaPersistence
@@ -18,6 +26,13 @@ public interface IMediaPersistence
     Task<Media?> GetByIdAsync(MediaId id, CancellationToken ct = default);
 
     Task<Media?> GetByIdNoTrackingAsync(MediaId id, CancellationToken ct = default);
+
+    Task<AuthorizedMediaDownloadContext> GetAuthorizedDownloadContextAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        CancellationToken ct = default);
 
     Task<IReadOnlyDictionary<MessageId, IReadOnlyList<Media>>> GetByMessageIdsAsync(
         ConversationId conversationId,

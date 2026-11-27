@@ -355,11 +355,37 @@
     background: rgba(216, 192, 128, 0.45);
   }
 
+  /* Prevent native image drag & iOS/Android touch callout on in-app media, stickers, avatars, and previews */
+  [data-media-img],
+  [data-sticker-img],
+  [data-avatar-img],
+  #media-lightbox-img,
+  #avatar-lightbox-img,
+  #sticker-info-img,
+  #sticker-creator-anim-preview,
+  #composer-attachments-tray img {
+    -webkit-user-drag: none;
+    -webkit-touch-callout: none;
+    user-select: none;
+  }
+
+  a[draggable="false"] {
+    -webkit-user-drag: none;
+  }
+
+  /* Allow selecting and copying chat message text on desktop despite body.select-none */
+  .message-text-content {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+
   /* Prevent iOS/Android native long-press callout from fighting the WhatsApp-style mobile message action sheet */
   @media (max-width: 639px) {
-    .message-bubble {
+    .message-bubble,
+    .message-bubble .message-text-content {
       -webkit-touch-callout: none;
       user-select: none;
+      -webkit-user-select: none;
     }
   }
 }

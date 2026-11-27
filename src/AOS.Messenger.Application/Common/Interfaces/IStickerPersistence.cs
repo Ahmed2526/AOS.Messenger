@@ -65,6 +65,8 @@ public interface IStickerPersistence
 
     Task UpdateStickerAsync(Sticker sticker, CancellationToken ct = default);
 
+    Task CommitReadyStickerIfPackActiveAsync(Sticker sticker, DateTimeOffset nowUtc, CancellationToken ct = default);
+
     Task ArchiveStickerAndPruneReferencesAsync(
         StickerId stickerId,
         UserId ownerUserId,
@@ -110,6 +112,12 @@ public interface IStickerPersistence
     Task<bool> CanUserAccessStickerAsync(
         UserId callerId,
         StickerId stickerId,
+        bool forSending,
+        CancellationToken ct = default);
+
+    Task<bool> CanUserAccessStickerAsync(
+        UserId callerId,
+        StickerWithPackRecord record,
         bool forSending,
         CancellationToken ct = default);
 

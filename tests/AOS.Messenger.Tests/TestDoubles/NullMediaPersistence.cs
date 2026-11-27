@@ -1,7 +1,8 @@
+using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.ValueObjects;
 
-namespace AOS.Messenger.Application.Common.Interfaces;
+namespace AOS.Messenger.Tests.TestDoubles;
 
 internal sealed class NullMediaPersistence : IMediaPersistence
 {
@@ -29,6 +30,19 @@ internal sealed class NullMediaPersistence : IMediaPersistence
     public Task<Media?> GetByIdNoTrackingAsync(MediaId id, CancellationToken ct = default)
     {
         return Task.FromResult<Media?>(null);
+    }
+
+    public Task<AuthorizedMediaDownloadContext> GetAuthorizedDownloadContextAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        CancellationToken ct = default)
+    {
+        return Task.FromResult(new AuthorizedMediaDownloadContext(
+            ConversationExists: false,
+            IsParticipant: false,
+            Media: null));
     }
 
     public Task<IReadOnlyDictionary<MessageId, IReadOnlyList<Media>>> GetByMessageIdsAsync(

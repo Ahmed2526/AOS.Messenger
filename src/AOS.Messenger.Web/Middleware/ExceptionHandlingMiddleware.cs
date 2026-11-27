@@ -3,6 +3,7 @@ using System.Text.Json;
 using AOS.Messenger.Application.Common;
 using AOS.Messenger.Domain.Exceptions;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.WebUtilities;
 
 namespace AOS.Messenger.Web.Middleware;
 
@@ -39,7 +40,10 @@ public sealed class ExceptionHandlingMiddleware
         catch (NotFoundException ex)
         {
             _logger.LogWarning(ex, "Resource not found: {Message}", ex.Message);
-            await HandleExceptionAsync(context, HttpStatusCode.NotFound, "Not Found", ex.Message);
+            string detail = !(_environment?.IsDevelopment() ?? false) && ex.HasInternalEntityDetail
+                ? "The requested resource was not found."
+                : ex.Message;
+            await HandleExceptionAsync(context, HttpStatusCode.NotFound, "Not Found", detail);
         }
         catch (ForbiddenException ex)
         {
@@ -56,6 +60,11 @@ public sealed class ExceptionHandlingMiddleware
             _logger.LogWarning(ex, "Domain rule violation: {Message}", ex.Message);
             await HandleExceptionAsync(context, HttpStatusCode.BadRequest, "Bad Request", ex.Message);
         }
+        catch (MediaProcessingBusyException ex)
+        {
+            _logger.LogWarning(ex, "Image processing capacity busy or timed out.");
+            await HandleExceptionAsync(context, HttpStatusCode.ServiceUnavailable, "Service Unavailable", ex.Message);
+        }
         catch (MediaStorageException ex)
         {
             _logger.LogError(ex, "Media storage operation failed.");
@@ -70,9 +79,10 @@ public sealed class ExceptionHandlingMiddleware
             var statusCode = Enum.IsDefined(typeof(HttpStatusCode), ex.StatusCode)
                 ? (HttpStatusCode)ex.StatusCode
                 : HttpStatusCode.BadRequest;
+            var reasonPhrase = ReasonPhrases.GetReasonPhrase((int)statusCode);
             var (title, detail) = ex.StatusCode == StatusCodes.Status413PayloadTooLarge
                 ? ("Payload Too Large", "Request payload exceeds the maximum allowed size.")
-                : ("Bad Request", "The request is malformed or invalid.");
+                : (string.IsNullOrWhiteSpace(reasonPhrase) ? "Bad Request" : reasonPhrase, "The request is malformed or invalid.");
             await HandleExceptionAsync(context, statusCode, title, detail);
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)

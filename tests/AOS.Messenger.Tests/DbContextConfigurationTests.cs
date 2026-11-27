@@ -338,4 +338,22 @@ public sealed class DbContextConfigurationTests
         var messagesAfterSql = messagesAfterQuery.ToQueryString();
         Assert.NotNull(messagesAfterSql);
     }
+
+    [Fact]
+    public void Messages_StickerIdIndex_IncludesLookupColumns()
+    {
+        var model = BuildModel();
+        var messageType = model.FindEntityType(typeof(Message));
+        Assert.NotNull(messageType);
+
+        var stickerIndex = messageType.GetIndexes()
+            .FirstOrDefault(i => string.Equals(i.GetDatabaseName(), "IX_Messages_StickerId", StringComparison.Ordinal));
+        Assert.NotNull(stickerIndex);
+
+        var includeProps = stickerIndex.GetIncludeProperties();
+        Assert.NotNull(includeProps);
+        Assert.Equal(
+            new[] { nameof(Message.ConversationId), nameof(Message.CreatedAtUtc), nameof(Message.IsDeletedForEveryone) },
+            includeProps);
+    }
 }

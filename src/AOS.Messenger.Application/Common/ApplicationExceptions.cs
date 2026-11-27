@@ -5,10 +5,15 @@ namespace AOS.Messenger.Application.Common;
 /// </summary>
 public sealed class NotFoundException : Exception
 {
+    public bool HasInternalEntityDetail { get; }
+
     public NotFoundException(string message) : base(message) { }
 
     public NotFoundException(string entityName, object key)
-        : base($"Entity '{entityName}' with key '{key}' was not found.") { }
+        : base($"Entity '{entityName}' with key '{key}' was not found.")
+    {
+        HasInternalEntityDetail = true;
+    }
 }
 
 /// <summary>
@@ -39,4 +44,15 @@ public sealed class MediaStorageException : Exception
     public MediaStorageException(string message) : base(message) { }
 
     public MediaStorageException(string message, Exception innerException) : base(message, innerException) { }
+}
+
+/// <summary>
+/// Thrown when server-side image processing capacity is temporarily saturated or timed out
+/// while the staged upload itself remains valid and retryable.
+/// </summary>
+public sealed class MediaProcessingBusyException : Exception
+{
+    public MediaProcessingBusyException(string message) : base(message) { }
+
+    public MediaProcessingBusyException(string message, Exception innerException) : base(message, innerException) { }
 }

@@ -100,7 +100,7 @@
          class="h-14 px-3 sm:px-5 bg-[#FFFFFF] dark:bg-[#3A3835] border-b border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between shrink-0 z-10 shadow-2xs">
         <div class="flex items-center gap-2.5 sm:gap-3 min-w-0 flex-1 mr-2">
             <!-- Mobile Back to Chats Button -->
-            <a asp-controller="Chat" asp-action="Index" data-back-to-chats="true" class="md:hidden shrink-0 p-1.5 rounded-lg text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex items-center justify-center" title="Back to Chats" aria-label="Back to Chats">
+            <a asp-controller="Chat" asp-action="Index" data-back-to-chats="true" draggable="false" class="md:hidden shrink-0 p-1.5 rounded-lg text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex items-center justify-center" title="Back to Chats" aria-label="Back to Chats">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
             </a>
             <div class="relative shrink-0">
@@ -129,7 +129,11 @@
                 </div>
                 <div id="header-presence-container" class="flex items-center gap-1.5 text-[11px] text-[#6E6560] dark:text-[#C9C0B9] truncate">
                     <span id="typing-indicator" class="hidden text-[#B3929D] font-semibold animate-pulse shrink-0">typing...</span>
-                    <span id="header-presence-text" data-presence-text="true" class="truncate">
+                    <span id="header-presence-text"
+                          data-presence-text="true"
+                          data-presence-online="@(Model.Conversation.IsOnline ? "true" : "false")"
+                          data-last-seen-at="@(Model.Conversation.LastSeenAtUtc?.ToString("o") ?? "")"
+                          class="truncate">
                         @(Model.Conversation.IsOnline
                             ? "Online"
                             : (Model.Conversation.LastSeenAtUtc.HasValue
@@ -311,8 +315,14 @@
              data-peer-last-read-id="@(Model.Conversation.PeerLastReadMessageId?.Value.ToString() ?? "")"
              data-next-cursor="@(Model.NextCursor ?? "")"
              data-has-more="@(Model.NextCursor != null ? "true" : "false")">
+            @{
+                var totalInitialMessages = Model.InitialMessages.Count;
+                var initialMessageIndex = 0;
+            }
             @foreach (var message in Model.InitialMessages)
             {
+                var imgLoading = (totalInitialMessages - initialMessageIndex) <= 6 ? "eager" : "lazy";
+                initialMessageIndex++;
                 var msgInitials = GetInitials(message.SenderName, message.SenderHandle);
                 var hasAttachments = !message.IsDeletedForEveryone && message.Attachments is { Count: > 0 };
                 var isSticker = !message.IsDeletedForEveryone && message.Sticker != null;
@@ -438,8 +448,9 @@
                                              alt="@(string.IsNullOrWhiteSpace(st.EmojiTags) ? "Sticker" : $"Sticker {st.EmojiTags}")"
                                              width="@st.Width"
                                              height="@st.Height"
-                                             loading="lazy"
+                                             loading="@imgLoading"
                                              decoding="async"
+                                             draggable="false"
                                              data-sticker-img="true"
                                              data-sticker-id="@st.Id.Value"
                                              data-sticker-static="@(!string.IsNullOrWhiteSpace(st.StaticUrl) ? "true" : "false")"
@@ -467,10 +478,11 @@
                                                      alt="@img.FileName"
                                                      width="@img.Width"
                                                      height="@img.Height"
-                                                     loading="lazy"
+                                                     loading="@imgLoading"
                                                      decoding="async"
+                                                     draggable="false"
                                                      data-media-img="true"
-                                                     class="w-full h-auto max-h-80 object-contain rounded-xl" />
+                                                     class="w-full h-auto max-h-80 object-contain rounded-xl select-none" />
                                             </button>
                                         }
                                         else if (imageAttachments.Count > 1)
@@ -489,10 +501,11 @@
                                                              alt="@img.FileName"
                                                              width="@img.Width"
                                                              height="@img.Height"
-                                                             loading="lazy"
+                                                             loading="@imgLoading"
                                                              decoding="async"
+                                                             draggable="false"
                                                              data-media-img="true"
-                                                             class="w-full h-full aspect-square object-cover" />
+                                                             class="w-full h-full aspect-square object-cover select-none" />
                                                     </button>
                                                 }
                                             </div>
@@ -631,8 +644,9 @@
                                              alt="@(string.IsNullOrWhiteSpace(st.EmojiTags) ? "Sticker" : $"Sticker {st.EmojiTags}")"
                                              width="@st.Width"
                                              height="@st.Height"
-                                             loading="lazy"
+                                             loading="@imgLoading"
                                              decoding="async"
+                                             draggable="false"
                                              data-sticker-img="true"
                                              data-sticker-id="@st.Id.Value"
                                              data-sticker-static="@(!string.IsNullOrWhiteSpace(st.StaticUrl) ? "true" : "false")"
@@ -660,10 +674,11 @@
                                                      alt="@img.FileName"
                                                      width="@img.Width"
                                                      height="@img.Height"
-                                                     loading="lazy"
+                                                     loading="@imgLoading"
                                                      decoding="async"
+                                                     draggable="false"
                                                      data-media-img="true"
-                                                     class="w-full h-auto max-h-80 object-contain rounded-xl" />
+                                                     class="w-full h-auto max-h-80 object-contain rounded-xl select-none" />
                                             </button>
                                         }
                                         else if (imageAttachments.Count > 1)
@@ -682,10 +697,11 @@
                                                              alt="@img.FileName"
                                                              width="@img.Width"
                                                              height="@img.Height"
-                                                             loading="lazy"
+                                                             loading="@imgLoading"
                                                              decoding="async"
+                                                             draggable="false"
                                                              data-media-img="true"
-                                                             class="w-full h-full aspect-square object-cover" />
+                                                             class="w-full h-full aspect-square object-cover select-none" />
                                                     </button>
                                                 }
                                             </div>
@@ -860,7 +876,7 @@
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M14.828 14.828a4 4 0 01-5.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
                 </button>
             </div>
-            <a asp-controller="Chat" asp-action="VoiceRecording" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Record Voice Message">
+            <a asp-controller="Chat" asp-action="VoiceRecording" draggable="false" class="w-9 h-9 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors flex-shrink-0 border border-transparent hover:border-[#E3DCD7] dark:hover:border-[#514D48]" title="Record Voice Message">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"></path></svg>
             </a>
             <button id="send-message-btn" type="button" disabled="@(!Model.Conversation.CanSend ? "disabled" : null)" class="w-9 h-9 rounded-lg bg-[#B3929D] text-white flex items-center justify-center hover:opacity-95 active:scale-95 transition-all shadow-2xs flex-shrink-0 disabled:opacity-50 disabled:cursor-not-allowed" title="Send Message">

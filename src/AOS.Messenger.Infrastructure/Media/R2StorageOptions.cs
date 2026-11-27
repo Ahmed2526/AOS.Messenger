@@ -46,7 +46,7 @@ public sealed class R2StorageOptionsValidator : IValidateOptions<R2StorageOption
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        var isDevelopment = _environment?.IsDevelopment() ?? true;
+        var isDevelopment = _environment?.IsDevelopment() ?? false;
         if (!options.HasAnySetting)
         {
             return isDevelopment

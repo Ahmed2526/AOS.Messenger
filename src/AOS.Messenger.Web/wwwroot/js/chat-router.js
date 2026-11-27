@@ -173,11 +173,11 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
 
             const containerEl = typeof document !== 'undefined' ? document.getElementById('messages-container') : null;
-            if (typeof renderer.renderMessages === 'function') {
-                renderer.renderMessages(containerEl, messages, state.currentUserId, conversation, { scrollToEnd: true });
-            }
             if (typeof renderer.syncPaginationAttributes === 'function') {
                 renderer.syncPaginationAttributes(containerEl, nextCursor, hasMore);
+            }
+            if (typeof renderer.renderMessages === 'function') {
+                renderer.renderMessages(containerEl, messages, state.currentUserId, conversation, { scrollToEnd: true, hasMore });
             }
 
             if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
@@ -275,6 +275,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         const epoch = state.switchEpoch;
         state.isLoadingOlder = true;
         state.paginationRetryAfterMs = 0;
+        if (typeof hooks.onBeforeLoadOlder === 'function') {
+            hooks.onBeforeLoadOlder();
+        }
 
         if (state.paginationAbortController) {
             state.paginationAbortController.abort();

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.Constants;
@@ -34,6 +35,8 @@ public sealed class MediaCleanupService : BackgroundService
     private readonly MediaOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MediaCleanupService> _logger;
+    private readonly ConcurrentDictionary<string, string?> _orphanSweepResumeKeys = new(StringComparer.Ordinal);
+    private DateTimeOffset? _lastPermanentOrphanSweepUtc;
 
     public MediaCleanupService(
         IServiceScopeFactory scopeFactory,
@@ -63,7 +66,17 @@ public sealed class MediaCleanupService : BackgroundService
             {
                 try
                 {
-                    await RunCleanupPassAsync(stoppingToken);
+                    var nowUtc = _timeProvider.GetUtcNow();
+                    var sweepInterval = TimeSpan.FromHours(Math.Max(1, _options.PermanentOrphanSweepIntervalHours));
+                    var includePermanentOrphanSweep = _lastPermanentOrphanSweepUtc is null
+                        || nowUtc - _lastPermanentOrphanSweepUtc.Value >= sweepInterval;
+
+                    await RunCleanupPassAsync(includePermanentOrphanSweep, stoppingToken);
+
+                    if (includePermanentOrphanSweep)
+                    {
+                        _lastPermanentOrphanSweepUtc = nowUtc;
+                    }
                 }
                 catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
                 {
@@ -81,7 +94,10 @@ public sealed class MediaCleanupService : BackgroundService
         }
     }
 
-    public async Task<MediaCleanupResult> RunCleanupPassAsync(CancellationToken ct = default)
+    public Task<MediaCleanupResult> RunCleanupPassAsync(CancellationToken ct = default) =>
+        RunCleanupPassAsync(includePermanentOrphanSweep: true, ct);
+
+    public async Task<MediaCleanupResult> RunCleanupPassAsync(bool includePermanentOrphanSweep, CancellationToken ct = default)
     {
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -130,17 +146,25 @@ public sealed class MediaCleanupService : BackgroundService
                     .SetProperty(m => m.DeletedAtUtc, nowUtc),
                 ct);
 
-        // Step 3: Delete storage objects for unpurged Failed/Deleted rows, then stamp PurgedAtUtc.
+        // Step 2b: Atomically retire unreferenced Ready stickers belonging to soft-deleted custom packs
+        // BEFORE deleting any R2 objects, acquiring an exclusive row lock on the sticker before evaluating
+        // favorite/recent/message absence predicates so concurrent RepeatableRead favorite additions serialize cleanly.
+        await RetireUnreferencedDeletedPackStickersAsync(db, nowUtc, ct);
+
+        // Step 3: Delete storage objects for unpurged Failed/Deleted/Archived rows, then stamp PurgedAtUtc.
         var storagePurgedCount = await PurgeDeletedOrFailedStorageObjectsAsync(db, ct);
         storagePurgedCount += await PurgeDeletedOrFailedAvatarUploadsAsync(db, ct);
         storagePurgedCount += await PurgeFailedAndUnreferencedArchivedStickersAsync(db, ct);
 
         // Step 4: Sweep orphaned staging and permanent objects that have exceeded the grace period.
         var orphanDeletedCount = await SweepOrphanPrefixAsync(db, MediaConstraints.PendingKeyPrefix, orphanCutoff, ct);
-        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.MediaKeyPrefix, orphanCutoff, ct);
-        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.ThumbnailKeyPrefix, orphanCutoff, ct);
-        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.AvatarKeyPrefix, orphanCutoff, ct);
-        orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.StickerKeyPrefix, orphanCutoff, ct);
+        if (includePermanentOrphanSweep)
+        {
+            orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.MediaKeyPrefix, orphanCutoff, ct);
+            orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.ThumbnailKeyPrefix, orphanCutoff, ct);
+            orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.AvatarKeyPrefix, orphanCutoff, ct);
+            orphanDeletedCount += await SweepOrphanPrefixAsync(db, MediaConstraints.StickerKeyPrefix, orphanCutoff, ct);
+        }
 
         // Step 5: Delete expired metadata rows already purged from storage.
         var metadataDeletedCount = await db.Media
@@ -150,9 +174,11 @@ public sealed class MediaCleanupService : BackgroundService
             .ExecuteDeleteAsync(ct);
 
         metadataDeletedCount += await db.PendingAvatarUploads
-            .Where(p => (p.State == MediaState.Failed || p.State == MediaState.Deleted)
-                        && p.PurgedAtUtc != null
-                        && p.PurgedAtUtc < retentionCutoff)
+            .Where(p => ((p.State == MediaState.Failed || p.State == MediaState.Deleted)
+                         && p.PurgedAtUtc != null
+                         && p.PurgedAtUtc < retentionCutoff)
+                        || (p.State == MediaState.Uploaded
+                            && (p.CompletedAtUtc ?? p.CreatedAtUtc) < retentionCutoff))
             .ExecuteDeleteAsync(ct);
 
         var deletableExpiredStickerIds = db.Stickers
@@ -417,10 +443,66 @@ public sealed class MediaCleanupService : BackgroundService
         return totalPurged;
     }
 
+    private async Task RetireUnreferencedDeletedPackStickersAsync(
+        ApplicationDbContext db,
+        DateTimeOffset nowUtc,
+        CancellationToken ct)
+    {
+        var candidateIds = await db.Stickers
+            .AsNoTracking()
+            .Where(s => s.UploaderId != null
+                        && s.State == StickerState.Ready
+                        && s.PurgedAtUtc == null
+                        && db.StickerPacks.Any(p => p.Id == s.PackId && !p.IsSystemPack && p.IsDeleted))
+            .OrderBy(s => s.Id)
+            .Select(s => s.Id)
+            .ToListAsync(ct);
+
+        if (candidateIds.Count == 0)
+        {
+            return;
+        }
+
+        var strategy = db.Database.CreateExecutionStrategy();
+        foreach (var stickerId in candidateIds)
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+                var lockedId = await db.Database
+                    .SqlQuery<Guid>($"SELECT Id AS Value FROM Stickers WITH (XLOCK, ROWLOCK) WHERE Id = {stickerId.Value} AND State = {(int)StickerState.Ready} AND PurgedAtUtc IS NULL")
+                    .FirstOrDefaultAsync(ct);
+
+                if (lockedId != Guid.Empty)
+                {
+                    await db.Stickers
+                        .Where(s => s.Id == stickerId
+                                    && s.UploaderId != null
+                                    && s.State == StickerState.Ready
+                                    && s.PurgedAtUtc == null
+                                    && db.StickerPacks.Any(p => p.Id == s.PackId && !p.IsSystemPack && p.IsDeleted)
+                                    && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone)
+                                    && !db.UserFavoriteStickers.Any(f => f.StickerId == s.Id)
+                                    && !db.UserRecentStickers.Any(r => r.StickerId == s.Id && r.UserId != s.UploaderId))
+                        .ExecuteUpdateAsync(
+                            s => s
+                                .SetProperty(st => st.State, StickerState.Archived)
+                                .SetProperty(st => st.DeletedAtUtc, st => st.DeletedAtUtc ?? nowUtc),
+                            ct);
+                }
+
+                await tx.CommitAsync(ct);
+            });
+        }
+    }
+
     private async Task<int> PurgeFailedAndUnreferencedArchivedStickersAsync(ApplicationDbContext db, CancellationToken ct)
     {
         var totalPurged = 0;
         var failedIds = new HashSet<StickerId>();
+        var pendingPrefix = MediaConstraints.PendingKeyPrefix;
+        var uploadWindowCutoff = _timeProvider.GetUtcNow().AddMinutes(-Math.Max(1, _options.PresignedPutTtlMinutes));
 
         while (!ct.IsCancellationRequested && failedIds.Count < MaxFailedDeletesPerPass)
         {
@@ -430,9 +512,13 @@ public sealed class MediaCleanupService : BackgroundService
                             && s.ObjectKey != null
                             && s.PurgedAtUtc == null
                             && !failedIds.Contains(s.Id)
-                            && (s.State == StickerState.Failed
+                            && ((s.State == StickerState.Failed
+                                 && (s.VerifiedSizeBytes != null
+                                     || !s.ObjectKey.StartsWith(pendingPrefix)
+                                     || s.CreatedAtUtc < uploadWindowCutoff))
                                 || (s.State == StickerState.Archived
-                                    && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone))))
+                                    && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone)
+                                    && !db.UserFavoriteStickers.Any(f => f.StickerId == s.Id))))
                 .OrderBy(s => s.Id)
                 .Take(BatchSize)
                 .Select(s => new { s.Id, s.ObjectKey, s.State, s.VerifiedSizeBytes })
@@ -510,7 +596,16 @@ public sealed class MediaCleanupService : BackgroundService
                         .Where(s => remainingIds.Contains(s.Id)
                                     && (s.State == StickerState.Failed || s.State == StickerState.Archived)
                                     && s.PurgedAtUtc == null)
-                        .ExecuteUpdateAsync(s => s.SetProperty(st => st.PurgedAtUtc, purgeTime), ct);
+                        .ExecuteUpdateAsync(
+                            s => s
+                                .SetProperty(st => st.DeletedAtUtc, st => st.DeletedAtUtc ?? purgeTime)
+                                .SetProperty(st => st.PurgedAtUtc, purgeTime),
+                            ct);
+
+                    await db.UserRecentStickers
+                        .Where(r => remainingIds.Contains(r.StickerId)
+                                    && db.Stickers.Any(s => s.Id == r.StickerId && s.PurgedAtUtc != null))
+                        .ExecuteDeleteAsync(ct);
                 }
             }
 
@@ -530,10 +625,28 @@ public sealed class MediaCleanupService : BackgroundService
         CancellationToken ct)
     {
         var deletedCount = 0;
+        var scannedCount = 0;
+        var maxScanPerPrefix = Math.Max(1, _options.MaxOrphanSweepObjectsPerPrefixPerPass);
         var chunk = new List<StoredObjectInfo>(BatchSize);
+        _orphanSweepResumeKeys.TryGetValue(prefix, out var startAfterKey);
+        string? lastScannedKey = null;
+        var hitScanCap = false;
 
-        await foreach (var item in _mediaStorage.ListObjectsAsync(prefix, ct))
+        await foreach (var item in _mediaStorage.ListObjectsAsync(prefix, startAfterKey, ct))
         {
+            if (scannedCount >= maxScanPerPrefix)
+            {
+                hitScanCap = true;
+                _logger.LogInformation(
+                    "Reached per-pass orphan scan cap ({MaxObjects}) for prefix {Prefix}; remaining objects deferred to next sweep.",
+                    maxScanPerPrefix,
+                    prefix);
+                break;
+            }
+
+            scannedCount++;
+            lastScannedKey = item.ObjectKey;
+
             if (item.LastModifiedUtc >= orphanCutoff)
             {
                 continue;
@@ -550,6 +663,15 @@ public sealed class MediaCleanupService : BackgroundService
         if (chunk.Count > 0)
         {
             deletedCount += await DeleteUnreferencedChunkAsync(db, prefix, chunk, ct);
+        }
+
+        if (hitScanCap && !string.IsNullOrEmpty(lastScannedKey))
+        {
+            _orphanSweepResumeKeys[prefix] = lastScannedKey;
+        }
+        else
+        {
+            _orphanSweepResumeKeys.TryRemove(prefix, out _);
         }
 
         return deletedCount;
@@ -607,19 +729,18 @@ public sealed class MediaCleanupService : BackgroundService
         else if (string.Equals(prefix, MediaConstraints.AvatarKeyPrefix, StringComparison.Ordinal))
         {
             // Intentionally query ALL users including soft-deleted accounts within the 30-day recovery window.
-            var activeFull = await db.Users
+            var activePairs = await db.Users
                 .AsNoTracking()
-                .Where(u => u.AvatarObjectKey != null && chunkKeys.Contains(u.AvatarObjectKey))
-                .Select(u => u.AvatarObjectKey!)
-                .ToListAsync(ct);
-            var activeThumb = await db.Users
-                .AsNoTracking()
-                .Where(u => u.AvatarThumbnailObjectKey != null && chunkKeys.Contains(u.AvatarThumbnailObjectKey))
-                .Select(u => u.AvatarThumbnailObjectKey!)
+                .Where(u => (u.AvatarObjectKey != null && chunkKeys.Contains(u.AvatarObjectKey))
+                            || (u.AvatarThumbnailObjectKey != null && chunkKeys.Contains(u.AvatarThumbnailObjectKey)))
+                .Select(u => new { u.AvatarObjectKey, u.AvatarThumbnailObjectKey })
                 .ToListAsync(ct);
 
-            foreach (var k in activeFull) activeSet.Add(k);
-            foreach (var k in activeThumb) activeSet.Add(k);
+            foreach (var pair in activePairs)
+            {
+                if (!string.IsNullOrEmpty(pair.AvatarObjectKey)) activeSet.Add(pair.AvatarObjectKey);
+                if (!string.IsNullOrEmpty(pair.AvatarThumbnailObjectKey)) activeSet.Add(pair.AvatarThumbnailObjectKey);
+            }
         }
         else if (string.Equals(prefix, MediaConstraints.StickerKeyPrefix, StringComparison.Ordinal))
         {

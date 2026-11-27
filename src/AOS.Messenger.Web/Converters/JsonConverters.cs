@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AOS.Messenger.Domain.ValueObjects;
@@ -15,14 +16,23 @@ public sealed class MessageIdJsonConverter : JsonConverter<MessageId>
 
         if (reader.TokenType == JsonTokenType.Number)
         {
-            return new MessageId(reader.GetInt64());
+            if (!reader.TryGetInt64(out var id) || id <= 0)
+            {
+                throw new JsonException("Invalid MessageId value.");
+            }
+
+            return new MessageId(id);
         }
 
         if (reader.TokenType == JsonTokenType.String)
         {
             var str = reader.GetString();
-            if (string.IsNullOrWhiteSpace(str)) return null;
-            return MessageId.Parse(str);
+            if (!long.TryParse(str, NumberStyles.Integer, CultureInfo.InvariantCulture, out var id) || id <= 0)
+            {
+                throw new JsonException("Invalid MessageId value.");
+            }
+
+            return new MessageId(id);
         }
 
         if (reader.TokenType == JsonTokenType.StartObject)
@@ -30,11 +40,22 @@ public sealed class MessageIdJsonConverter : JsonConverter<MessageId>
             using var doc = JsonDocument.ParseValue(ref reader);
             if (doc.RootElement.TryGetProperty("value", out var valProp))
             {
-                if (valProp.ValueKind == JsonValueKind.Number)
-                    return new MessageId(valProp.GetInt64());
-                if (valProp.ValueKind == JsonValueKind.String)
-                    return MessageId.Parse(valProp.GetString()!);
+                if (valProp.ValueKind == JsonValueKind.Number
+                    && valProp.TryGetInt64(out var numId)
+                    && numId > 0)
+                {
+                    return new MessageId(numId);
+                }
+
+                if (valProp.ValueKind == JsonValueKind.String
+                    && long.TryParse(valProp.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var strId)
+                    && strId > 0)
+                {
+                    return new MessageId(strId);
+                }
             }
+
+            throw new JsonException("Invalid MessageId object value.");
         }
 
         throw new JsonException($"Cannot convert token of type {reader.TokenType} to MessageId.");
@@ -58,18 +79,25 @@ public sealed class UserIdJsonConverter : JsonConverter<UserId>
         if (reader.TokenType == JsonTokenType.String)
         {
             var str = reader.GetString();
-            if (string.IsNullOrWhiteSpace(str)) return null;
-            return UserId.Parse(str);
+            if (!UserId.TryParse(str, out var userId))
+            {
+                throw new JsonException("Invalid UserId value.");
+            }
+
+            return userId;
         }
 
         if (reader.TokenType == JsonTokenType.StartObject)
         {
             using var doc = JsonDocument.ParseValue(ref reader);
-            if (doc.RootElement.TryGetProperty("value", out var valProp))
+            if (doc.RootElement.TryGetProperty("value", out var valProp)
+                && valProp.ValueKind == JsonValueKind.String
+                && UserId.TryParse(valProp.GetString(), out var userId))
             {
-                if (valProp.ValueKind == JsonValueKind.String)
-                    return UserId.Parse(valProp.GetString()!);
+                return userId;
             }
+
+            throw new JsonException("Invalid UserId object value.");
         }
 
         throw new JsonException($"Cannot convert token of type {reader.TokenType} to UserId.");
@@ -93,18 +121,25 @@ public sealed class ConversationIdJsonConverter : JsonConverter<ConversationId>
         if (reader.TokenType == JsonTokenType.String)
         {
             var str = reader.GetString();
-            if (string.IsNullOrWhiteSpace(str)) return null;
-            return ConversationId.Parse(str);
+            if (!ConversationId.TryParse(str, out var conversationId))
+            {
+                throw new JsonException("Invalid ConversationId value.");
+            }
+
+            return conversationId;
         }
 
         if (reader.TokenType == JsonTokenType.StartObject)
         {
             using var doc = JsonDocument.ParseValue(ref reader);
-            if (doc.RootElement.TryGetProperty("value", out var valProp))
+            if (doc.RootElement.TryGetProperty("value", out var valProp)
+                && valProp.ValueKind == JsonValueKind.String
+                && ConversationId.TryParse(valProp.GetString(), out var conversationId))
             {
-                if (valProp.ValueKind == JsonValueKind.String)
-                    return ConversationId.Parse(valProp.GetString()!);
+                return conversationId;
             }
+
+            throw new JsonException("Invalid ConversationId object value.");
         }
 
         throw new JsonException($"Cannot convert token of type {reader.TokenType} to ConversationId.");

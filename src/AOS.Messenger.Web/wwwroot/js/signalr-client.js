@@ -64,6 +64,8 @@ function isDocumentVisibleAndFocused() {
 }
 
 export const MAX_SEEN_INCOMING_IDS = 500;
+const MAX_RECONCILE_BUFFER_EVENTS = 200;
+const MAX_RECONCILE_OVERFLOW_RETRIES = 3;
 const DEFAULT_RECONNECT_RETRY_DELAYS_MS = [2000, 5000, 10000, 30000, 60000];
 
 /**
@@ -154,7 +156,63 @@ export function createSignalRClient({
     let retryAttempt = 0;
     let startInFlight = null;
     let needsReconcileOnStart = false;
+    let reconcileSeq = 0;
+    let activeReconcile = null;
     const seenIncomingIds = new Set();
+
+    function bufferIfReconciling(eventConvId, evt) {
+        if (!activeReconcile || !eventConvId || !evt) return false;
+        if (activeReconcile.epoch !== state.switchEpoch) return false;
+        if (!sameId(activeReconcile.convId, eventConvId)) return false;
+        const totalBuffered = (activeReconcile.carriedEvents ? activeReconcile.carriedEvents.length : 0) + activeReconcile.events.length;
+        if (totalBuffered < MAX_RECONCILE_BUFFER_EVENTS) {
+            activeReconcile.events.push(evt);
+        } else {
+            activeReconcile.overflowed = true;
+        }
+        return true;
+    }
+
+    function shouldSkipCarriedEdit(evt, bundleMessagesById) {
+        if (!evt || evt.type !== 'ReceiveMessageEdited' || !bundleMessagesById || bundleMessagesById.size === 0) {
+            return false;
+        }
+        const payload = evt.payload;
+        if (!payload) return false;
+        const editMsgId = normalizeId(payload.messageId !== undefined ? payload.messageId : payload.MessageId);
+        if (!editMsgId || !bundleMessagesById.has(String(editMsgId))) {
+            return false;
+        }
+        const bundleMsg = bundleMessagesById.get(String(editMsgId));
+        if (bundleMsg && (bundleMsg.isDeletedForEveryone ?? bundleMsg.IsDeletedForEveryone)) {
+            return true;
+        }
+        const bundleEditedRaw = bundleMsg?.editedAtUtc ?? bundleMsg?.EditedAtUtc;
+        const carriedEditedRaw = payload.editedAtUtc ?? payload.EditedAtUtc;
+        const bundleTime = bundleEditedRaw ? Date.parse(bundleEditedRaw) : NaN;
+        const carriedTime = carriedEditedRaw ? Date.parse(carriedEditedRaw) : NaN;
+        if (Number.isFinite(bundleTime) && Number.isFinite(carriedTime)) {
+            return bundleTime >= carriedTime;
+        }
+        return true;
+    }
+
+    function updateSidebarForIncomingMessage(convId, previewText, msgId, shouldReorder = true) {
+        if (!convId || typeof document === 'undefined') return false;
+        const existingItem = findSidebarItem(convId);
+        if (!existingItem) return false;
+
+        const currentLastId = typeof existingItem.getAttribute === 'function'
+            ? existingItem.getAttribute('data-last-message-id')
+            : null;
+        const currentBig = parseBigIntSafe(currentLastId);
+        const incomingBig = parseBigIntSafe(msgId);
+        if (currentBig > 0n && incomingBig > 0n && incomingBig < currentBig) {
+            return true;
+        }
+
+        return updateSidebarLastMessage(convId, previewText, msgId, false, false, shouldReorder);
+    }
 
     function clearRetryTimer() {
         if (retryTimerId !== null) {
@@ -164,13 +222,13 @@ export function createSignalRClient({
     }
 
     function scheduleReconnect() {
-        if (isTerminated || retryTimerId !== null || startInFlight || isConnected()) return;
+        if (isTerminated || retryTimerId !== null || startInFlight || !isDisconnected()) return;
         const idx = Math.min(retryAttempt, reconnectBackoffDelays.length - 1);
         const delayMs = Math.max(0, Number(reconnectBackoffDelays[idx]) || 0);
         retryAttempt++;
         retryTimerId = setTimeout(() => {
             retryTimerId = null;
-            if (!isTerminated && !isConnected()) {
+            if (!isTerminated && isDisconnected()) {
                 start();
             }
         }, delayMs);
@@ -196,12 +254,22 @@ export function createSignalRClient({
         return connection.state === 'Connected' || connection.state === connectedConst;
     }
 
+    function isDisconnected() {
+        const disconnectedConst = lib.HubConnectionState && lib.HubConnectionState.Disconnected
+            ? lib.HubConnectionState.Disconnected
+            : 'Disconnected';
+        return connection.state == null
+            || connection.state === 'Disconnected'
+            || connection.state === disconnectedConst;
+    }
+
     function triggerSessionExpired() {
         if (isTerminated) return;
         isTerminated = true;
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        activeReconcile = null;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();
@@ -348,12 +416,46 @@ export function createSignalRClient({
      * @param {string} convId
      * @param {number} [expectedEpoch]
      */
-    async function reconcileActiveConversation(convId, expectedEpoch = state.switchEpoch) {
+    async function reconcileActiveConversation(convId, expectedEpoch = state.switchEpoch, overflowRetryCount = 0) {
         if (isTerminated || !convId) return;
+
+        const preRequestContainerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('messages-container')
+            : null;
+        const preRequestRowIds = new Set();
+        if (preRequestContainerEl && typeof preRequestContainerEl.querySelectorAll === 'function') {
+            const initialRows = preRequestContainerEl.querySelectorAll('.message-bubble-row');
+            for (let i = 0; i < initialRows.length; i++) {
+                const rowId = initialRows[i] && typeof initialRows[i].getAttribute === 'function'
+                    ? initialRows[i].getAttribute('data-message-id')
+                    : null;
+                if (rowId) preRequestRowIds.add(String(rowId));
+            }
+        }
+
+        const carryOver = activeReconcile &&
+            sameId(activeReconcile.convId, convId) &&
+            activeReconcile.epoch === expectedEpoch
+            ? activeReconcile
+            : null;
+        const carriedEvents = carryOver
+            ? [...(carryOver.carriedEvents || []), ...(carryOver.events || [])].slice(0, MAX_RECONCILE_BUFFER_EVENTS)
+            : [];
+        const myReconcile = {
+            seq: ++reconcileSeq,
+            convId,
+            epoch: expectedEpoch,
+            carriedEvents,
+            events: [],
+            overflowed: Boolean(carryOver?.overflowed)
+        };
+        activeReconcile = myReconcile;
+        let bundleSucceeded = false;
+        const appliedBundleMessagesById = new Map();
 
         try {
             const bundle = await getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE });
-            if (isTerminated || expectedEpoch !== state.switchEpoch || !sameId(state.activeConversationId, convId)) {
+            if (isTerminated || expectedEpoch !== state.switchEpoch || !sameId(state.activeConversationId, convId) || activeReconcile !== myReconcile) {
                 return;
             }
 
@@ -366,6 +468,7 @@ export function createSignalRClient({
                 }
                 return;
             }
+            bundleSucceeded = true;
 
             const containerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
                 ? document.getElementById('messages-container')
@@ -398,11 +501,67 @@ export function createSignalRClient({
             }
 
             const messages = bundle?.messages ?? bundle?.Messages ?? [];
-            if (!containerEl || !Array.isArray(messages) || messages.length === 0) return;
+            if (!containerEl || !Array.isArray(messages)) return;
 
-            const newestRendered = getNewestRenderedMessageInfo(containerEl);
+            for (const msg of messages) {
+                const msgId = getMessageId(msg);
+                if (msgId) {
+                    appliedBundleMessagesById.set(String(msgId), msg);
+                }
+            }
+
             const bundleHasMore = Boolean(bundle?.hasMore ?? bundle?.HasMore);
             const bundleNextCursor = bundle?.nextCursor ?? bundle?.NextCursor ?? null;
+
+            if (messages.length === 0) {
+                if (!bundleHasMore) {
+                    state.paginationAbortController?.abort();
+                    const currentRows = typeof containerEl.querySelectorAll === 'function'
+                        ? Array.from(containerEl.querySelectorAll('.message-bubble-row'))
+                        : [];
+                    const hasPostRequestRows = currentRows.some(row => {
+                        const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                        return rowIdStr && !preRequestRowIds.has(String(rowIdStr));
+                    });
+
+                    if (!hasPostRequestRows) {
+                        renderMessages(containerEl, [], state.currentUserId, state.activeMeta, { scrollToEnd: false, hasMore: false });
+                        if (state.messagesById && typeof state.messagesById.clear === 'function') {
+                            state.messagesById.clear();
+                        }
+                        state.nextCursor = null;
+                        state.hasMore = false;
+                        state.hasPaginatedOlder = false;
+                        syncPaginationAttributes(containerEl, null, false);
+                        if (typeof onReconciledWindowReplaced === 'function') {
+                            onReconciledWindowReplaced();
+                        }
+                        updateSidebarLastMessage(convId, 'No messages yet', null, false, true);
+                    } else {
+                        for (const row of currentRows) {
+                            const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                            if (!rowIdStr || !preRequestRowIds.has(String(rowIdStr))) continue;
+                            applyMessageDeletedForMe(rowIdStr, null, null, null, true, { hasMore: false });
+                            if (state.messagesById && typeof state.messagesById.delete === 'function') {
+                                state.messagesById.delete(String(rowIdStr));
+                            }
+                            if (typeof onMessageDeleted === 'function') {
+                                onMessageDeleted(rowIdStr);
+                            }
+                        }
+                        state.nextCursor = null;
+                        state.hasMore = false;
+                        state.hasPaginatedOlder = false;
+                        syncPaginationAttributes(containerEl, null, false);
+                        if (typeof onReconciledWindowReplaced === 'function') {
+                            onReconciledWindowReplaced();
+                        }
+                    }
+                }
+                return;
+            }
+
+            const newestRendered = getNewestRenderedMessageInfo(containerEl);
             const sortedBundle = [...messages].sort(compareMessages);
             const oldestBundle = sortedBundle[0];
             const oldestBundleId = getMessageId(oldestBundle);
@@ -412,12 +571,34 @@ export function createSignalRClient({
                 if (oldestBundleTime > newestRendered.time ||
                     (oldestBundleTime === newestRendered.time && oldestIdBig > newestRendered.id)) {
                     state.paginationAbortController?.abort();
-                    renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true });
+                    const preservedPostRequestMsgs = [];
+                    if (typeof containerEl.querySelectorAll === 'function' && state.messagesById) {
+                        const existingRows = Array.from(containerEl.querySelectorAll('.message-bubble-row'));
+                        for (const row of existingRows) {
+                            const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                            if (rowIdStr && !preRequestRowIds.has(String(rowIdStr)) && state.messagesById.has(String(rowIdStr))) {
+                                preservedPostRequestMsgs.push(state.messagesById.get(String(rowIdStr)));
+                            }
+                        }
+                    }
+                    renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true, hasMore: bundleHasMore });
                     if (state.messagesById && typeof state.messagesById.clear === 'function') {
                         state.messagesById.clear();
                         for (const msg of sortedBundle) {
                             const msgId = getMessageId(msg);
                             if (msgId) state.messagesById.set(msgId, msg);
+                        }
+                    }
+                    let latestPreserved = null;
+                    for (const msg of preservedPostRequestMsgs) {
+                        const msgId = getMessageId(msg);
+                        if (!msgId || isMessageRendered(msgId)) continue;
+                        const inserted = insertMessageOrdered(containerEl, msg, state.currentUserId, state.activeMeta);
+                        if (inserted) {
+                            if (state.messagesById && typeof state.messagesById.set === 'function') {
+                                state.messagesById.set(msgId, msg);
+                            }
+                            latestPreserved = msg;
                         }
                     }
                     state.nextCursor = bundleNextCursor;
@@ -427,7 +608,7 @@ export function createSignalRClient({
                     if (typeof onReconciledWindowReplaced === 'function') {
                         onReconciledWindowReplaced();
                     }
-                    const latestReplaced = sortedBundle[sortedBundle.length - 1];
+                    const latestReplaced = latestPreserved || sortedBundle[sortedBundle.length - 1];
                     if (latestReplaced) {
                         updateSidebarLastMessage(convId, formatMessagePreview(latestReplaced), getMessageId(latestReplaced), false, false, true);
                     }
@@ -435,6 +616,41 @@ export function createSignalRClient({
                 }
             }
 
+            // Prune rendered rows that existed before the request and are missing from the authoritative server window (>= oldestBundle)
+            const bundleIds = new Set(sortedBundle.map(getMessageId).filter(Boolean));
+            const oldestIdBig = parseBigIntSafe(oldestBundleId);
+            let prunedAny = false;
+            const renderedRows = typeof containerEl.querySelectorAll === 'function'
+                ? Array.from(containerEl.querySelectorAll('.message-bubble-row'))
+                : [];
+            for (const row of renderedRows) {
+                const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                if (!rowIdStr || bundleIds.has(rowIdStr) || !preRequestRowIds.has(String(rowIdStr))) continue;
+
+                let withinServerWindow = !bundleHasMore;
+                if (!withinServerWindow && Number.isFinite(oldestBundleTime)) {
+                    const rowTimeAttr = row.getAttribute('data-created-at');
+                    const rowTime = rowTimeAttr ? Date.parse(rowTimeAttr) : NaN;
+                    const rowIdBig = parseBigIntSafe(rowIdStr);
+                    if (Number.isFinite(rowTime) &&
+                        (rowTime > oldestBundleTime || (rowTime === oldestBundleTime && rowIdBig >= oldestIdBig))) {
+                        withinServerWindow = true;
+                    }
+                }
+
+                if (withinServerWindow) {
+                    applyMessageDeletedForMe(rowIdStr, null, null, null, true, { hasMore: bundleHasMore });
+                    if (state.messagesById && typeof state.messagesById.delete === 'function') {
+                        state.messagesById.delete(String(rowIdStr));
+                    }
+                    if (typeof onMessageDeleted === 'function') {
+                        onMessageDeleted(rowIdStr);
+                    }
+                    prunedAny = true;
+                }
+            }
+
+            const effectiveNewestRendered = getNewestRenderedMessageInfo(containerEl);
             const missingNewer = [];
 
             for (const msg of messages) {
@@ -496,11 +712,11 @@ export function createSignalRClient({
                 }
 
                 const rawCreatedAt = msg.createdAtUtc ?? msg.CreatedAtUtc;
-                if (newestRendered && rawCreatedAt) {
+                if (effectiveNewestRendered && rawCreatedAt) {
                     const msgTime = Date.parse(rawCreatedAt);
                     const msgIdVal = parseBigIntSafe(msgId);
                     if (!Number.isNaN(msgTime) &&
-                        (msgTime < newestRendered.time || (msgTime === newestRendered.time && msgIdVal <= newestRendered.id))) {
+                        (msgTime < effectiveNewestRendered.time || (msgTime === effectiveNewestRendered.time && msgIdVal <= effectiveNewestRendered.id))) {
                         continue;
                     }
                 }
@@ -508,7 +724,18 @@ export function createSignalRClient({
                 missingNewer.push(msg);
             }
 
-            if (missingNewer.length === 0) return;
+            if (missingNewer.length === 0) {
+                if (prunedAny && sortedBundle.length > 0) {
+                    const latestSurviving = sortedBundle[sortedBundle.length - 1];
+                    const latestSurvivingId = getMessageId(latestSurviving);
+                    if (latestSurvivingId && isLatestRenderedMessage(containerEl, latestSurvivingId)) {
+                        const latestDeleted = Boolean(latestSurviving.isDeletedForEveryone ?? latestSurviving.IsDeletedForEveryone);
+                        const latestPreview = latestDeleted ? 'This message was deleted' : formatMessagePreview(latestSurviving);
+                        updateSidebarLastMessage(convId, latestPreview, latestSurvivingId, false, false, false);
+                    }
+                }
+                return;
+            }
 
             missingNewer.sort(compareMessages);
 
@@ -535,6 +762,28 @@ export function createSignalRClient({
                 triggerSessionExpired();
             } else if (err?.code !== 'UNAUTHORIZED') {
                 console.warn('[SignalR] State reconciliation error:', err?.status || err);
+            }
+        } finally {
+            let shouldFollowUpReconcile = false;
+            if (activeReconcile === myReconcile) {
+                activeReconcile = null;
+                if (!isTerminated && expectedEpoch === state.switchEpoch && sameId(state.activeConversationId, convId)) {
+                    const carriedToReplay = bundleSucceeded
+                        ? myReconcile.carriedEvents.filter(evt => !shouldSkipCarriedEdit(evt, appliedBundleMessagesById))
+                        : myReconcile.carriedEvents;
+                    const eventsToReplay = carriedToReplay.length > 0
+                        ? [...carriedToReplay, ...myReconcile.events]
+                        : myReconcile.events;
+                    if (eventsToReplay.length > 0) {
+                        replayBufferedEvents(convId, eventsToReplay);
+                    }
+                    if (bundleSucceeded && myReconcile.overflowed && overflowRetryCount < MAX_RECONCILE_OVERFLOW_RETRIES) {
+                        shouldFollowUpReconcile = true;
+                    }
+                }
+            }
+            if (shouldFollowUpReconcile) {
+                await reconcileActiveConversation(convId, expectedEpoch, overflowRetryCount + 1);
             }
         }
     }
@@ -587,8 +836,9 @@ export function createSignalRClient({
             onIncomingMessage(eventConvId, message);
         }
 
-        if (!isReplay && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message })) {
-            const foundDuringSwitch = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
+        if (!isReplay && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessage', payload: message }))) {
+            const foundDuringSwitch = updateSidebarForIncomingMessage(eventConvId, previewText, msgId, true);
             if (!foundDuringSwitch) {
                 syncSidebarConversations(() => state.activeConversationId);
             }
@@ -598,7 +848,7 @@ export function createSignalRClient({
             return;
         }
 
-        const sidebarFound = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
+        const sidebarFound = updateSidebarForIncomingMessage(eventConvId, previewText, msgId, true);
         const isActive = sameId(eventConvId, state.activeConversationId);
 
         if (!isActive) {
@@ -658,7 +908,8 @@ export function createSignalRClient({
             ? String(rawPreview)
             : newContent;
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageEdited', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageEdited', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageEdited', payload: message }))) {
             updateSidebarLastMessage(eventConvId, effectivePreview, msgId, true);
             return;
         }
@@ -698,7 +949,8 @@ export function createSignalRClient({
 
         const eventConvId = normalizeId(message.conversationId !== undefined ? message.conversationId : message.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message }))) {
             updateSidebarLastMessage(eventConvId, 'This message was deleted', msgId, true);
             return;
         }
@@ -742,7 +994,8 @@ export function createSignalRClient({
         const newLastId = message.newLastMessageId !== undefined ? message.newLastMessageId : message.NewLastMessageId;
         const newLastPreview = message.newLastMessagePreview !== undefined ? message.newLastMessagePreview : message.NewLastMessagePreview;
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message }))) {
             applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, false);
             return;
         }
@@ -773,7 +1026,8 @@ export function createSignalRClient({
 
         const eventConvId = normalizeId(reaction.conversationId !== undefined ? reaction.conversationId : reaction.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction }))) {
             return;
         }
 
@@ -805,7 +1059,8 @@ export function createSignalRClient({
         if (!receipt || isTerminated) return;
         const eventConvId = normalizeId(receipt.conversationId !== undefined ? receipt.conversationId : receipt.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt }))) {
             return;
         }
 
@@ -876,12 +1131,15 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        const activeId = state.activeConversationId;
+        const epoch = state.switchEpoch;
+        if (activeReconcile && (!activeId || !sameId(activeReconcile.convId, activeId) || activeReconcile.epoch !== epoch)) {
+            activeReconcile = null;
+        }
         requestedConversationId = null;
         joinedConversationId = null;
         setStatus('connected');
 
-        const activeId = state.activeConversationId;
-        const epoch = state.switchEpoch;
         let attemptedTarget = null;
 
         try {
@@ -969,7 +1227,7 @@ export function createSignalRClient({
     };
 
     const handleOnline = () => {
-        if (isTerminated || isConnected()) return;
+        if (isTerminated || !isDisconnected()) return;
         clearRetryTimer();
         retryAttempt = 0;
         start();
@@ -984,9 +1242,9 @@ export function createSignalRClient({
     function start() {
         if (isTerminated) return Promise.resolve(false);
         if (startInFlight) return startInFlight;
+        if (!isDisconnected()) return Promise.resolve(isConnected());
 
         const runStart = (async () => {
-            let shouldScheduleRetry = false;
             try {
                 await connection.start();
                 if (isTerminated) return false;
@@ -1033,14 +1291,13 @@ export function createSignalRClient({
                 if (!isTerminated) {
                     needsReconcileOnStart = true;
                     setStatus('disconnected', 'Disconnected from chat. Retrying...');
-                    shouldScheduleRetry = true;
                 }
                 return false;
             } finally {
                 if (startInFlight === runStart) {
                     startInFlight = null;
                 }
-                if (!isTerminated && (shouldScheduleRetry || !isConnected())) {
+                if (!isTerminated && isDisconnected()) {
                     scheduleReconnect();
                 }
             }
@@ -1056,6 +1313,7 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        activeReconcile = null;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();

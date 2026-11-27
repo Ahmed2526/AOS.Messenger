@@ -92,13 +92,17 @@ public sealed class Phase10VoiceFrontendTests
                 parentNode: null,
                 disabled: false,
                 value: '',
-                src: '',
+                _src: '',
+                _error: null,
+                get src() { return this._src; },
+                set src(v) { this._src = String(v ?? ''); if (tag.toUpperCase() === 'AUDIO') { this._error = null; } },
+                get error() { return this._error; },
+                set error(v) { this._error = v; },
                 currentTime: 0,
                 duration: Infinity,
                 paused: true,
                 ended: false,
                 playbackRate: 1,
-                error: null,
                 isConnected: true,
                 style: {},
                 _textContent: '',
@@ -240,7 +244,7 @@ public sealed class Phase10VoiceFrontendTests
 
             class FakeRecorder {
                 constructor(stream, opts) { this.mimeType = opts?.mimeType || 'audio/webm'; this.state = 'inactive'; }
-                start() { this.state = 'recording'; }
+                start() { this.state = 'recording'; if (typeof this.onstart === 'function') this.onstart(); }
                 pause() { this.state = 'paused'; }
                 resume() { this.state = 'recording'; }
                 stop() {
@@ -685,7 +689,7 @@ public sealed class Phase10VoiceFrontendTests
             let errors = [];
             class NoPauseRecorder {
                 constructor(stream) { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
-                start() { this.state = 'recording'; }
+                start() { this.state = 'recording'; if (typeof this.onstart === 'function') this.onstart(); }
                 stop() {
                     this.state = 'inactive';
                     if (this.ondataavailable) this.ondataavailable({ data: { size: 100 } });
@@ -735,7 +739,7 @@ public sealed class Phase10VoiceFrontendTests
             let asyncStopCallback = null;
             class AsyncStopRecorder {
                 constructor(stream) { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
-                start() { this.state = 'recording'; }
+                start() { this.state = 'recording'; if (typeof this.onstart === 'function') this.onstart(); }
                 pause() { this.state = 'paused'; }
                 resume() { this.state = 'recording'; }
                 stop() {
@@ -1037,27 +1041,89 @@ public sealed class Phase10VoiceFrontendTests
             cardB.speedBtn.click(); // cycles 1x -> 1.5x
             assert.equal(detachedCard.speedBtn.textContent, '1.5x');
 
-            // 8. R2-3: Interrupted media error on paused/replayed card triggers bypassCache URL refresh and clears audio.error
+            // 8. R2-3 / R3-8 / R3-9 / R3-10: Interrupted media error on paused/replayed card triggers bypassCache URL refresh,
+            // relies on browser src-reset to clear getter-only audio.error, preserves resume position unless explicit seek or ended,
+            // and reports refresh failures as "Audio unavailable"
             const retryErrCalls = [];
+            let refreshShouldFail = false;
             const retryErrPlayer = createVoicePlayer({
                 resolveUrlFn: async (convId, msgId, mediaId, opts) => {
                     retryErrCalls.push(Boolean(opts?.bypassCache));
+                    if (refreshShouldFail && opts?.bypassCache) return null;
                     return opts?.bypassCache ? 'https://r2.invalid/refreshed.m4a' : 'https://r2.invalid/initial.m4a';
                 }
             });
-            const errRetryCard = makeCard(309, 'm-err-retry', 10000);
+            const errRetryCard = makeCard(309, 'm-err-retry', 30000);
+            let retrySrc = '';
+            let retryBackingErr = null;
+            Object.defineProperty(errRetryCard.audio, 'error', {
+                get: () => retryBackingErr,
+                configurable: true
+            });
+            Object.defineProperty(errRetryCard.audio, 'src', {
+                get: () => retrySrc,
+                set: (v) => {
+                    retrySrc = String(v ?? '');
+                    retryBackingErr = null;
+                    errRetryCard.audio.currentTime = 0;
+                    errRetryCard.audio.readyState = 0;
+                },
+                configurable: true
+            });
             retryErrPlayer.hydrateRoot(container);
             errRetryCard.playBtn.click();
             await new Promise(r => setTimeout(r, 15));
             assert.equal(errRetryCard.audio.paused, false);
+            errRetryCard.audio.readyState = 1;
+            errRetryCard.audio.duration = 30;
+            errRetryCard.audio.currentTime = 12;
             errRetryCard.audio.pause();
-            errRetryCard.audio.error = { code: 2 };
+            retryBackingErr = { code: 2 };
             errRetryCard.playBtn.click();
             await new Promise(r => setTimeout(r, 15));
             assert.deepEqual(retryErrCalls, [false, true]);
             assert.equal(errRetryCard.audio.error, null);
             assert.equal(errRetryCard.audio.src, 'https://r2.invalid/refreshed.m4a');
             assert.equal(errRetryCard.audio.paused, false);
+            errRetryCard.audio.readyState = 1;
+            errRetryCard.audio.duration = 30;
+            errRetryCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(errRetryCard.audio.currentTime, 12);
+
+            // R3-8: Explicit pending seek takes precedence over saved currentTime when replaying after error
+            errRetryCard.audio.pause();
+            errRetryCard.audio.currentTime = 8;
+            errRetryCard.audio.readyState = 0;
+            retryBackingErr = { code: 2 };
+            errRetryCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 150 }); // 75% -> 22.5s pending seek
+            errRetryCard.wf.dispatchEvent({ type: 'pointerup', clientX: 150 });
+            errRetryCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            errRetryCard.audio.readyState = 1;
+            errRetryCard.audio.duration = 30;
+            errRetryCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(errRetryCard.audio.currentTime, 22.5);
+
+            // R3-8: Ended clip replay resets to 0 instead of saving EOF currentTime
+            errRetryCard.audio.pause();
+            errRetryCard.audio.ended = true;
+            errRetryCard.audio.currentTime = 30;
+            retryBackingErr = { code: 2 };
+            errRetryCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            errRetryCard.audio.readyState = 1;
+            errRetryCard.audio.duration = 30;
+            errRetryCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(errRetryCard.audio.currentTime, 0);
+
+            // R3-9: Failed URL refresh during error replay shows "Audio unavailable" (not format unsupported)
+            errRetryCard.audio.pause();
+            refreshShouldFail = true;
+            retryBackingErr = { code: 2 };
+            errRetryCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            assert.ok(!errRetryCard.errEl.classList.contains('hidden'));
+            assert.equal(errRetryCard.errEl.textContent, 'Audio unavailable');
             retryErrPlayer.destroy();
 
             // 9. R2-13: Repeated ArrowRight on waveform before readyState>=1 steps from pendingSeekSec instead of resetting to 0
@@ -1127,7 +1193,7 @@ public sealed class Phase10VoiceFrontendTests
                     this.idx = ++recIndex;
                     recInstances.push(this);
                 }
-                start() { this.state = 'recording'; }
+                start() { this.state = 'recording'; if (typeof this.onstart === 'function') this.onstart(); }
                 stop() { this.state = 'inactive'; } // leaves onstop to be invoked asynchronously later
             }
 
@@ -1203,7 +1269,7 @@ public sealed class Phase10VoiceFrontendTests
             const sentVoices = [];
             class SyncPreviewRec {
                 constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
-                start() { this.state = 'recording'; }
+                start() { this.state = 'recording'; if (typeof this.onstart === 'function') this.onstart(); }
                 stop() {
                     this.state = 'inactive';
                     if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }) });
@@ -1245,8 +1311,8 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(rec3.getMode(), 'idle');
             rec3.destroy();
 
-            // R2-15 (isolated replacement instance), R2-4 (MediaRecorder.start throw preserves preview & avoids revoking active preview URL),
-            // and R2-10 (#voice-preview-play-icon + #voice-preview-play-btn aria-label/title sync across play/pause/ended/reset)
+            // R2-15 / R3-1 / R3-11 / R2-4 / R2-10: Deferred MediaRecorder commit on onstart, pre-start failure recovery,
+            // mid-startup sendFromPreview cancellation, accessible label sync, and distinct replacement duration + bytes
             if (!document.getElementById('voice-preview-play-btn')) {
                 rootBody.appendChild(createEl('button', 'voice-preview-play-btn'));
             }
@@ -1257,18 +1323,24 @@ public sealed class Phase10VoiceFrontendTests
             let rec4Phase = 0;
             let resolveRec4SecondMic = null;
             let rec4FailStart = false;
+            let rec4DeferOnStart = false;
+            let rec4ChunkBytes = [1, 2, 3];
+            let rec4RepTracksStopped = 0;
+            let rec4RepCtxClosed = 0;
+            const rec4Instances = [];
             const rec4Sent = [];
             const revokedUrls = [];
             let blobUrlSeq = 0;
             class Rec4Recorder {
-                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; rec4Instances.push(this); }
                 start() {
                     if (rec4FailStart) throw new Error('start blocked');
                     this.state = 'recording';
+                    if (!rec4DeferOnStart && typeof this.onstart === 'function') this.onstart();
                 }
                 stop() {
                     this.state = 'inactive';
-                    if (this.ondataavailable) this.ondataavailable({ data: { size: 640 } });
+                    if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array(rec4ChunkBytes)], { type: 'audio/webm' }) });
                     if (this.onstop) this.onstop();
                 }
             }
@@ -1280,6 +1352,10 @@ public sealed class Phase10VoiceFrontendTests
                     if (rec4Phase === 1) return { getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] };
                     return new Promise(r => { resolveRec4SecondMic = r; });
                 },
+                createAudioContextFn: () => ({
+                    state: 'running',
+                    close: async () => { if (rec4Phase > 1) rec4RepCtxClosed++; }
+                }),
                 createObjectUrlFn: () => `blob:rec4-${++blobUrlSeq}`,
                 revokeObjectUrlFn: (u) => revokedUrls.push(u),
                 nowFn: () => nowMs,
@@ -1288,7 +1364,7 @@ public sealed class Phase10VoiceFrontendTests
             rec4.init();
             nowMs = 10000;
             assert.equal(await rec4.startRecording(), true);
-            nowMs = 11200;
+            nowMs = 11200; // 1200ms original duration
             rec4.stopToPreview();
             assert.equal(rec4.getMode(), 'preview');
 
@@ -1308,7 +1384,7 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(previewPlayIcon.textContent, 'play_arrow');
             assert.match(previewPlayBtn.getAttribute('aria-label') || '', /play/i);
 
-            // R2-4: failed MediaRecorder.start() on re-record keeps original preview blob & UI intact
+            // R2-4: synchronous MediaRecorder.start() throw keeps original preview blob & UI intact
             rec4FailStart = true;
             const rec4FailPromise = rec4.startRecording();
             resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
@@ -1317,18 +1393,94 @@ public sealed class Phase10VoiceFrontendTests
             assert.ok(!revokedUrls.includes('blob:rec4-1'));
             rec4FailStart = false;
 
-            // R2-15: replacement recording stays in preview while mic resolves, then transitions to recording & sends new duration
+            // R3-1: async onerror BEFORE MediaRecorder fires start preserves original preview & stops only replacement resources
+            rec4DeferOnStart = true;
+            const rec4AsyncErrPromise = rec4.startRecording();
+            resolveRec4SecondMic({ getTracks: () => [{ stop: () => { rec4RepTracksStopped++; } }], getAudioTracks: () => [] });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(rec4.getMode(), 'preview');
+            assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            rec4Instances[rec4Instances.length - 1].onerror({ error: new Error('async capture failure') });
+            assert.equal(await rec4AsyncErrPromise, false);
+            assert.equal(rec4.getMode(), 'preview');
+            assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            assert.ok(rec4RepTracksStopped >= 1);
+            assert.ok(rec4RepCtxClosed >= 1);
+
+            // R3-1: async onstop WITHOUT onstart settles cleanly without hanging or clobbering preview
+            const rec4NoStartStopPromise = rec4.startRecording();
+            resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+            await new Promise(r => setTimeout(r, 10));
+            rec4Instances[rec4Instances.length - 1].onstop();
+            assert.equal(await rec4NoStartStopPromise, false);
+            assert.equal(rec4.getMode(), 'preview');
+            assert.ok(!revokedUrls.includes('blob:rec4-1'));
+
+            // R3-1 + R3-11: preview stays intact while awaiting onstart, then commits replacement on onstart with distinct duration & bytes
             const rec4PendingPromise = rec4.startRecording();
             assert.equal(rec4.getMode(), 'preview');
             resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(rec4.getMode(), 'preview');
+            assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            rec4Instances[rec4Instances.length - 1].onstart();
             assert.equal(await rec4PendingPromise, true);
             assert.equal(rec4.getMode(), 'recording');
-            nowMs = 12400;
+            assert.ok(revokedUrls.includes('blob:rec4-1'));
+            nowMs = 13500; // 2300ms replacement duration (distinct from 1200ms original)
+            rec4ChunkBytes = [9, 8, 7, 6, 5];
             rec4.sendNow();
             assert.equal(rec4Sent.length, 1);
-            assert.equal(rec4Sent[0].durationMs, 1200);
+            assert.equal(rec4Sent[0].durationMs, 2300);
+            assert.equal(rec4Sent[0].blob.size, 5);
+            assert.deepEqual([...new Uint8Array(await rec4Sent[0].blob.arrayBuffer())], [9, 8, 7, 6, 5]);
             assert.equal(previewPlayIcon.textContent, 'play_arrow');
             rec4.destroy();
+            rec4DeferOnStart = false;
+
+            // R3-1: Clicking Send from preview while replacement MediaRecorder.start() is still awaiting onstart cleanly cancels startup and sends original clip
+            let rec5Phase = 0;
+            let rec5Defer = false;
+            let rec5RepTracksStopped = 0;
+            const rec5Sent = [];
+            class Rec5Recorder {
+                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+                start() {
+                    this.state = 'recording';
+                    if (!rec5Defer && typeof this.onstart === 'function') this.onstart();
+                }
+                stop() {
+                    this.state = 'inactive';
+                    if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array([4, 5, 6])], { type: 'audio/webm' }) });
+                    if (this.onstop) this.onstop();
+                }
+            }
+            const rec5 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => Rec5Recorder,
+                getUserMediaFn: async () => {
+                    rec5Phase++;
+                    return { getTracks: () => [{ stop: () => { if (rec5Phase > 1) rec5RepTracksStopped++; } }], getAudioTracks: () => [] };
+                },
+                createObjectUrlFn: () => 'blob:rec5-orig',
+                nowFn: () => nowMs,
+                onStartSendVoice: (p) => rec5Sent.push(p)
+            });
+            rec5.init();
+            nowMs = 20000;
+            assert.equal(await rec5.startRecording(), true);
+            nowMs = 21500;
+            rec5.stopToPreview();
+            rec5Defer = true;
+            const rec5PendingStart = rec5.startRecording();
+            await new Promise(r => setTimeout(r, 10));
+            rec5.sendFromPreview();
+            assert.equal(await rec5PendingStart, false);
+            assert.equal(rec5Sent.length, 1);
+            assert.equal(rec5Sent[0].durationMs, 1500);
+            assert.ok(rec5RepTracksStopped >= 1);
+            assert.equal(rec5.getMode(), 'idle');
+            rec5.destroy();
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
@@ -1682,6 +1834,45 @@ public sealed class Phase10VoiceFrontendTests
             await pDestroy;
             assert.deepEqual(goDeltas, []);
             assert.equal(switchApiCalls, 0);
+
+            // R3-7: Direct switchConversation and switchToEmptyState confirmations invalidated if destroy() runs while awaiting
+            let directSwitchFetchCalls = 0;
+            let directEmptyResetCalls = 0;
+            let resolveDirectSwitchConfirm = null;
+            let resolveDirectEmptyConfirm = null;
+            let confirmCallIdx = 0;
+            const directDestroyState = createChatState();
+            directDestroyState.activeConversationId = 'conv-1';
+            const directDestroyRouter = createChatRouter({
+                state: directDestroyState,
+                api: { getConversationBundle: async () => { directSwitchFetchCalls++; return {}; } },
+                renderer: { showEmptyState: () => { directEmptyResetCalls++; } },
+                hooks: {
+                    confirmBeforeSwitch: () => {
+                        confirmCallIdx++;
+                        return confirmCallIdx === 1
+                            ? new Promise(r => { resolveDirectSwitchConfirm = r; })
+                            : new Promise(r => { resolveDirectEmptyConfirm = r; });
+                    }
+                }
+            });
+            directDestroyRouter.init();
+            const directSwitchP = directDestroyRouter.switchConversation('conv-2');
+            await Promise.resolve();
+            directDestroyRouter.destroy();
+            resolveDirectSwitchConfirm(true);
+            assert.equal(await directSwitchP, false);
+            assert.equal(directSwitchFetchCalls, 0);
+            assert.equal(directDestroyState.activeConversationId, 'conv-1');
+
+            directDestroyRouter.init();
+            const directEmptyP = directDestroyRouter.switchToEmptyState();
+            await Promise.resolve();
+            directDestroyRouter.destroy();
+            resolveDirectEmptyConfirm(true);
+            assert.equal(await directEmptyP, false);
+            assert.equal(directEmptyResetCalls, 0);
+            assert.equal(directDestroyState.activeConversationId, 'conv-1');
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);

@@ -249,16 +249,27 @@ public sealed class Phase10VoiceUnitTests
         var zeroEx = await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("zerochild.m4a", "audio/mp4", nonTrailingZeroSizeChildMp4, 1500));
         Assert.Contains("box structure", zeroEx.Message, StringComparison.OrdinalIgnoreCase);
 
-        // R2-1: Large fragmented MP4 (>128 total boxes / >4KB moof padding before mdat) passes via early-exit,
-        // while trailing video-only moof/tfhd/trun or zero-sample fragmented MP4 fails once audio samples aren't yet confirmed
+        // R2-1 / R3-2: Large fragmented MP4 passes via bounded root scan, while trailing truncated root header in cached page or trailing video moov fails
         var largeFragMp4 = BuildMultiFragmentAudioMp4Bytes("isom", trackId: 1, fragmentCount: 35, paddingBytesPerMoof: 4096);
         var largeFragRes = await VerifyVoiceAsync("large-frag.m4a", "audio/mp4", largeFragMp4, 5000);
         Assert.Equal("audio/mp4", largeFragRes.VerifiedContentType);
 
-        // R2-5: stsz fixed sample_size > 0 with sampleCount >= 1 passes without table entries, whereas stsz sample_size==0 with truncated table fails,
-        // and stz2 field_size=8 with valid packed bytes passes while truncated stz2 or invalid field_size=7 fails
-        var fixedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildFixedStszBox(sampleSize: 512, sampleCount: 100));
+        var truncTrailingMp4 = BuildSmallTruncatedTrailingMp4Bytes("M4A ");
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trunc-trailing.m4a", "audio/mp4", truncTrailingMp4, 1500));
+
+        var trailingVideoMoovMp4 = BuildTrailingVideoMoovAfterAudioMp4("M4A ");
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trailing-vide.m4a", "audio/mp4", trailingVideoMoovMp4, 1500));
+
+        // R2-5 / R3-3: stsz fixed sample_size > 0 passes when media payload backs declared sample bytes,
+        // rejects declared sampleCount*sampleSize exceeding object/mdat length, and checks variable stsz & packed stz2
+        var fixedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildFixedStszBox(sampleSize: 64, sampleCount: 4), mdatPayloadBytes: 256);
         Assert.Equal("audio/mp4", (await VerifyVoiceAsync("fixed-stsz.m4a", "audio/mp4", fixedStszMp4, 1500)).VerifiedContentType);
+
+        var oversizedFixedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildFixedStszBox(sampleSize: 512, sampleCount: 100), mdatPayloadBytes: 4);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("oversized-stsz.m4a", "audio/mp4", oversizedFixedStszMp4, 1500));
+
+        var paddedInsufficientMdatStszMp4 = BuildPaddedFixedStszMp4Bytes("M4A ", sampleSize: 64, sampleCount: 8, freePadBytes: 4096, mdatPayloadBytes: 4);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("padded-short-mdat.m4a", "audio/mp4", paddedInsufficientMdatStszMp4, 1500));
 
         var truncatedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildTruncatedStszBox(sampleCount: 4));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trunc-stsz.m4a", "audio/mp4", truncatedStszMp4, 1500));
@@ -272,27 +283,67 @@ public sealed class Phase10VoiceUnitTests
         var invalidFieldStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 7, sampleCount: 1, packedBytes: 1));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("badfield-stz2.m4a", "audio/mp4", invalidFieldStz2Mp4, 1500));
 
-        // R2-6: WebM multi-cluster scan skips leading timestamp-only Cluster and finds audio SimpleBlock in second Cluster
+        // R2-6 / R3-4: WebM multi-cluster & unknown-sized Cluster followed by SeekHead trailing Tracks (with or without intermediate Cues) pass,
+        // while spoofed Tracks inside SimpleBlock #2 after a valid SimpleBlock #1 in an unknown-sized Cluster fails
         var multiClusterWebm = BuildWebmMultiClusterBytes();
         Assert.Equal("audio/webm", (await VerifyVoiceAsync("multicluster.webm", "audio/webm", multiClusterWebm, 2000)).VerifiedContentType);
+
+        var unknownClusterSeekWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(includeCuesBetweenClusterAndTracks: false);
+        Assert.Equal("audio/webm", (await VerifyVoiceAsync("unknown-cluster-seek.webm", "audio/webm", unknownClusterSeekWebm, 2000)).VerifiedContentType);
+
+        var unknownClusterCuesSeekWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(includeCuesBetweenClusterAndTracks: true);
+        Assert.Equal("audio/webm", (await VerifyVoiceAsync("unknown-cluster-cues-seek.webm", "audio/webm", unknownClusterCuesSeekWebm, 2000)).VerifiedContentType);
+
+        var spoofedUnknownClusterWebm = BuildMalformedSeekHeadInsideUnknownClusterSimpleBlock2Webm();
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("spoof-unknown-cluster.webm", "audio/webm", spoofedUnknownClusterWebm, 2000));
 
         // R2-7: Malicious SeekHead pointing Tracks inside an already-scanned Cluster is rejected
         var spoofedClusterSeekWebm = BuildMalformedSeekHeadInsideClusterWebm();
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("spoof-seek.webm", "audio/webm", spoofedClusterSeekWebm, 2000));
 
-        // R2-8: Header-only Ogg without OpusTags/Vorbis comments + audio packet, or multiplexed secondary BOS, is rejected
+        // R2-8 / R3-5 / R3-6 / R3-12: Ogg stream completeness, OpusTags RFC 7845 §5.2 bounds, Vorbis audio packet-type bit, and CRC-32
+        var opusCrcVerifyPage = BuildOggBytes(BuildValidOpusHead(), bos: true, serial: 1, pageSeq: 0);
+        var actualPageCrc = BinaryPrimitives.ReadUInt32LittleEndian(opusCrcVerifyPage.AsSpan(22, 4));
+        Assert.NotEqual(0u, actualPageCrc);
+        var zeroedCrcCopy = opusCrcVerifyPage.ToArray();
+        zeroedCrcCopy.AsSpan(22, 4).Clear();
+        Assert.Equal(ComputeOggCrc32(zeroedCrcCopy), actualPageCrc);
+
+        var paddedOpusTags = ConcatBytes("OpusTags"u8.ToArray(), [0x03, 0x00, 0x00, 0x00], "aos"u8.ToArray(), [0x01, 0x00, 0x00, 0x00], [0x04, 0x00, 0x00, 0x00], "k=v1"u8.ToArray(), new byte[4]);
+        Assert.Equal("audio/ogg", (await VerifyVoiceAsync("padded-tags.ogg", "audio/ogg", BuildValidOggOpusStream(opusTags: paddedOpusTags), 1500)).VerifiedContentType);
+
+        var shortOpusTagsOgg = BuildValidOggOpusStream(opusTags: "OpusTags"u8.ToArray());
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("short-opustags.ogg", "audio/ogg", shortOpusTagsOgg, 1500));
+
+        var badVendorTags = ConcatBytes("OpusTags"u8.ToArray(), [0x50, 0x00, 0x00, 0x00], new byte[4]);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("bad-vendor-tags.ogg", "audio/ogg", BuildValidOggOpusStream(opusTags: badVendorTags), 1500));
+
+        var badCommentLenTags = ConcatBytes("OpusTags"u8.ToArray(), new byte[4], [0x01, 0x00, 0x00, 0x00], [0x99, 0x00, 0x00, 0x00]);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("bad-comment-tags.ogg", "audio/ogg", BuildValidOggOpusStream(opusTags: badCommentLenTags), 1500));
+
+        var extraVorbisHeaderOgg = BuildValidOggVorbisStream(audioPacket: [0x05, 0x76, 0x6F, 0x72]);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("extra-vorbis-hdr.ogg", "audio/ogg", extraVorbisHeaderOgg, 1500));
+
+        var continuedPage3Audio = new byte[255];
+        continuedPage3Audio[0] = 0x00; // Vorbis audio packet type bit = 0 on first byte of packet
+        byte[] continuedPage4Audio = [0xFF, 0x01, 0x02, 0x03]; // LSB = 1 on continuation page must not overwrite packet first byte!
+        var multiPageVorbisAudio = ConcatBytes(
+            BuildOggBytes(BuildValidVorbisHead(), bos: true, serial: 1, pageSeq: 0),
+            BuildOggBytes([0x03, .. "vorbis"u8, 0, 0, 0, 0, 0, 0, 0, 0, 0x01], bos: false, serial: 1, pageSeq: 1),
+            BuildOggBytes([0x05, .. "vorbis"u8, 0x01, 0x02, 0x03], bos: false, serial: 1, pageSeq: 2),
+            // Hand-craft page 3 with single segment=255 (unterminated continued packet) + page 4 with continuation=0x01, eos=0x04
+            [.. "OggS"u8, 0x00, 0x00, 0,0,0,0,0,0,0,0, 1,0,0,0, 3,0,0,0, 0,0,0,0, 1, 255, .. continuedPage3Audio],
+            BuildOggPage(continuedPage4Audio, headerTypeFlag: 0x05, serial: 1, pageSeq: 4, granulePosition: 2048));
+        Assert.Equal("audio/ogg", (await VerifyVoiceAsync("multipage-vorbis.ogg", "audio/ogg", multiPageVorbisAudio, 1500)).VerifiedContentType);
+
         var headerOnlyOpus = BuildOggBytes(BuildValidOpusHead(), bos: true);
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("header-only.ogg", "audio/ogg", headerOnlyOpus, 1500));
 
-        var multiplexedOgg = ConcatBytes(
-            BuildValidOggOpusStream(),
-            BuildOggBytes(BuildValidOpusHead(), bos: true, serial: 99));
-        // Secondary BOS after valid audio packet is avoided here; place secondary BOS before audio packet to verify rejection:
         var muxBeforeAudioOgg = ConcatBytes(
             BuildOggBytes(BuildValidOpusHead(), bos: true, serial: 1, pageSeq: 0),
             BuildOggBytes(BuildValidOpusHead(), bos: true, serial: 2, pageSeq: 0),
-            BuildOggBytes(Encoding.ASCII.GetBytes("OpusTags\x00\x00\x00\x00\x00\x00\x00\x00"), bos: false, serial: 1, pageSeq: 1),
-            BuildOggBytes([0x01, 0x02, 0x03], bos: false, serial: 1, pageSeq: 2));
+            BuildOggBytes([.. "OpusTags"u8, 0,0,0,0, 0,0,0,0], bos: false, serial: 1, pageSeq: 1),
+            BuildOggBytes([0xFC, 0xFF, 0xFE], bos: false, serial: 1, pageSeq: 2));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("mux.ogg", "audio/ogg", muxBeforeAudioOgg, 1500));
 
         // R2-9: Opus mappingFamily=0 with 3 channels, or mappingFamily=1 with out-of-range channel map index, is rejected
@@ -456,48 +507,108 @@ public sealed class Phase10VoiceUnitTests
         return ms.ToArray();
     }
 
-    internal static byte[] BuildOggBytes(byte[] identificationPacket, bool bos, uint serial = 0, uint pageSeq = 0)
+    private static readonly uint[] OggCrcTable = BuildOggCrcTable();
+
+    private static uint[] BuildOggCrcTable()
     {
-        using var ms = new MemoryStream();
-        ms.Write("OggS"u8);
-        ms.WriteByte(0x00); // stream_structure_version
-        ms.WriteByte(bos ? (byte)0x02 : (byte)0x00); // header_type_flag
-        ms.Write(new byte[8]); // granule_position
-        var serialBuf = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(serialBuf, serial);
-        ms.Write(serialBuf); // serial
-        var seqBuf = new byte[4];
-        BinaryPrimitives.WriteUInt32LittleEndian(seqBuf, pageSeq);
-        ms.Write(seqBuf); // page seq
-        ms.Write(new byte[4]); // checksum
-        ms.WriteByte(1); // page_segments
-        ms.WriteByte((byte)identificationPacket.Length);
-        ms.Write(identificationPacket);
-        return ms.ToArray();
+        var table = new uint[256];
+        for (var i = 0; i < 256; i++)
+        {
+            var r = (uint)i << 24;
+            for (var j = 0; j < 8; j++)
+            {
+                r = (r & 0x8000_0000u) != 0 ? (r << 1) ^ 0x04C1_1DB7u : (r << 1);
+            }
+            table[i] = r;
+        }
+        return table;
     }
 
-    internal static byte[] BuildValidOggOpusStream(byte[]? opusHead = null)
+    internal static uint ComputeOggCrc32(ReadOnlySpan<byte> data)
+    {
+        uint crc = 0;
+        foreach (var b in data)
+        {
+            crc = (crc << 8) ^ OggCrcTable[((crc >> 24) ^ b) & 0xFF];
+        }
+        return crc;
+    }
+
+    internal static byte[] BuildOggPage(
+        ReadOnlySpan<byte> payload,
+        byte headerTypeFlag,
+        uint serial = 1,
+        uint pageSeq = 0,
+        ulong granulePosition = 0)
+    {
+        var fullSegments = payload.Length / 255;
+        var remainder = payload.Length % 255;
+        var segmentCount = fullSegments + 1;
+        if (segmentCount > 255)
+        {
+            throw new ArgumentOutOfRangeException(nameof(payload), "Single Ogg page cannot exceed 255 segments.");
+        }
+
+        var page = new byte[27 + segmentCount + payload.Length];
+        "OggS"u8.CopyTo(page.AsSpan(0, 4));
+        page[4] = 0x00; // stream_structure_version
+        page[5] = headerTypeFlag;
+        BinaryPrimitives.WriteUInt64LittleEndian(page.AsSpan(6, 8), granulePosition);
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(14, 4), serial);
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(18, 4), pageSeq);
+        // bytes 22..25 left zeroed for CRC computation
+        page[26] = (byte)segmentCount;
+        for (var i = 0; i < fullSegments; i++)
+        {
+            page[27 + i] = 255;
+        }
+        page[27 + fullSegments] = (byte)remainder;
+        payload.CopyTo(page.AsSpan(27 + segmentCount));
+
+        var crc = ComputeOggCrc32(page);
+        BinaryPrimitives.WriteUInt32LittleEndian(page.AsSpan(22, 4), crc);
+        return page;
+    }
+
+    internal static byte[] BuildOggBytes(
+        byte[] identificationPacket,
+        bool bos,
+        uint serial = 0,
+        uint pageSeq = 0,
+        bool eos = false,
+        ulong granulePosition = 0)
+    {
+        byte flags = 0;
+        if (bos) flags |= 0x02;
+        if (eos) flags |= 0x04;
+        return BuildOggPage(identificationPacket, flags, serial, pageSeq, granulePosition);
+    }
+
+    internal static byte[] BuildValidOggOpusStream(byte[]? opusHead = null, byte[]? opusTags = null)
     {
         var head = opusHead ?? BuildValidOpusHead();
-        var tags = ConcatBytes("OpusTags"u8.ToArray(), new byte[8]);
-        byte[] audioPkt = [0xF8, 0xFF, 0xFE, 0x01, 0x02, 0x03];
+        // RFC 7845 §5.2 compliant OpusTags (vendor + 0 comments) unless overridden
+        var tags = opusTags ?? ConcatBytes("OpusTags"u8.ToArray(), [0x04, 0x00, 0x00, 0x00], "libo"u8.ToArray(), new byte[4]);
+        // RFC 6716 decoder-valid 20ms CELT/SILK silent Opus frame (config 31, stereo=0, code=0)
+        byte[] audioPkt = [0xFC, 0xFF, 0xFE];
         return ConcatBytes(
-            BuildOggBytes(head, bos: true, serial: 1, pageSeq: 0),
-            BuildOggBytes(tags, bos: false, serial: 1, pageSeq: 1),
-            BuildOggBytes(audioPkt, bos: false, serial: 1, pageSeq: 2));
+            BuildOggBytes(head, bos: true, serial: 1, pageSeq: 0, granulePosition: 0),
+            BuildOggBytes(tags, bos: false, serial: 1, pageSeq: 1, granulePosition: 0),
+            BuildOggBytes(audioPkt, bos: false, serial: 1, pageSeq: 2, eos: true, granulePosition: 960));
     }
 
-    internal static byte[] BuildValidOggVorbisStream(byte[]? vorbisHead = null)
+    internal static byte[] BuildValidOggVorbisStream(byte[]? vorbisHead = null, byte[]? audioPacket = null)
     {
         var head = vorbisHead ?? BuildValidVorbisHead();
-        byte[] comment = [0x03, .. "vorbis"u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        // Vorbis comment header includes framing bit (0x01) per Vorbis I §5.2
+        byte[] comment = [0x03, .. "vorbis"u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01];
         byte[] setup = [0x05, .. "vorbis"u8, 0x01, 0x02, 0x03, 0x04];
-        byte[] audioPkt = [0x00, 0x42, 0x13, 0x37];
+        byte[] audioPkt = audioPacket ?? [0x00, 0x42, 0x13, 0x37];
         return ConcatBytes(
-            BuildOggBytes(head, bos: true, serial: 1, pageSeq: 0),
-            BuildOggBytes(comment, bos: false, serial: 1, pageSeq: 1),
-            BuildOggBytes(setup, bos: false, serial: 1, pageSeq: 2),
-            BuildOggBytes(audioPkt, bos: false, serial: 1, pageSeq: 3));
+            BuildOggBytes(head, bos: true, serial: 1, pageSeq: 0, granulePosition: 0),
+            BuildOggBytes(comment, bos: false, serial: 1, pageSeq: 1, granulePosition: 0),
+            BuildOggBytes(setup, bos: false, serial: 1, pageSeq: 2, granulePosition: 0),
+            BuildOggBytes(audioPkt, bos: false, serial: 1, pageSeq: 3, eos: true, granulePosition: 1024));
     }
 
     internal static byte[] ConcatBytes(params byte[][] parts)
@@ -583,7 +694,7 @@ public sealed class Phase10VoiceUnitTests
         return WrapIsoBox("stz2", inner);
     }
 
-    private static byte[] BuildIsoBmffWithCustomSampleTable(string majorBrand, byte[] sampleSizeBox)
+    private static byte[] BuildIsoBmffWithCustomSampleTable(string majorBrand, byte[] sampleSizeBox, int mdatPayloadBytes = 4)
     {
         var hdlr = BuildHdlrBox("soun");
         var stbl = WrapIsoBox("stbl", sampleSizeBox);
@@ -591,8 +702,91 @@ public sealed class Phase10VoiceUnitTests
         var mdia = WrapIsoBox("mdia", ConcatBytes(hdlr, minf));
         var trak = WrapIsoBox("trak", mdia);
         var moov = WrapIsoBox("moov", trak);
-        var mdat = WrapIsoBox("mdat", [0x01, 0x02, 0x03, 0x04]);
+        var mdat = WrapIsoBox("mdat", new byte[mdatPayloadBytes]);
         return ConcatBytes(BuildIsoBmffFtypOnly(majorBrand), moov, mdat);
+    }
+
+    private static byte[] BuildSmallTruncatedTrailingMp4Bytes(string majorBrand) =>
+        ConcatBytes(BuildIsoBmffAudioBytes(majorBrand, "soun", includeSampleEvidence: true), [0x00, 0x00, 0x00, 0x10]);
+
+    private static byte[] BuildTrailingVideoMoovAfterAudioMp4(string majorBrand)
+    {
+        var valid = BuildIsoBmffAudioBytes(majorBrand, "soun", includeSampleEvidence: true);
+        var trailingVideoMoov = WrapIsoBox("moov", WrapIsoBox("trak", ConcatBytes(BuildTkhdBox(2), WrapIsoBox("mdia", BuildHdlrBox("vide")))));
+        return ConcatBytes(valid, trailingVideoMoov);
+    }
+
+    private static byte[] BuildPaddedFixedStszMp4Bytes(string majorBrand, uint sampleSize, uint sampleCount, int freePadBytes, int mdatPayloadBytes)
+    {
+        var hdlr = BuildHdlrBox("soun");
+        var stbl = WrapIsoBox("stbl", BuildFixedStszBox(sampleSize, sampleCount));
+        var moov = WrapIsoBox("moov", WrapIsoBox("trak", WrapIsoBox("mdia", ConcatBytes(hdlr, WrapIsoBox("minf", stbl)))));
+        var pad = WrapIsoBox("free", new byte[freePadBytes]);
+        var mdat = WrapIsoBox("mdat", new byte[mdatPayloadBytes]);
+        return ConcatBytes(BuildIsoBmffFtypOnly(majorBrand), moov, pad, mdat);
+    }
+
+    private static byte[] BuildWebmSeekHeadUnknownClusterTrailingTracks(bool includeCuesBetweenClusterAndTracks)
+    {
+        var cluster = BuildWebmClusterWithSimpleBlock(trackNumber: 1, unknownSize: true);
+        byte[] cues = includeCuesBetweenClusterAndTracks ? [0x1C, 0x53, 0xBB, 0x6B, 0x82, 0x00, 0x00] : [];
+        var tracks = BuildWebmTracksElement(trackNumber: 1, trackType: 2);
+
+        byte[] seekIdEl = [0x53, 0xAB, 0x84, 0x16, 0x54, 0xAE, 0x6B];
+        byte[] seekPosElHeader = [0x53, 0xAC, 0x84];
+        var seekBodyLen = seekIdEl.Length + seekPosElHeader.Length + 4;
+        var seekElLen = 2 + 1 + seekBodyLen;
+        var seekHeadTotalLen = 4 + 1 + seekElLen;
+
+        var tracksOffsetInSegment = (uint)(seekHeadTotalLen + cluster.Length + cues.Length);
+        var posBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(posBytes, tracksOffsetInSegment);
+
+        byte[] seekBody = [.. seekIdEl, .. seekPosElHeader, .. posBytes];
+        byte[] seekEl = [0x4D, 0xBB, (byte)(0x80 | seekBody.Length), .. seekBody];
+        byte[] seekHead = [0x11, 0x4D, 0x9B, 0x74, (byte)(0x80 | seekEl.Length), .. seekEl];
+
+        using var ms = new MemoryStream();
+        ms.Write(BuildWebmEbmlHeaderOnly("webm"));
+        ms.Write([0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        ms.Write(seekHead);
+        ms.Write(cluster);
+        ms.Write(cues);
+        ms.Write(tracks);
+        return ms.ToArray();
+    }
+
+    private static byte[] BuildMalformedSeekHeadInsideUnknownClusterSimpleBlock2Webm()
+    {
+        // Unknown-sized Cluster containing valid SimpleBlock #1 followed by SimpleBlock #2 embedding fake Tracks
+        byte[] sb1Payload = [0x81, 0x00, 0x00, 0x80, 0xAA, 0xBB];
+        byte[] sb1 = [0xA3, (byte)(0x80 | sb1Payload.Length), .. sb1Payload];
+        var spoofedTracks = BuildWebmTracksElement(trackNumber: 1, trackType: 2);
+        byte[] sb2 = [0xA3, .. EncodeEbmlUintSize4Byte(4 + spoofedTracks.Length), 0x81, 0x00, 0x00, 0x80, .. spoofedTracks];
+        // Unknown-sized Cluster header is 12 bytes (4B ID + 8B unknown VINT)
+        byte[] clusterUnknown = [0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, .. sb1, .. sb2];
+
+        byte[] seekIdEl = [0x53, 0xAB, 0x84, 0x16, 0x54, 0xAE, 0x6B];
+        byte[] seekPosElHeader = [0x53, 0xAC, 0x84];
+        var seekBodyLen = seekIdEl.Length + seekPosElHeader.Length + 4;
+        var seekElLen = 2 + 1 + seekBodyLen;
+        var seekHeadTotalLen = 4 + 1 + seekElLen;
+
+        // Point directly inside SimpleBlock #2 payload (12B clusterHdr + sb1.Length + 9B sb2Hdr)
+        var spoofedOffsetInSegment = (uint)(seekHeadTotalLen + 12 + sb1.Length + 9);
+        var posBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(posBytes, spoofedOffsetInSegment);
+
+        byte[] seekBody = [.. seekIdEl, .. seekPosElHeader, .. posBytes];
+        byte[] seekEl = [0x4D, 0xBB, (byte)(0x80 | seekBody.Length), .. seekBody];
+        byte[] seekHead = [0x11, 0x4D, 0x9B, 0x74, (byte)(0x80 | seekEl.Length), .. seekEl];
+
+        using var ms = new MemoryStream();
+        ms.Write(BuildWebmEbmlHeaderOnly("webm"));
+        ms.Write([0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+        ms.Write(seekHead);
+        ms.Write(clusterUnknown);
+        return ms.ToArray();
     }
 
     private static byte[] BuildMultiFragmentAudioMp4Bytes(string majorBrand, uint trackId, int fragmentCount, int paddingBytesPerMoof)

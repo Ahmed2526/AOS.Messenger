@@ -490,9 +490,6 @@ export function createVoicePlayer({
             if (typeof isStillCurrent === 'function' && !isStillCurrent()) return false;
             if (url) {
                 state.audio.src = url;
-                if (state.audio.error) {
-                    try { state.audio.error = null; } catch {}
-                }
                 return true;
             }
         } catch {}
@@ -521,6 +518,14 @@ export function createVoicePlayer({
         const hasSrc = Boolean(state.audio.getAttribute('src') || state.audio.src);
         const hasMediaError = Boolean(state.audio.error);
         if (!hasSrc || hasMediaError) {
+            if (hasMediaError && state.pendingSeekSec === null) {
+                const resumeSec = Number(state.audio.currentTime) || 0;
+                const durSec = getEffectiveDurationSec(state.audio, state);
+                const isAtEnd = Boolean(state.audio.ended) || (durSec > 0 && resumeSec >= durSec - 0.05);
+                if (resumeSec > 0 && !isAtEnd) {
+                    state.pendingSeekSec = resumeSec;
+                }
+            }
             const ok = await loadAudioSource(card, state, hasMediaError, () => isCurrentAttempt(card, state, attemptId));
             if (!isCurrentAttempt(card, state, attemptId)) {
                 if (card.isConnected === false && activeCard === card && attemptId === playSequence) {
@@ -530,7 +535,7 @@ export function createVoicePlayer({
                 return;
             }
             if (!ok) {
-                showError(state, hasMediaError ? 'Audio format not supported by this browser' : 'Audio unavailable');
+                showError(state, 'Audio unavailable');
                 setPlayingUi(card, state, false);
                 activeCard = null;
                 return;
@@ -854,11 +859,7 @@ export function createVoicePlayer({
                         return;
                     }
                     if (!ok) {
-                        showError(
-                            state,
-                            mediaErrorCode === 4
-                                ? 'Audio format not supported by this browser'
-                                : 'Audio unavailable');
+                        showError(state, 'Audio unavailable');
                         setPlayingUi(card, state, false);
                         activeCard = null;
                         return;

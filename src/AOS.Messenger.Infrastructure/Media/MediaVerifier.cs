@@ -899,11 +899,22 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         var hasNonEmptyMdat = false;
         var hasMvex = false;
         var hasRegularAudioSamples = false;
+        ulong requiredFixedSampleBytes = 0;
+        ulong totalMdatPayloadBytes = 0;
         var audioTrackIds = new HashSet<uint>();
         var fragmentSampleTrackIds = new HashSet<uint>();
+        var audioConfirmed = false;
 
         while (offset < reader.TotalLength)
         {
+            var probeLen = (int)Math.Min(16L, reader.TotalLength - offset);
+            if (audioConfirmed &&
+                (counter.Count >= MaxContainerBoxesVisited ||
+                 !reader.CanReadHeaderWithinBudget(offset, probeLen)))
+            {
+                break;
+            }
+
             counter.Count++;
             if (counter.Count > MaxContainerBoxesVisited)
             {
@@ -922,6 +933,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 if (box.PayloadLength > 0)
                 {
                     hasNonEmptyMdat = true;
+                    totalMdatPayloadBytes = totalMdatPayloadBytes > ulong.MaxValue - (ulong)box.PayloadLength
+                        ? ulong.MaxValue
+                        : totalMdatPayloadBytes + (ulong)box.PayloadLength;
                 }
             }
             else if (string.Equals(box.BoxType, "moov", StringComparison.Ordinal))
@@ -938,10 +952,16 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 hasAudioHandler |= moovInfo.HasAudioHandler;
                 hasMvex |= moovInfo.HasMvex;
                 hasRegularAudioSamples |= moovInfo.HasRegularAudioSamples;
+                if (moovInfo.RequiredFixedSampleBytes > requiredFixedSampleBytes)
+                {
+                    requiredFixedSampleBytes = moovInfo.RequiredFixedSampleBytes;
+                }
             }
             else if (string.Equals(box.BoxType, "moof", StringComparison.Ordinal))
             {
-                if (box.EndOffset > box.PayloadOffset)
+                // Once audio samples are confirmed, skip scanning further fragment internals
+                // while continuing root-box framing checks inside cache/budget.
+                if (!audioConfirmed && box.EndOffset > box.PayloadOffset)
                 {
                     await ScanMp4MoofForSamplesAsync(
                         reader,
@@ -959,12 +979,10 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 throw new DomainException("Invalid MP4 audio container box progression.");
             }
 
-            // Early-exit once moov (zero video tracks, valid audio track), non-empty mdat, and sample evidence
-            // are confirmed so long multi-fragment fMP4 voice uploads do not exhaust range-read/box budgets.
             var hasConfirmedFragmentedSamples = hasMvex && audioTrackIds.Overlaps(fragmentSampleTrackIds);
             if (foundMoov && hasAudioHandler && hasNonEmptyMdat && (hasRegularAudioSamples || hasConfirmedFragmentedSamples))
             {
-                return;
+                audioConfirmed = true;
             }
 
             offset = box.EndOffset;
@@ -979,6 +997,11 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         if (!hasNonEmptyMdat || (!hasRegularAudioSamples && !hasFragmentedAudioSamples))
         {
             throw new DomainException("MP4 voice recording must contain audio samples.");
+        }
+
+        if (offset >= reader.TotalLength && requiredFixedSampleBytes > totalMdatPayloadBytes)
+        {
+            throw new DomainException("MP4 sample size table declares more audio data than media payload.");
         }
     }
 
@@ -998,13 +1021,15 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
     private readonly record struct Mp4MoovVoiceInfo(
         bool HasAudioHandler,
         bool HasMvex,
-        bool HasRegularAudioSamples);
+        bool HasRegularAudioSamples,
+        ulong RequiredFixedSampleBytes);
 
     private sealed class Mp4TrackVoiceState
     {
         public uint TrackId { get; set; }
         public bool HasAudioHandler { get; set; }
         public bool HasRegularSamples { get; set; }
+        public ulong RequiredFixedSampleBytes { get; set; }
     }
 
     private static async Task<Mp4MoovVoiceInfo> ScanMp4MoovForVoiceAsync(
@@ -1024,6 +1049,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         var hasAudioHandler = false;
         var hasMvex = false;
         var hasRegularAudioSamples = false;
+        ulong requiredFixedSampleBytes = 0;
         var offset = startOffset;
 
         while (offset < endOffset)
@@ -1071,6 +1097,11 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                         {
                             hasRegularAudioSamples = true;
                         }
+
+                        if (trackState.RequiredFixedSampleBytes > requiredFixedSampleBytes)
+                        {
+                            requiredFixedSampleBytes = trackState.RequiredFixedSampleBytes;
+                        }
                     }
                 }
             }
@@ -1089,6 +1120,10 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                     hasAudioHandler |= nested.HasAudioHandler;
                     hasMvex |= nested.HasMvex;
                     hasRegularAudioSamples |= nested.HasRegularAudioSamples;
+                    if (nested.RequiredFixedSampleBytes > requiredFixedSampleBytes)
+                    {
+                        requiredFixedSampleBytes = nested.RequiredFixedSampleBytes;
+                    }
                 }
             }
 
@@ -1100,7 +1135,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             offset = box.EndOffset;
         }
 
-        return new Mp4MoovVoiceInfo(hasAudioHandler, hasMvex, hasRegularAudioSamples);
+        return new Mp4MoovVoiceInfo(hasAudioHandler, hasMvex, hasRegularAudioSamples, requiredFixedSampleBytes);
     }
 
     private static async Task ScanMp4TrackTreeAsync(
@@ -1204,6 +1239,17 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                     {
                         if (defaultSampleSize > 0)
                         {
+                            var declaredSampleBytes = (ulong)defaultSampleSize * (ulong)sampleCount;
+                            if (declaredSampleBytes > (ulong)reader.TotalLength)
+                            {
+                                throw new DomainException("MP4 sample size table declares more audio data than object length.");
+                            }
+
+                            if (declaredSampleBytes > trackState.RequiredFixedSampleBytes)
+                            {
+                                trackState.RequiredFixedSampleBytes = declaredSampleBytes;
+                            }
+
                             trackState.HasRegularSamples = true;
                         }
                         else
@@ -1542,6 +1588,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         long? indexedTracksOffset = null;
         var visitedRanges = new List<(long Start, long End)>();
         var deferredClusters = new List<EbmlElementHeader>();
+        EbmlElementHeader? deferredUnknownCluster = null;
 
         while (pos < endOffset)
         {
@@ -1585,6 +1632,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 {
                     if (element.IsUnknownSize)
                     {
+                        deferredUnknownCluster = element;
                         break;
                     }
 
@@ -1646,7 +1694,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             foundTracks = await TryResolveAndScanIndexedTracksAsync(
                 reader,
                 indexedTracksOffset.Value,
-                minAllowedOffset: pos,
+                minAllowedOffset: deferredUnknownCluster?.PayloadOffset ?? pos,
                 segmentEnd: endOffset,
                 visitedRanges,
                 counter,
@@ -1667,7 +1715,114 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             }
         }
 
+        if (deferredUnknownCluster.HasValue &&
+            indexedTracksOffset.HasValue &&
+            indexedTracksOffset.Value > deferredUnknownCluster.Value.PayloadOffset)
+        {
+            if (await VerifyUnknownClusterAndScanToTracksOffsetAsync(
+                    reader,
+                    deferredUnknownCluster.Value,
+                    indexedTracksOffset.Value,
+                    audioTrackNumbers,
+                    counter,
+                    ct))
+            {
+                return (true, true);
+            }
+        }
+
         return (true, false);
+    }
+
+    private static async Task<bool> VerifyUnknownClusterAndScanToTracksOffsetAsync(
+        BoundedStorageReader reader,
+        EbmlElementHeader unknownCluster,
+        long tracksOffset,
+        HashSet<ulong> audioTrackNumbers,
+        BoxCounter counter,
+        CancellationToken ct)
+    {
+        var pos = unknownCluster.PayloadOffset;
+        var foundAudioBlock = false;
+        var inSegmentContinuation = false;
+
+        while (pos < tracksOffset)
+        {
+            counter.Count++;
+            if (counter.Count > MaxContainerBoxesVisited)
+            {
+                throw new DomainException("WebM Segment exceeds maximum inspectable element count.");
+            }
+
+            var element = await TryReadEbmlElementHeaderAsync(reader, pos, tracksOffset, ct);
+            if (element is null)
+            {
+                return false;
+            }
+
+            var el = element.Value;
+            if (!inSegmentContinuation && IsWebmSegmentLevelElementId(el.ElementId))
+            {
+                inSegmentContinuation = true;
+            }
+
+            if (el.IsUnknownSize || el.EndOffset <= pos || el.EndOffset > tracksOffset)
+            {
+                return false;
+            }
+
+            if (inSegmentContinuation)
+            {
+                if (!IsWebmSegmentLevelElementId(el.ElementId))
+                {
+                    return false;
+                }
+
+                if (el.ElementId == WebmClusterElementIdValue && !foundAudioBlock &&
+                    await ScanWebmClusterForAudioBlockAsync(reader, el, audioTrackNumbers, counter, ct))
+                {
+                    foundAudioBlock = true;
+                }
+            }
+            else if (el.ElementId == WebmSimpleBlockElementIdValue)
+            {
+                if (!foundAudioBlock && await BlockTargetsAudioTrackAsync(reader, el, audioTrackNumbers, ct))
+                {
+                    foundAudioBlock = true;
+                }
+            }
+            else if (el.ElementId == WebmBlockGroupElementIdValue)
+            {
+                var groupPos = el.PayloadOffset;
+                while (groupPos < el.EndOffset)
+                {
+                    counter.Count++;
+                    if (counter.Count > MaxContainerBoxesVisited)
+                    {
+                        throw new DomainException("WebM BlockGroup exceeds maximum inspectable element count.");
+                    }
+
+                    var child = await TryReadEbmlElementHeaderAsync(reader, groupPos, el.EndOffset, ct);
+                    if (child is null || child.Value.IsUnknownSize || child.Value.EndOffset <= groupPos || child.Value.EndOffset > el.EndOffset)
+                    {
+                        return false;
+                    }
+
+                    if (!foundAudioBlock &&
+                        child.Value.ElementId == WebmBlockElementIdValue &&
+                        await BlockTargetsAudioTrackAsync(reader, child.Value, audioTrackNumbers, ct))
+                    {
+                        foundAudioBlock = true;
+                    }
+
+                    groupPos = child.Value.EndOffset;
+                }
+            }
+
+            pos = el.EndOffset;
+        }
+
+        return pos == tracksOffset && foundAudioBlock;
     }
 
     private static async Task<bool> TryResolveAndScanIndexedTracksAsync(
@@ -2132,6 +2287,32 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             _totalBytesRead = initialZeroOffsetPage.Length;
         }
 
+        public bool CanReadHeaderWithinBudget(long offset, int probeLength)
+        {
+            if (offset < 0 || offset >= TotalLength || probeLength <= 0)
+            {
+                return false;
+            }
+
+            var end = Math.Min(TotalLength, offset + probeLength);
+            var firstPage = (offset / HeaderInspectBytes) * HeaderInspectBytes;
+            var lastPage = ((end - 1) / HeaderInspectBytes) * HeaderInspectBytes;
+            var missingReads = 0;
+            long missingBytes = 0;
+
+            for (var pageStart = firstPage; pageStart <= lastPage; pageStart += HeaderInspectBytes)
+            {
+                if (!_pages.ContainsKey(pageStart))
+                {
+                    missingReads++;
+                    missingBytes += (int)Math.Min(HeaderInspectBytes, TotalLength - pageStart);
+                }
+            }
+
+            return _rangeReads + missingReads <= MaxContainerRangeReads &&
+                   _totalBytesRead + missingBytes <= MaxContainerMetadataBytes;
+        }
+
         public async Task<bool> ReadExactAsync(long offset, Memory<byte> destination, CancellationToken ct) =>
             await ReadAsync(offset, destination, ct) == destination.Length;
 
@@ -2238,7 +2419,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         var expectingContinuation = false;
         var currentPacketBytes = new List<byte>(64);
         var currentPacketLength = 0;
+        byte? currentPacketFirstByte = null;
         var fixedHeader = new byte[27];
+        var firstByteBuf = new byte[1];
 
         for (var pageIndex = 0; pageIndex < maxOggPagesVisited && offset < reader.TotalLength; pageIndex++)
         {
@@ -2330,9 +2513,18 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                             throw new DomainException("Ogg voice recording is truncated or malformed.");
                         }
 
-                        // Only keep prefix/full bytes needed for identification/header prefix checks
+                        // Only keep bytes needed for identification and required codec header validation
                         currentPacketBytes.AddRange(segBuf);
                     }
+                }
+                else if (!isOpus && currentPacketFirstByte is null && segLen > 0)
+                {
+                    if (!await reader.ReadExactAsync(segBodyCursor, firstByteBuf, ct))
+                    {
+                        throw new DomainException("Ogg voice recording is truncated or malformed.");
+                    }
+
+                    currentPacketFirstByte = firstByteBuf[0];
                 }
 
                 currentPacketLength += segLen;
@@ -2353,10 +2545,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                         if (packetIndex == 1)
                         {
                             var tagsSpan = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(currentPacketBytes);
-                            if (tagsSpan.Length < 8 || !tagsSpan.StartsWith("OpusTags"u8))
-                            {
-                                throw new DomainException("Ogg Opus voice recording is missing a valid OpusTags comment header.");
-                            }
+                            ValidateOpusTagsPacket(tagsSpan);
                         }
                         else if (currentPacketLength > 0)
                         {
@@ -2381,7 +2570,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                                 throw new DomainException("Ogg Vorbis voice recording is missing a valid setup header.");
                             }
                         }
-                        else if (currentPacketLength > 0)
+                        else if (currentPacketLength > 0 && currentPacketFirstByte is byte firstByte && (firstByte & 0x01) == 0)
                         {
                             return;
                         }
@@ -2390,6 +2579,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                     packetIndex++;
                     currentPacketBytes.Clear();
                     currentPacketLength = 0;
+                    currentPacketFirstByte = null;
                 }
                 else
                 {
@@ -2406,6 +2596,47 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         }
 
         throw new DomainException("Ogg voice recording is missing audio data packets or required codec headers.");
+    }
+
+    private static void ValidateOpusTagsPacket(ReadOnlySpan<byte> tags)
+    {
+        // RFC 7845 §5.2: "OpusTags" (8) + vendor_string_length (4) + vendor[vendorLen] + comment_list_length (4) + ...
+        if (tags.Length < 16 || !tags.StartsWith("OpusTags"u8))
+        {
+            throw new DomainException("Ogg Opus voice recording is missing a valid OpusTags comment header.");
+        }
+
+        var vendorLen = BinaryPrimitives.ReadUInt32LittleEndian(tags.Slice(8, 4));
+        if ((ulong)vendorLen > (ulong)(tags.Length - 16))
+        {
+            throw new DomainException("Ogg Opus voice recording has a truncated OpusTags vendor string.");
+        }
+
+        var cursor = 12 + (int)vendorLen;
+        var commentCount = BinaryPrimitives.ReadUInt32LittleEndian(tags.Slice(cursor, 4));
+        cursor += 4;
+
+        if ((ulong)commentCount * 4UL > (ulong)(tags.Length - cursor))
+        {
+            throw new DomainException("Ogg Opus voice recording has a truncated OpusTags comment list.");
+        }
+
+        for (uint i = 0; i < commentCount; i++)
+        {
+            if (cursor + 4 > tags.Length)
+            {
+                throw new DomainException("Ogg Opus voice recording has a truncated OpusTags comment entry.");
+            }
+
+            var commentLen = BinaryPrimitives.ReadUInt32LittleEndian(tags.Slice(cursor, 4));
+            cursor += 4;
+            if ((ulong)commentLen > (ulong)(tags.Length - cursor))
+            {
+                throw new DomainException("Ogg Opus voice recording has an out-of-bounds OpusTags comment entry.");
+            }
+
+            cursor += (int)commentLen;
+        }
     }
 
     private static bool ValidateOggIdentificationPacket(ReadOnlySpan<byte> packet)

@@ -117,8 +117,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         }
 
         if (!force && !skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const myEpoch = routerLifecycleEpoch;
             const allowed = await hooks.confirmBeforeSwitch(nextId);
-            if (!allowed) {
+            if (!allowed || myEpoch !== routerLifecycleEpoch) {
                 return false;
             }
         }
@@ -236,8 +237,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
      */
     async function switchToEmptyState({ pushUrl = true, skipConfirm = false } = {}) {
         if (!skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const myEpoch = routerLifecycleEpoch;
             const allowed = await hooks.confirmBeforeSwitch(null);
-            if (!allowed) {
+            if (!allowed || myEpoch !== routerLifecycleEpoch) {
                 return false;
             }
         }
@@ -553,10 +555,10 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     }
 
     function destroy() {
-        if (!initialized) return;
         routerLifecycleEpoch++;
         pendingPopConfirm = null;
         expectedRollbackIdx = null;
+        if (!initialized) return;
         if (typeof document !== 'undefined' && onDocumentClick) {
             document.removeEventListener('click', onDocumentClick);
         }

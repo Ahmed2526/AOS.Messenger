@@ -181,6 +181,7 @@ export function createVoiceRecorder({
     let previewBars = [];
     let pendingStopMode = null; // 'preview' | 'send' | 'abort'
     let stopAutoTriggered = false;
+    let cancelPendingStart = null;
     let initialized = false;
 
     function getEl(id) {
@@ -584,6 +585,11 @@ export function createVoiceRecorder({
 
     function resetInternalState() {
         ++opToken;
+        if (typeof cancelPendingStart === 'function') {
+            const cancel = cancelPendingStart;
+            cancelPendingStart = null;
+            cancel();
+        }
         isStarting = false;
         clearPollTimer();
         sendIndicatorFalseIfActive();
@@ -783,15 +789,18 @@ export function createVoiceRecorder({
             return false;
         }
 
-        isStarting = false;
         const nextFormat = selectPreferredRecordingFormat(MediaRecorderCls);
 
         const cleanupPendingReplacement = (recToDetach = null) => {
             if (recToDetach) {
                 try {
+                    recToDetach.onstart = null;
                     recToDetach.ondataavailable = null;
                     recToDetach.onerror = null;
                     recToDetach.onstop = null;
+                    if (recToDetach.state && recToDetach.state !== 'inactive' && typeof recToDetach.stop === 'function') {
+                        recToDetach.stop();
+                    }
                 } catch {}
             }
             if (pendingAudioContext === createdAudioCtx) {
@@ -801,7 +810,10 @@ export function createVoiceRecorder({
             }
             if (stream && typeof stream.getTracks === 'function') {
                 for (const t of stream.getTracks()) {
-                    try { t.stop(); } catch {}
+                    try {
+                        t.onended = null;
+                        t.stop();
+                    } catch {}
                 }
             }
         };
@@ -814,6 +826,7 @@ export function createVoiceRecorder({
             try {
                 nextRecorder = new MediaRecorderCls(stream);
             } catch (fallbackErr) {
+                isStarting = false;
                 cleanupPendingReplacement();
                 if (!startedFromPreview) {
                     forceAbortAndWipe();
@@ -823,126 +836,193 @@ export function createVoiceRecorder({
             }
         }
 
-        nextRecorder.ondataavailable = (evt) => {
-            if (myToken !== opToken) return;
-            const data = evt?.data;
-            if (!data || data.size <= 0) return;
-            recordedChunks.push(data);
-            cumulativeBytes += data.size;
-            if (!stopAutoTriggered && cumulativeBytes >= autoStopBytes && (mode === 'recording' || mode === 'paused')) {
-                stopAutoTriggered = true;
-                stopRecorderAndHandle('preview');
-            }
-        };
+        const pendingChunks = [];
+        let pendingBytes = 0;
+        let committed = false;
 
-        nextRecorder.onerror = () => {
-            if (myToken !== opToken) return;
-            forceAbortAndWipe();
-            reportError('Recording stopped due to an audio capture error.');
-        };
+        return await new Promise((resolve) => {
+            let settled = false;
 
-        try {
-            nextRecorder.start(1000);
-        } catch (err) {
-            cleanupPendingReplacement(nextRecorder);
-            if (!startedFromPreview) {
-                forceAbortAndWipe();
-            }
-            reportError(formatMicrophoneError(err));
-            return false;
-        }
+            const settleFailure = (errMsg) => {
+                if (settled) return;
+                settled = true;
+                if (cancelPendingStart === abortPendingStart) {
+                    cancelPendingStart = null;
+                }
+                isStarting = false;
+                cleanupPendingReplacement(nextRecorder);
+                if (!startedFromPreview && myToken === opToken) {
+                    forceAbortAndWipe();
+                }
+                if (errMsg) {
+                    reportError(errMsg);
+                }
+                resolve(false);
+            };
 
-        // Replacement recording is now live: safe to discard any prior preview and commit new recording state.
-        if (startedFromPreview) {
-            clearPreviewAudioElement();
-            revokePreviewObjectUrl();
-            previewBlob = null;
-            previewDurationMs = 0;
-            previewPeaks = [];
-            previewBars = [];
-        }
+            const abortPendingStart = () => {
+                if (settled) return;
+                settled = true;
+                isStarting = false;
+                cleanupPendingReplacement(nextRecorder);
+                resolve(false);
+            };
 
-        activeConvId = convId;
-        mediaStream = stream;
-        audioContext = createdAudioCtx;
-        if (pendingAudioContext === createdAudioCtx) {
-            pendingAudioContext = null;
-        }
-        mediaRecorder = nextRecorder;
-        selectedFormat = nextFormat;
-        recordedChunks = [];
-        cumulativeBytes = 0;
-        collectedSamples = [];
-        sampleStride = 1;
-        sampleTickCounter = 0;
-        sampleBucketMax = 0;
-        accumulatedActiveMs = 0;
-        stopAutoTriggered = false;
+            cancelPendingStart = abortPendingStart;
 
-        const supportsPause = Boolean(
-            mediaRecorder &&
-            typeof mediaRecorder.pause === 'function' &&
-            typeof mediaRecorder.resume === 'function');
-        const pauseBtn = getEl('voice-pause-btn');
-        if (pauseBtn) {
-            if (pauseBtn.classList) pauseBtn.classList.toggle('hidden', !supportsPause);
-            pauseBtn.disabled = !supportsPause;
-        }
-
-        if (audioContext && typeof audioContext.createMediaStreamSource === 'function' && typeof audioContext.createAnalyser === 'function') {
-            try {
-                sourceNode = audioContext.createMediaStreamSource(stream);
-                analyserNode = audioContext.createAnalyser();
-                analyserNode.fftSize = 256;
-                sourceNode.connect(analyserNode);
-                analyserBuffer = new Uint8Array(analyserNode.frequencyBinCount || 128);
-            } catch {
-                sourceNode = null;
-                analyserNode = null;
-                analyserBuffer = null;
-            }
-        }
-
-        if (typeof stream.getAudioTracks === 'function') {
-            const tracks = stream.getAudioTracks();
-            for (const track of tracks) {
-                if (!track) continue;
-                track.onended = () => {
-                    if (myToken !== opToken || (mode !== 'recording' && mode !== 'paused')) return;
-                    const elapsed = getCurrentElapsedMs();
-                    if (elapsed >= minDurationMs) {
-                        stopRecorderAndHandle('preview');
-                    } else {
-                        forceAbortAndWipe();
-                        reportError('Microphone disconnected before recording completed.');
+            nextRecorder.ondataavailable = (evt) => {
+                const data = evt?.data;
+                if (!data || data.size <= 0) return;
+                if (!committed) {
+                    if (!settled && myToken === opToken) {
+                        pendingChunks.push(data);
+                        pendingBytes += data.size;
                     }
-                };
+                    return;
+                }
+                if (myToken !== opToken || mediaRecorder !== nextRecorder) return;
+                recordedChunks.push(data);
+                cumulativeBytes += data.size;
+                if (!stopAutoTriggered && cumulativeBytes >= autoStopBytes && (mode === 'recording' || mode === 'paused')) {
+                    stopAutoTriggered = true;
+                    stopRecorderAndHandle('preview');
+                }
+            };
+
+            nextRecorder.onerror = (evt) => {
+                if (!settled) {
+                    settleFailure(formatMicrophoneError(evt?.error || new Error('Audio capture failed to start.')));
+                    return;
+                }
+                if (myToken !== opToken || mediaRecorder !== nextRecorder) return;
+                forceAbortAndWipe();
+                reportError('Recording stopped due to an audio capture error.');
+            };
+
+            nextRecorder.onstop = () => {
+                if (!settled) {
+                    settleFailure('Voice recording stopped before capture started.');
+                }
+            };
+
+            if (typeof stream.getAudioTracks === 'function') {
+                for (const track of stream.getAudioTracks()) {
+                    if (!track) continue;
+                    track.onended = () => {
+                        if (!settled) {
+                            settleFailure('Microphone disconnected before recording started.');
+                            return;
+                        }
+                        if (myToken !== opToken || mediaRecorder !== nextRecorder || (mode !== 'recording' && mode !== 'paused')) return;
+                        const elapsed = getCurrentElapsedMs();
+                        if (elapsed >= minDurationMs) {
+                            stopRecorderAndHandle('preview');
+                        } else {
+                            forceAbortAndWipe();
+                            reportError('Microphone disconnected before recording completed.');
+                        }
+                    };
+                }
             }
-        }
 
-        renderLiveWaveformScaffold();
-        updatePausedBadgeUi(false);
-        showDockState('recording');
-        activeSegmentStartMs = nowFn();
+            nextRecorder.onstart = () => {
+                if (settled) return;
+                if (myToken !== opToken || !canRecordNow() || String(getActiveConversationId() || '') !== String(convId)) {
+                    settleFailure(null);
+                    return;
+                }
 
-        sendIndicatorTrueIfNeeded(convId, true);
-        updateRecordingHud();
+                settled = true;
+                committed = true;
+                if (cancelPendingStart === abortPendingStart) {
+                    cancelPendingStart = null;
+                }
+                isStarting = false;
+                nextRecorder.onstart = null;
+                nextRecorder.onstop = null;
 
-        pollTimerId = setInterval(() => {
-            if (myToken !== opToken || mode !== 'recording') return;
-            const elapsed = getCurrentElapsedMs();
-            const level = sampleAnalyserLevel();
-            pushLiveSample(level);
-            updateRecordingHud();
-            sendIndicatorTrueIfNeeded(convId, false);
+                // Discard prior preview only after the replacement MediaRecorder has actually started.
+                if (startedFromPreview) {
+                    clearPreviewAudioElement();
+                    revokePreviewObjectUrl();
+                    previewBlob = null;
+                    previewDurationMs = 0;
+                    previewPeaks = [];
+                    previewBars = [];
+                }
 
-            if (!stopAutoTriggered && elapsed >= maxDurationMs) {
-                stopAutoTriggered = true;
-                stopRecorderAndHandle('preview');
+                activeConvId = convId;
+                mediaStream = stream;
+                audioContext = createdAudioCtx;
+                if (pendingAudioContext === createdAudioCtx) {
+                    pendingAudioContext = null;
+                }
+                mediaRecorder = nextRecorder;
+                selectedFormat = nextFormat;
+                recordedChunks = pendingChunks;
+                cumulativeBytes = pendingBytes;
+                collectedSamples = [];
+                sampleStride = 1;
+                sampleTickCounter = 0;
+                sampleBucketMax = 0;
+                accumulatedActiveMs = 0;
+                stopAutoTriggered = false;
+
+                const supportsPause = Boolean(
+                    mediaRecorder &&
+                    typeof mediaRecorder.pause === 'function' &&
+                    typeof mediaRecorder.resume === 'function');
+                const pauseBtn = getEl('voice-pause-btn');
+                if (pauseBtn) {
+                    if (pauseBtn.classList) pauseBtn.classList.toggle('hidden', !supportsPause);
+                    pauseBtn.disabled = !supportsPause;
+                }
+
+                if (audioContext && typeof audioContext.createMediaStreamSource === 'function' && typeof audioContext.createAnalyser === 'function') {
+                    try {
+                        sourceNode = audioContext.createMediaStreamSource(stream);
+                        analyserNode = audioContext.createAnalyser();
+                        analyserNode.fftSize = 256;
+                        sourceNode.connect(analyserNode);
+                        analyserBuffer = new Uint8Array(analyserNode.frequencyBinCount || 128);
+                    } catch {
+                        sourceNode = null;
+                        analyserNode = null;
+                        analyserBuffer = null;
+                    }
+                }
+
+                renderLiveWaveformScaffold();
+                updatePausedBadgeUi(false);
+                showDockState('recording');
+                activeSegmentStartMs = nowFn();
+
+                sendIndicatorTrueIfNeeded(convId, true);
+                updateRecordingHud();
+
+                pollTimerId = setInterval(() => {
+                    if (myToken !== opToken || mode !== 'recording') return;
+                    const elapsed = getCurrentElapsedMs();
+                    const level = sampleAnalyserLevel();
+                    pushLiveSample(level);
+                    updateRecordingHud();
+                    sendIndicatorTrueIfNeeded(convId, false);
+
+                    if (!stopAutoTriggered && elapsed >= maxDurationMs) {
+                        stopAutoTriggered = true;
+                        stopRecorderAndHandle('preview');
+                    }
+                }, 120);
+
+                resolve(true);
+            };
+
+            try {
+                nextRecorder.start(1000);
+            } catch (err) {
+                settleFailure(formatMicrophoneError(err));
             }
-        }, 120);
-
-        return true;
+        });
     }
 
     function togglePause() {

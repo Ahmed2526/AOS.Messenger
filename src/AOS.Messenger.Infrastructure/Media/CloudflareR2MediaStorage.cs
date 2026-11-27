@@ -110,7 +110,7 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             return _s3Client.GetPreSignedURL(request);
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException)
         {
             _logger.LogError(ex, "Failed to generate R2 presigned PUT URL for {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to generate media upload URL.", ex);
@@ -148,7 +148,7 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             return _s3Client.GetPreSignedURL(request);
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException)
         {
             _logger.LogError(ex, "Failed to generate R2 presigned GET URL for {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to generate media download URL.", ex);
@@ -178,7 +178,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             return null;
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to read R2 object metadata for {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to inspect uploaded media metadata.", ex);
@@ -244,7 +245,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             throw new NotFoundException("Media object", "staged");
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to read R2 byte range for {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to read media object header bytes.", ex);
@@ -303,7 +305,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             throw new NotFoundException("Media object", "staged");
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to download R2 object {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to download staged media object.", ex);
@@ -355,7 +358,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             throw new NotFoundException("Media object", "staged");
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to promote R2 object {StagingKey} to {PermanentKey}", stagingKey, permanentKey);
             throw new MediaStorageException("Unable to promote verified media object.", ex);
@@ -403,7 +407,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             throw new ConflictException("The permanent media object already exists.", ex);
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to upload processed media stream to {PermanentKey}", permanentKey);
             throw new MediaStorageException("Unable to store processed media object.", ex);
@@ -428,7 +433,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         {
             // Idempotent delete
         }
-        catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+        catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                   || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
             _logger.LogWarning(ex, "Failed to delete R2 object {ObjectKey}", objectKey);
             throw new MediaStorageException("Unable to delete media object.", ex);
@@ -455,7 +461,8 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
                     ContinuationToken = continuationToken
                 }, ct);
             }
-            catch (Exception ex) when (ex is AmazonServiceException or HttpRequestException)
+            catch (Exception ex) when (ex is AmazonServiceException or AmazonClientException or HttpRequestException
+                                       || (ex is TaskCanceledException && !ct.IsCancellationRequested))
             {
                 _logger.LogWarning(ex, "Failed to list R2 objects for prefix {Prefix}", prefix);
                 throw new MediaStorageException("Unable to enumerate stored media objects.", ex);

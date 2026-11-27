@@ -46,9 +46,9 @@ public sealed class ConversationSidebarViewComponent : ViewComponent
                     : (routeValues.TryGetValue("conversationId", out var convRouteId) ? convRouteId : null);
             }
 
-            if (routeValue is not null && Guid.TryParse(routeValue.ToString(), out var parsedGuid))
+            if (routeValue is not null && ConversationId.TryParse(routeValue.ToString(), out var parsedId))
             {
-                activeConversationId = new ConversationId(parsedGuid);
+                activeConversationId = parsedId;
             }
         }
 

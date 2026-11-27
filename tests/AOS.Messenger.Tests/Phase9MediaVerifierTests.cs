@@ -793,4 +793,54 @@ public sealed class Phase9MediaVerifierTests
         public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, CancellationToken ct = default) =>
             throw new NotSupportedException();
     }
+
+    [Fact]
+    public async Task MediaVerifier_RejectsAnimationExceedingMaxFramesInsteadOfTruncating()
+    {
+        using var gif = new MagickImageCollection();
+        for (int i = 0; i < 4; i++)
+        {
+            gif.Add(new MagickImage(new MagickColor((byte)(40 * i), 100, 150), 16, 16) { AnimationDelay = 10 });
+        }
+
+        using var ms = new MemoryStream();
+        gif.Write(ms, MagickFormat.Gif);
+        var bytes = ms.ToArray();
+
+        var media = CreatePendingMedia(MediaKind.Image, "four-frames.gif", "image/gif", bytes.Length);
+        using var verifier = CreateVerifier(
+            new StubMediaStorage(media.ObjectKey, bytes, "\"e-4frames\""),
+            new MediaOptions { MaxAnimationFrames = 3 });
+
+        await Assert.ThrowsAsync<DomainException>(() =>
+            verifier.VerifyAndSanitizeAsync(media, new MediaObjectMetadata(bytes.Length, "\"e-4frames\"", "image/gif")));
+    }
+
+    [Fact]
+    public void ImageFrameCounter_RejectsInvalidWebpRiffSizeAndChunkExceedingRiffEnd()
+    {
+        // riffPayloadSize = 2 (< 4 minimum for 'WEBP' FourCC)
+        var badRiffSize = "RIFF\x02\x00\x00\x00WEBPAAAA"u8.ToArray();
+        using (var s1 = new MemoryStream(badRiffSize))
+        {
+            Assert.Throws<DomainException>(() =>
+                ImageFrameCounter.ScanWebp(s1, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels));
+        }
+
+        // Valid riffPayloadSize = 16 -> riffEnd = 24, but chunk payload claims 40 bytes while file has 100 trailing bytes
+        using var ms2 = new MemoryStream();
+        ms2.Write("RIFF"u8);
+        Span<byte> le = stackalloc byte[4];
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 16u);
+        ms2.Write(le);
+        ms2.Write("WEBP"u8);
+        ms2.Write("VP8X"u8);
+        BinaryPrimitives.WriteUInt32LittleEndian(le, 40u);
+        ms2.Write(le);
+        ms2.Write(new byte[100]);
+        ms2.Position = 0;
+
+        Assert.Throws<DomainException>(() =>
+            ImageFrameCounter.ScanWebp(ms2, maxFrames: 10, MediaConstraints.MaxTotalDecodedImagePixels));
+    }
 }

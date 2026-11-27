@@ -77,7 +77,7 @@ public sealed class AccountController : Controller
 
         if (isLockedOut)
         {
-            ModelState.AddModelError(string.Empty, "Account is locked out. Please try again in 15 minutes.");
+            ModelState.AddModelError(string.Empty, "Invalid username or password.");
             return View(model);
         }
 
@@ -101,7 +101,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("email-endpoint-limiter")]
-    public async Task<IActionResult> Register(RegisterViewModel model)
+    public async Task<IActionResult> Register([FromForm] RegisterViewModel model)
     {
         if (!ModelState.IsValid)
         {
@@ -169,7 +169,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("email-endpoint-limiter")]
-    public async Task<IActionResult> ConfirmEmail(ConfirmEmailViewModel model)
+    public async Task<IActionResult> ConfirmEmail([FromForm] ConfirmEmailViewModel model)
     {
         if (!ModelState.IsValid)
         {
@@ -195,7 +195,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("email-endpoint-limiter")]
-    public async Task<IActionResult> ForgotPassword(ForgotPasswordViewModel model)
+    public async Task<IActionResult> ForgotPassword([FromForm] ForgotPasswordViewModel model)
     {
         if (!ModelState.IsValid)
         {
@@ -224,7 +224,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("email-endpoint-limiter")]
-    public async Task<IActionResult> ResetPassword(ResetPasswordViewModel model)
+    public async Task<IActionResult> ResetPassword([FromForm] ResetPasswordViewModel model)
     {
         if (!ModelState.IsValid)
         {
@@ -258,7 +258,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("recover-account-limiter")]
-    public async Task<IActionResult> RecoverAccount(RecoverAccountViewModel model)
+    public async Task<IActionResult> RecoverAccount([FromForm] RecoverAccountViewModel model)
     {
         if (!ModelState.IsValid)
         {
@@ -307,7 +307,7 @@ public sealed class AccountController : Controller
     [AllowAnonymous]
     [ValidateAntiForgeryToken]
     [EnableRateLimiting("recover-account-limiter")]
-    public async Task<IActionResult> ConfirmRecovery(ConfirmRecoveryViewModel model)
+    public async Task<IActionResult> ConfirmRecovery([FromForm] ConfirmRecoveryViewModel model)
     {
         if (!ModelState.IsValid || string.IsNullOrWhiteSpace(model.UserId) || string.IsNullOrWhiteSpace(model.Token))
         {

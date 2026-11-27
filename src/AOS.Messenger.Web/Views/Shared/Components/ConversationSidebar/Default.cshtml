@@ -60,7 +60,7 @@
 
     <!-- Logo & Profile Banner -->
     <div class="p-4 pb-3 border-b border-[#E3DCD7] dark:border-[#514D48] bg-[#F0E9DF] dark:bg-[#3A3835] flex items-center justify-between">
-        <a asp-controller="Chat" asp-action="Index" class="flex items-center gap-2.5 hover:opacity-90 transition-opacity">
+        <a asp-controller="Chat" asp-action="Index" draggable="false" class="flex items-center gap-2.5 hover:opacity-90 transition-opacity">
             <!-- A♡S Brand Monogram Graphic -->
             <div class="w-10 h-10 rounded-lg bg-[#FFFFFF] dark:bg-[#45423E] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center shadow-xs">
                 <svg width="28" height="24" viewBox="0 0 70 50" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -79,10 +79,10 @@
 
         <!-- Sidebar Actions -->
         <div class="flex items-center gap-1">
-            <a asp-controller="Chat" asp-action="NewConversation" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="New Chat">
+            <a asp-controller="Chat" asp-action="NewConversation" draggable="false" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="New Chat">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
             </a>
-            <a asp-controller="Settings" asp-action="Index" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="Settings">
+            <a asp-controller="Settings" asp-action="Index" draggable="false" class="w-8 h-8 rounded-lg flex items-center justify-center text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/60 dark:hover:bg-[#45423E] transition-colors" title="Settings">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
             </a>
         </div>
@@ -102,10 +102,12 @@
     <div class="px-3.5 py-2 flex items-center gap-1.5 border-b border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold">
         <a asp-controller="Chat"
            asp-action="Index"
+           draggable="false"
            aria-current="@(!isArchivedView ? "page" : null)"
            class="px-2.5 py-1 rounded-md transition-colors @(!isArchivedView ? "bg-[#B3929D] text-white" : "text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60")">All Chats</a>
         <a asp-controller="Chat"
            asp-action="Archived"
+           draggable="false"
            aria-current="@(isArchivedView ? "page" : null)"
            class="ml-auto rounded-md transition-colors flex items-center gap-1 text-xs @(isArchivedView ? "px-2.5 py-1 bg-[#B3929D] text-white" : "px-2 py-1 text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7]/50 dark:hover:bg-[#45423E]/60")"
            title="Archived Chats">
@@ -129,6 +131,7 @@
 
                     <a asp-controller="Chat" asp-action="Conversation" asp-route-id="@conv.Id.Value"
                        data-conversation-link="true"
+                       draggable="false"
                        aria-current="@(isActive ? "page" : null)"
                        data-conversation-id="@conv.Id.Value"
                        data-peer-user-id="@conv.OtherParticipantId.Value"
@@ -207,7 +210,7 @@
 
     <!-- Bottom Profile Summary Card in Left Sidebar -->
     <div class="p-3 bg-[#F0E9DF] dark:bg-[#3A3835] border-t border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-between">
-        <a asp-controller="Profile" asp-action="Index" class="flex items-center gap-2.5 min-w-0 hover:opacity-90 transition-opacity">
+        <a asp-controller="Profile" asp-action="Index" draggable="false" class="flex items-center gap-2.5 min-w-0 hover:opacity-90 transition-opacity">
             <div class="relative flex-shrink-0">
                 <div data-avatar-slot="true"
                      data-avatar-user-id="@currentUserId"
@@ -224,7 +227,7 @@
                 <div class="text-[11px] text-[#6E6560] dark:text-[#C9C0B9]">@(isAuthenticated ? "Available" : "Offline")</div>
             </div>
         </a>
-        <a asp-controller="Profile" asp-action="Index" class="p-1.5 rounded-md text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7] dark:hover:bg-[#45423E] transition-colors" title="My Profile &amp; Status">
+        <a asp-controller="Profile" asp-action="Index" draggable="false" class="p-1.5 rounded-md text-[#6E6560] dark:text-[#C9C0B9] hover:text-[#2B2725] dark:hover:text-[#F0E9E2] hover:bg-[#E3DCD7] dark:hover:bg-[#45423E] transition-colors" title="My Profile &amp; Status">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
         </a>
     </div>

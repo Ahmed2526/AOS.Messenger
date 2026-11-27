@@ -7,6 +7,8 @@ using AOS.Messenger.Infrastructure.Persistence.Repositories;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using AOS.Messenger.Infrastructure.Storage;
 
@@ -43,6 +45,7 @@ public sealed class ServiceRegistrationTests
     {
         var services = new ServiceCollection();
         var configuration = new ConfigurationBuilder().Build();
+        services.AddSingleton<IHostEnvironment>(new DevelopmentHostEnvironment());
 
         var result = services.AddInfrastructureServices(configuration);
 
@@ -91,6 +94,20 @@ public sealed class ServiceRegistrationTests
         var currentUser = scope.ServiceProvider.GetService<ICurrentUser>();
         Assert.NotNull(currentUser);
         Assert.IsType<CurrentUser>(currentUser);
+
+        // Fail-closed check: without IHostEnvironment and without R2 config, R2StorageOptions validation fails.
+        var noEnvServices = new ServiceCollection();
+        noEnvServices.AddInfrastructureServices(new ConfigurationBuilder().Build());
+        using var noEnvProvider = noEnvServices.BuildServiceProvider();
+        Assert.Throws<OptionsValidationException>(() => noEnvProvider.GetRequiredService<IOptions<R2StorageOptions>>().Value);
+    }
+
+    private sealed class DevelopmentHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "AOS.Messenger.Tests";
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
     }
 
     private static void AssertScopedService<TService, TImpl>(IServiceCollection services)

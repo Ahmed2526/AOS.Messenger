@@ -21,4 +21,6 @@ public sealed class MediaOptions
     public int OrphanGracePeriodHours { get; set; } = 1;
     public int PurgedMetadataRetentionHours { get; set; } = 48;
     public int CleanupIntervalMinutes { get; set; } = 15;
+    public int PermanentOrphanSweepIntervalHours { get; set; } = 24;
+    public int MaxOrphanSweepObjectsPerPrefixPerPass { get; set; } = 10_000;
 }

@@ -81,6 +81,16 @@ public sealed class MediaOptionsValidator : IValidateOptions<MediaOptions>
             errors.Add("Media:CleanupIntervalMinutes must be at least 1.");
         }
 
+        if (options.PermanentOrphanSweepIntervalHours is < 1 or > 168)
+        {
+            errors.Add("Media:PermanentOrphanSweepIntervalHours must be between 1 and 168.");
+        }
+
+        if (options.MaxOrphanSweepObjectsPerPrefixPerPass is < 500 or > 100_000)
+        {
+            errors.Add("Media:MaxOrphanSweepObjectsPerPrefixPerPass must be between 500 and 100,000.");
+        }
+
         return errors.Count > 0
             ? ValidateOptionsResult.Fail(errors)
             : ValidateOptionsResult.Success;

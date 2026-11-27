@@ -106,17 +106,19 @@ public sealed class AvatarProcessor : IAvatarProcessor, IDisposable
 
         FileStream? fullStream = null;
         FileStream? thumbStream = null;
+        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        jobCts.CancelAfter(_gate.Timeout);
         try
         {
             fullStream = CreateDeleteOnCloseTempStream();
             thumbStream = CreateDeleteOnCloseTempStream();
 
             await Task.Run(
-                () => ProcessAvatarLocked(inputStream, fullStream, thumbStream, pinnedFormat, ct),
-                ct);
+                () => ProcessAvatarLocked(inputStream, fullStream, thumbStream, pinnedFormat, jobCts.Token),
+                jobCts.Token);
 
-            await fullStream.FlushAsync(ct);
-            await thumbStream.FlushAsync(ct);
+            await fullStream.FlushAsync(jobCts.Token);
+            await thumbStream.FlushAsync(jobCts.Token);
             fullStream.Seek(0, SeekOrigin.Begin);
             thumbStream.Seek(0, SeekOrigin.Begin);
 
@@ -132,6 +134,11 @@ public sealed class AvatarProcessor : IAvatarProcessor, IDisposable
                 ownedFull.Length,
                 ownedThumb,
                 ownedThumb.Length);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && jobCts.IsCancellationRequested)
+        {
+            _logger.LogWarning("Avatar processing timed out for upload {UploadId}.", upload.Id.Value);
+            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
         }
         catch (MagickException ex)
         {
@@ -167,7 +174,7 @@ public sealed class AvatarProcessor : IAvatarProcessor, IDisposable
         var headersValidated = false;
         inputStream.Seek(0, SeekOrigin.Begin);
         var info = new MagickImageInfo(inputStream, pingSettings);
-        ValidateImageDimensions(checked((int)info.Width), checked((int)info.Height));
+        ValidateImageDimensions(info.Width, info.Height);
         headersValidated = true;
 
         ct.ThrowIfCancellationRequested();
@@ -181,9 +188,9 @@ public sealed class AvatarProcessor : IAvatarProcessor, IDisposable
 
             decodedImage.AutoOrient();
 
-            var uprightWidth = checked((int)decodedImage.Width);
-            var uprightHeight = checked((int)decodedImage.Height);
-            ValidateImageDimensions(uprightWidth, uprightHeight);
+            ValidateImageDimensions(decodedImage.Width, decodedImage.Height);
+            var uprightWidth = (int)decodedImage.Width;
+            var uprightHeight = (int)decodedImage.Height;
 
             if (uprightWidth != uprightHeight)
             {
@@ -294,16 +301,16 @@ public sealed class AvatarProcessor : IAvatarProcessor, IDisposable
         image.RemoveAttribute("iptc");
     }
 
-    private static void ValidateImageDimensions(int width, int height)
+    private static void ValidateImageDimensions(ulong width, ulong height)
     {
-        if (width <= 0 || width > MediaConstraints.MaxImageWidth ||
-            height <= 0 || height > MediaConstraints.MaxImageHeight)
+        if (width == 0 || width > (ulong)MediaConstraints.MaxImageWidth ||
+            height == 0 || height > (ulong)MediaConstraints.MaxImageHeight)
         {
             throw new DomainException(
                 $"Image dimensions must not exceed {MediaConstraints.MaxImageWidth}x{MediaConstraints.MaxImageHeight} pixels.");
         }
 
-        if ((long)width * height > MediaConstraints.MaxImagePixels)
+        if (width > (ulong)MediaConstraints.MaxImagePixels / height)
         {
             throw new DomainException(
                 $"Image resolution exceeds the maximum allowed {MediaConstraints.MaxImagePixels:N0} pixels.");

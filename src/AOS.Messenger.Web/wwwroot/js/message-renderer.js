@@ -37,6 +37,9 @@ const MEDIA_URL_CACHE_TTL_MS = 8 * 60 * 1000;
 const MEDIA_URL_SAFETY_MARGIN_MS = 60 * 1000;
 const VIDEO_RETRY_COOLDOWN_MS = 15 * 1000;
 const mediaUrlCache = new Map();
+const inFlightMediaUrls = new Map();
+const mediaUrlMessageEpochs = new Map();
+let mediaUrlCacheEpoch = 0;
 const activeMediaObservers = new Set();
 const videoLoadHandlers = new WeakMap();
 let sharedVideoObserver = null;
@@ -56,7 +59,10 @@ export function disconnectActiveMediaObservers() {
  * Clears all cached signed media download URLs (called on logout / session expiry).
  */
 export function clearMediaUrlCache() {
+    mediaUrlCacheEpoch++;
+    mediaUrlMessageEpochs.clear();
     mediaUrlCache.clear();
+    inFlightMediaUrls.clear();
 }
 
 /**
@@ -66,10 +72,17 @@ export function clearMediaUrlCache() {
 export function evictMediaUrlCacheForMessage(msgId) {
     if (msgId === null || msgId === undefined || msgId === '') return;
     const target = String(msgId);
+    mediaUrlMessageEpochs.set(target, (mediaUrlMessageEpochs.get(target) || 0) + 1);
     for (const key of Array.from(mediaUrlCache.keys())) {
         const parts = String(key).split(':');
         if (parts[1] === target) {
             mediaUrlCache.delete(key);
+        }
+    }
+    for (const key of Array.from(inFlightMediaUrls.keys())) {
+        const parts = String(key).split(':');
+        if (parts[1] === target) {
+            inFlightMediaUrls.delete(key);
         }
     }
 }
@@ -182,26 +195,51 @@ export async function resolveCachedMediaUrl(
         mediaUrlCache.delete(cacheKey);
     }
 
-    const dto = await getMediaUrlFn(conversationId, messageId, mediaId, { download, variant });
-    const url = dto?.url ?? dto?.Url ?? '';
-    if (!isSafeMediaUrl(url)) {
-        return null;
+    if (!bypassCache && inFlightMediaUrls.has(cacheKey)) {
+        return inFlightMediaUrls.get(cacheKey);
     }
 
-    const rawExpiry = dto?.expiresAtUtc ?? dto?.ExpiresAtUtc ?? null;
-    const parsedExpiryMs = rawExpiry ? Date.parse(rawExpiry) : NaN;
-    const defaultExpiryMs = now + MEDIA_URL_CACHE_TTL_MS;
-    const expiresAtMs = Number.isFinite(parsedExpiryMs)
-        ? Math.min(parsedExpiryMs - MEDIA_URL_SAFETY_MARGIN_MS, defaultExpiryMs)
-        : defaultExpiryMs;
+    const msgKey = String(messageId);
+    const startGlobalEpoch = mediaUrlCacheEpoch;
+    const startMsgEpoch = mediaUrlMessageEpochs.get(msgKey) || 0;
 
-    if (expiresAtMs > now) {
-        setBoundedMapEntry(mediaUrlCache, cacheKey, {
-            url,
-            expiresAtMs
-        });
+    const promise = (async () => {
+        try {
+            const dto = await getMediaUrlFn(conversationId, messageId, mediaId, { download, variant });
+            if (mediaUrlCacheEpoch !== startGlobalEpoch || (mediaUrlMessageEpochs.get(msgKey) || 0) !== startMsgEpoch) {
+                return null;
+            }
+            const url = dto?.url ?? dto?.Url ?? '';
+            if (!isSafeMediaUrl(url)) {
+                return null;
+            }
+
+            const currentNow = nowFn();
+            const rawExpiry = dto?.expiresAtUtc ?? dto?.ExpiresAtUtc ?? null;
+            const parsedExpiryMs = rawExpiry ? Date.parse(rawExpiry) : NaN;
+            const defaultExpiryMs = currentNow + MEDIA_URL_CACHE_TTL_MS;
+            const expiresAtMs = Number.isFinite(parsedExpiryMs)
+                ? Math.min(parsedExpiryMs - MEDIA_URL_SAFETY_MARGIN_MS, defaultExpiryMs)
+                : defaultExpiryMs;
+
+            if (expiresAtMs > currentNow) {
+                setBoundedMapEntry(mediaUrlCache, cacheKey, {
+                    url,
+                    expiresAtMs
+                });
+            }
+            return url;
+        } finally {
+            if (inFlightMediaUrls.get(cacheKey) === promise) {
+                inFlightMediaUrls.delete(cacheKey);
+            }
+        }
+    })();
+
+    if (!bypassCache) {
+        inFlightMediaUrls.set(cacheKey, promise);
     }
-    return url;
+    return promise;
 }
 
 /**
@@ -230,6 +268,9 @@ export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadU
                     getMediaUrlFn,
                     nowFn
                 });
+                if (video.isConnected === false) {
+                    return false;
+                }
                 if (url) {
                     video.src = url;
                     return true;
@@ -271,6 +312,9 @@ export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadU
                 video.setAttribute('data-video-last-retry-ms', String(now));
                 const savedTime = Number(video.currentTime) || 0;
                 const ok = await loadVideoSource(true);
+                if (video.isConnected === false) {
+                    return;
+                }
                 if (!ok) {
                     showFallback();
                     return;
@@ -431,15 +475,30 @@ export function isMessageRendered(msgOrId) {
     return !!(document.getElementById(`msg-${id}`) || document.querySelector(`[data-message-id="${id}"]`));
 }
 
+let bottomScrollHandler = null;
+
+/**
+ * Registers an optional scroll-to-bottom handler (e.g., bottom scroll pinner) owned by the chat shell.
+ * Pass null to restore direct scrolling.
+ * @param {((smooth: boolean) => void)|null} handler
+ */
+export function setBottomScrollHandler(handler) {
+    bottomScrollHandler = typeof handler === 'function' ? handler : null;
+}
+
 /**
  * Scrolls the message stream smoothly to the bottom.
  * @param {boolean} smooth
  */
 export function scrollToBottom(smooth = true) {
+    if (bottomScrollHandler) {
+        bottomScrollHandler(Boolean(smooth));
+        return;
+    }
     if (typeof document === 'undefined') return;
     const streamEl = document.getElementById('message-stream');
     if (streamEl) {
-        if (smooth) {
+        if (smooth && typeof streamEl.scrollTo === 'function') {
             streamEl.scrollTo({ top: streamEl.scrollHeight, behavior: 'smooth' });
         } else {
             streamEl.scrollTop = streamEl.scrollHeight;
@@ -754,7 +813,7 @@ export function resolveReceiptStatus(messageId, peerWatermarks = null) {
  * @param {object|null} peerWatermarks - Optional peer watermarks
  * @returns {HTMLElement} Message bubble row element
  */
-export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null) {
+export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null, { eagerMedia = false } = {}) {
     if (typeof document === 'undefined') {
         return null;
     }
@@ -926,8 +985,10 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         img.alt = stickerTags ? `Sticker ${stickerTags}` : 'Sticker';
         img.setAttribute('width', String(Number(rawSticker.width ?? rawSticker.Width ?? 512) || 512));
         img.setAttribute('height', String(Number(rawSticker.height ?? rawSticker.Height ?? 512) || 512));
-        img.loading = 'lazy';
+        img.loading = eagerMedia ? 'eager' : 'lazy';
         img.decoding = 'async';
+        img.draggable = false;
+        img.setAttribute('draggable', 'false');
         img.setAttribute('data-sticker-img', 'true');
         img.setAttribute('data-sticker-id', stickerId);
         img.setAttribute('data-sticker-static', stickerStaticUrl ? 'true' : 'false');
@@ -973,12 +1034,14 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
                 const h = att.height ?? att.Height;
                 if (w) img.setAttribute('width', String(w));
                 if (h) img.setAttribute('height', String(h));
-                img.loading = 'lazy';
+                img.loading = eagerMedia ? 'eager' : 'lazy';
                 img.decoding = 'async';
+                img.draggable = false;
+                img.setAttribute('draggable', 'false');
                 img.setAttribute('data-media-img', 'true');
                 img.className = isGrid
-                    ? 'w-full h-full aspect-square object-cover'
-                    : 'w-full h-auto max-h-80 object-contain rounded-xl';
+                    ? 'w-full h-full aspect-square object-cover select-none'
+                    : 'w-full h-auto max-h-80 object-contain rounded-xl select-none';
                 btn.appendChild(img);
                 return btn;
             };
@@ -1325,7 +1388,7 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
 
     if (isOutgoing) {
         return `
-        <div id="msg-${id}" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="true"${senderIdAttr} data-created-at="${message.createdAtUtc}">
+        <div id="msg-${id}" class="flex flex-wrap-reverse justify-end items-center gap-y-1 message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="true"${senderIdAttr} data-created-at="${escapeHtml(message.createdAtUtc)}">
             ${replyBtnHtml}
             <div class="max-w-[75%] rounded-2xl rounded-tr-xs px-4 py-2 bg-[#B3929D] text-white shadow-2xs relative">
                 ${replyBannerHtml}
@@ -1339,7 +1402,7 @@ export function createMessageBubbleHtml(message, currentUserId, peerWatermarks =
         </div>`;
     } else {
         return `
-        <div id="msg-${id}" class="flex justify-start gap-2.5 message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="false"${senderIdAttr} data-created-at="${message.createdAtUtc}">
+        <div id="msg-${id}" class="flex justify-start gap-2.5 message-bubble-row group relative" data-message-id="${id}" data-is-outgoing="false"${senderIdAttr} data-created-at="${escapeHtml(message.createdAtUtc)}">
             <div class="w-8 h-8 rounded-full bg-[#B3929D]/20 dark:bg-[#B3929D]/25 text-[#735761] dark:text-[#E1BDC9] border border-[#B3929D]/30 font-bold text-xs flex items-center justify-center flex-shrink-0 mt-1">
                 ${initials}
             </div>
@@ -1447,7 +1510,7 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
         return null;
     }
 
-    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks);
+    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks, { eagerMedia: true });
     if (!el) return null;
 
     const rows = typeof containerEl.querySelectorAll === 'function'
@@ -1490,7 +1553,7 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
  * @param {object|null} [peerWatermarks]
  * @param {{ scrollToEnd?: boolean }} [options]
  */
-export function renderMessages(containerEl, messages, currentUserId, peerWatermarks = null, { scrollToEnd = true } = {}) {
+export function renderMessages(containerEl, messages, currentUserId, peerWatermarks = null, { scrollToEnd = true, hasMore = undefined } = {}) {
     if (!containerEl || typeof document === 'undefined') return;
 
     disconnectActiveMediaObservers();
@@ -1516,24 +1579,35 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     deduped.sort(compareMessages);
 
     const emptyPlaceholder = document.getElementById('no-messages-placeholder');
+    const resolvedHasMore = typeof hasMore === 'boolean'
+        ? hasMore
+        : (typeof containerEl.getAttribute === 'function' && containerEl.getAttribute('data-has-more') === 'true');
     if (deduped.length === 0) {
         if (emptyPlaceholder) {
-            emptyPlaceholder.classList.remove('hidden');
-            emptyPlaceholder.classList.add('flex');
+            if (resolvedHasMore) {
+                emptyPlaceholder.classList.add('hidden');
+                emptyPlaceholder.classList.remove('flex');
+            } else {
+                emptyPlaceholder.classList.remove('hidden');
+                emptyPlaceholder.classList.add('flex');
+            }
         }
         return;
     }
 
     if (emptyPlaceholder) {
         emptyPlaceholder.classList.add('hidden');
+        emptyPlaceholder.classList.remove('flex');
     }
 
     const frag = typeof document.createDocumentFragment === 'function'
         ? document.createDocumentFragment()
         : containerEl;
 
-    for (const msg of deduped) {
-        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
+    for (let i = 0; i < deduped.length; i++) {
+        const msg = deduped[i];
+        const eagerMedia = (deduped.length - i) <= 6;
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { eagerMedia });
         if (el) {
             frag.appendChild(el);
         }
@@ -1544,10 +1618,7 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     }
 
     if (scrollToEnd) {
-        const streamEl = document.getElementById('message-stream');
-        if (streamEl) {
-            streamEl.scrollTop = streamEl.scrollHeight;
-        }
+        scrollToBottom(false);
     }
 }
 
@@ -1883,6 +1954,10 @@ export function renderConversationHeader(meta) {
 
         const presenceTextEl = document.getElementById('header-presence-text');
         if (presenceTextEl) {
+            if (typeof presenceTextEl.setAttribute === 'function') {
+                presenceTextEl.setAttribute('data-presence-online', isOnline ? 'true' : 'false');
+                presenceTextEl.setAttribute('data-last-seen-at', !isOnline && lastSeen ? String(lastSeen) : '');
+            }
             presenceTextEl.textContent = isOnline ? 'Online' : formatLastSeen(lastSeen);
         }
 

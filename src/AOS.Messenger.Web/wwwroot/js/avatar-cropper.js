@@ -247,10 +247,12 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     let dragBasePanY = 0;
     let isUploading = false;
     let isCompleting = false;
+    let isDestroyed = false;
     let isOpenState = false;
     let openGeneration = 0;
     let activeXhr = null;
     let uploadAbortController = null;
+    let completionAbortController = null;
     let lastFocusedElement = null;
     let listenersBound = false;
     let uiListenerCleanups = [];
@@ -357,10 +359,17 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
         }
     }
 
-    function close() {
-        if (isCompleting) return;
+    function close({ force = false } = {}) {
+        if (isCompleting && !force) return;
+        isCompleting = false;
         openGeneration++;
         isOpenState = false;
+        if (completionAbortController && typeof completionAbortController.abort === 'function') {
+            try {
+                completionAbortController.abort();
+            } catch {}
+        }
+        completionAbortController = null;
         if (uploadAbortController && typeof uploadAbortController.abort === 'function') {
             try {
                 uploadAbortController.abort();
@@ -549,26 +558,62 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
         });
     }
 
+    function createAbortError() {
+        const err = new Error('Operation cancelled.');
+        err.name = 'AbortError';
+        return err;
+    }
+
+    function waitWithSignal(ms, signal) {
+        if (signal?.aborted || isDestroyed) {
+            return Promise.reject(createAbortError());
+        }
+        if (!ms) {
+            return Promise.resolve();
+        }
+        return new Promise((resolve, reject) => {
+            let timerId = null;
+            const onAbort = () => {
+                if (timerId !== null) clearTimeout(timerId);
+                reject(createAbortError());
+            };
+            timerId = setTimeout(() => {
+                if (signal && typeof signal.removeEventListener === 'function') {
+                    signal.removeEventListener('abort', onAbort);
+                }
+                resolve();
+            }, ms);
+            if (signal && typeof signal.addEventListener === 'function') {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
+    }
+
     function isUncertainResponse(error) {
         return !error?.status || error.status >= 500 || error.status === 408 || error.code === 'INVALID_RESPONSE';
     }
 
-    async function completeAndReconcile(uploadId) {
+    async function completeAndReconcile(uploadId, signal) {
+        if (signal?.aborted || isDestroyed) {
+            throw createAbortError();
+        }
         try {
-            const result = await resolvedApi.completeAvatarUpload(uploadId);
+            const result = await resolvedApi.completeAvatarUpload(uploadId, { signal });
             if (result) return result;
         } catch (err) {
+            if (signal?.aborted || isDestroyed || err?.name === 'AbortError') throw err;
             if (!isUncertainResponse(err) || typeof resolvedApi.getAvatarUploadStatus !== 'function') throw err;
         }
 
         if (typeof resolvedApi.getAvatarUploadStatus === 'function') {
             // Processing can continue after the connection to the completion request is lost.
             for (const delay of [0, 500, 1000, 2000, 4000, 8000]) {
-                if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+                await waitWithSignal(delay, signal);
                 try {
-                    const status = await resolvedApi.getAvatarUploadStatus(uploadId);
+                    const status = await resolvedApi.getAvatarUploadStatus(uploadId, { signal });
                     if (status) return status;
                 } catch (err) {
+                    if (signal?.aborted || isDestroyed || err?.name === 'AbortError') throw err;
                     if (!isUncertainResponse(err) && err.status !== 429) throw err;
                 }
             }
@@ -578,12 +623,18 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     }
 
     async function handleSave() {
-        if (isUploading || !isOpenState) return;
+        if (isUploading || !isOpenState || isDestroyed) return;
         const myGen = openGeneration;
         const abortController = typeof AbortController === 'function' ? new AbortController() : null;
         uploadAbortController = abortController;
         const signal = abortController ? abortController.signal : undefined;
-        const isCancelled = () => myGen !== openGeneration || !isOpenState || Boolean(signal && signal.aborted);
+        let completeController = null;
+        let completeSignal;
+        const isCancelled = () => myGen !== openGeneration
+            || !isOpenState
+            || isDestroyed
+            || Boolean(signal && signal.aborted)
+            || Boolean(completeSignal && completeSignal.aborted);
 
         setError('');
 
@@ -615,20 +666,28 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
 
             isCompleting = true;
             uploadAbortController = null;
+            completeController = typeof AbortController === 'function' ? new AbortController() : null;
+            completionAbortController = completeController;
+            completeSignal = completeController ? completeController.signal : undefined;
             setUploadingUi(true, 95, 'Processing photo...');
             let result;
             try {
-                result = await completeAndReconcile(uploadId);
+                result = await completeAndReconcile(uploadId, completeSignal);
             } finally {
+                if (completionAbortController === completeController) {
+                    completionAbortController = null;
+                }
                 isCompleting = false;
             }
 
+            if (isCancelled()) return;
+
             close();
-            if (typeof onUploaded === 'function') {
+            if (!isDestroyed && !completeSignal?.aborted && typeof onUploaded === 'function') {
                 await onUploaded(result);
             }
         } catch (err) {
-            if (isCancelled()) {
+            if (isCancelled() || err?.name === 'AbortError') {
                 return;
             }
             setUploadingUi(false, 0);
@@ -640,6 +699,9 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
         } finally {
             if (uploadAbortController === abortController) {
                 uploadAbortController = null;
+            }
+            if (completionAbortController === completeController) {
+                completionAbortController = null;
             }
             if (myGen === openGeneration) {
                 setUploadingUi(false, 0);
@@ -662,8 +724,8 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
         };
 
         const { modal, canvas, zoomSlider, saveBtn, cancelBtn, closeBtn } = getCropperElements();
-        addTrackedListener(closeBtn, 'click', close);
-        addTrackedListener(cancelBtn, 'click', close);
+        addTrackedListener(closeBtn, 'click', () => close());
+        addTrackedListener(cancelBtn, 'click', () => close());
         addTrackedListener(saveBtn, 'click', handleSave);
         addTrackedListener(modal, 'click', (e) => {
             if (e.target === modal && !isUploading) {
@@ -738,7 +800,7 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
     }
 
     async function open(file) {
-        if (isCompleting) return false;
+        if (isCompleting || isDestroyed) return false;
         const validation = validateAvatarSourceFile(file);
         if (!validation.ok) {
             if (typeof onError === 'function') onError(validation.error);
@@ -809,10 +871,11 @@ export function createAvatarCropper({ onUploaded = null, onError = null, api = n
 
     return {
         open,
-        close,
+        close: () => close(),
         isOpen: () => isOpenState,
         destroy: () => {
-            close();
+            isDestroyed = true;
+            close({ force: true });
             unbindUiListeners();
         }
     };

@@ -100,6 +100,16 @@ public sealed class StickerPack : Entity<StickerPackId>
         UpdatedAtUtc = nowUtc;
     }
 
+    public void SetSortOrder(int sortOrder)
+    {
+        if (sortOrder < 0)
+        {
+            throw new DomainException("Pack sort order cannot be negative.");
+        }
+
+        SortOrder = sortOrder;
+    }
+
     public void Rename(string name, DateTimeOffset nowUtc)
     {
         if (IsSystemPack)

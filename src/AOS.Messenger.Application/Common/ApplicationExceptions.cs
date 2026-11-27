@@ -5,10 +5,15 @@ namespace AOS.Messenger.Application.Common;
 /// </summary>
 public sealed class NotFoundException : Exception
 {
+    public bool HasInternalEntityDetail { get; }
+
     public NotFoundException(string message) : base(message) { }
 
     public NotFoundException(string entityName, object key)
-        : base($"Entity '{entityName}' with key '{key}' was not found.") { }
+        : base($"Entity '{entityName}' with key '{key}' was not found.")
+    {
+        HasInternalEntityDetail = true;
+    }
 }
 
 /// <summary>

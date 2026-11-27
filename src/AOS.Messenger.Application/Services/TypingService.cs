@@ -10,17 +10,10 @@ namespace AOS.Messenger.Application.Services;
 public sealed class TypingService : ITypingService
 {
     private readonly IConversationPersistence _conversationPersistence;
-    private readonly IBlockPersistence _blockPersistence;
-    private readonly IUserReader _userReader;
 
-    public TypingService(
-        IConversationPersistence conversationPersistence,
-        IBlockPersistence blockPersistence,
-        IUserReader userReader)
+    public TypingService(IConversationPersistence conversationPersistence)
     {
         _conversationPersistence = conversationPersistence;
-        _blockPersistence = blockPersistence;
-        _userReader = userReader;
     }
 
     public async Task<UserId?> ValidateAndGetTypingRecipientAsync(

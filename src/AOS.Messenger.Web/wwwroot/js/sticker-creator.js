@@ -156,6 +156,7 @@ function uploadBlobWithXhr(url, blob, contentType, onProgress, onAbortHandle) {
  * @param {{
  *   onBeforeOpen?: Function,
  *   onCreated?: Function,
+ *   onPackCreated?: Function,
  *   createPackFn?: Function,
  *   initiateUploadFn?: Function,
  *   completeUploadFn?: Function,
@@ -166,6 +167,7 @@ function uploadBlobWithXhr(url, blob, contentType, onProgress, onAbortHandle) {
 export function createStickerCreator(options = {}) {
     const onBeforeOpen = typeof options.onBeforeOpen === 'function' ? options.onBeforeOpen : null;
     const defaultOnCreated = typeof options.onCreated === 'function' ? options.onCreated : null;
+    const defaultOnPackCreated = typeof options.onPackCreated === 'function' ? options.onPackCreated : null;
     const createPackFn = typeof options.createPackFn === 'function' ? options.createPackFn : apiCreateStickerPack;
     const initiateUploadFn = typeof options.initiateUploadFn === 'function' ? options.initiateUploadFn : apiInitiateStickerUpload;
     const completeUploadFn = typeof options.completeUploadFn === 'function' ? options.completeUploadFn : apiCompleteStickerUpload;
@@ -196,6 +198,7 @@ export function createStickerCreator(options = {}) {
     let dragBasePanY = 0;
     let customPacks = [];
     let activeOnCreatedCallback = null;
+    let activeOnPackCreatedCallback = null;
     let dropzoneDragDepth = 0;
     let listenersBound = false;
 
@@ -568,6 +571,12 @@ export function createStickerCreator(options = {}) {
             if (id) {
                 customPacks = [...customPacks, { id, name: packName }];
                 renderPackOptions(id);
+                const packCb = activeOnPackCreatedCallback || defaultOnPackCreated;
+                if (typeof packCb === 'function') {
+                    try {
+                        packCb({ id, name: packName, raw: created });
+                    } catch {}
+                }
             }
             newPackInput.value = '';
             if (newPackRow) newPackRow.classList.add('hidden');
@@ -797,6 +806,7 @@ export function createStickerCreator(options = {}) {
 
         customPacks = Array.isArray(openOpts.customPacks) ? openOpts.customPacks.slice() : [];
         activeOnCreatedCallback = typeof openOpts.onStickerCreated === 'function' ? openOpts.onStickerCreated : null;
+        activeOnPackCreatedCallback = typeof openOpts.onPackCreated === 'function' ? openOpts.onPackCreated : null;
         resetFormUi();
         renderPackOptions();
 
@@ -819,6 +829,7 @@ export function createStickerCreator(options = {}) {
         isOpenState = false;
         isSubmitting = false;
         activeOnCreatedCallback = null;
+        activeOnPackCreatedCallback = null;
         resetFormUi();
         const { modal } = els();
         if (modal && modal.classList) {

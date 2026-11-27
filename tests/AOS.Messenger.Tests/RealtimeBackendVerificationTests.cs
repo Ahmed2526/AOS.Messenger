@@ -9,6 +9,7 @@ using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
 using AOS.Messenger.Application.Services;
+using AOS.Messenger.Tests.TestDoubles;
 using AOS.Messenger.Web.Hubs;
 using AOS.Messenger.Web.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -114,6 +115,7 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         var (hub, tracker, currentUser, convService, groups) = CreateHubFixture();
         var callerUserId = UserId.New();
         currentUser.Id = callerUserId;
+        tracker.AddConnection(callerUserId, "test-connection-1");
 
         var conversationGuid = Guid.NewGuid();
         convService.OnGetConversationAsync = (uid, cid, _) =>
@@ -134,6 +136,7 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
         var (hub, tracker, currentUser, convService, groups) = CreateHubFixture();
         var callerUserId = UserId.New();
         currentUser.Id = callerUserId;
+        tracker.AddConnection(callerUserId, "test-connection-1");
 
         var conversationGuid = Guid.NewGuid();
         convService.OnGetConversationAsync = (_, _, _) =>
@@ -248,7 +251,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             mockBlockPersistence,
             mockUserReader,
             mockRealtimeNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Hello realtime world!", "idempotency-key-001", null);
         var result = await messageService.SendMessageAsync(userA, conversation.Id, request);
@@ -283,7 +287,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             mockBlockPersistence,
             mockUserReader,
             mockRealtimeNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Message that fails db persistence", "idempotency-key-002", null);
 
@@ -315,7 +320,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             mockBlockPersistence,
             mockUserReader,
             mockRealtimeNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Duplicate message", "idempotency-key-003", null);
         var result = await messageService.SendMessageAsync(userA, conversation.Id, request);
@@ -349,7 +355,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             mockBlockPersistence,
             mockUserReader,
             throwingNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Safe delivery even if broadcast fails", "idempotency-key-003", null);
 
@@ -387,7 +394,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             mockBlockPersistence,
             mockUserReader,
             capturingNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Testing DTO exact matching", "idempotency-key-004", null);
         var result = await messageService.SendMessageAsync(userA, conversation.Id, request);
@@ -426,7 +434,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             blockPersistence,
             userReader,
             notifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         var request = new SendMessageRequestDto("Persisted in SQL Server and notified", "idempotency-key-005", null);
         var result = await messageService.SendMessageAsync(userA, conversation.Id, request);

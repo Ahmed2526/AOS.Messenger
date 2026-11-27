@@ -120,6 +120,9 @@ namespace AOS.Messenger.Infrastructure.Migrations
                 name: "HasAttachments",
                 table: "Messages");
 
+            migrationBuilder.Sql(
+                "UPDATE [Messages] SET [Content] = N'[Attachment]' WHERE [IsDeletedForEveryone] = 0 AND [Content] IS NULL;");
+
             migrationBuilder.AddCheckConstraint(
                 name: "CK_Messages_Content_Tombstone",
                 table: "Messages",

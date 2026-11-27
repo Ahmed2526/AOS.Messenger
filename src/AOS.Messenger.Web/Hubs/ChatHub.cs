@@ -149,7 +149,9 @@ public sealed class ChatHub : Hub<IChatClient>
         if (becameOnline && _presenceService is not null && _realtimeNotifier is not null)
         {
             var peerIds = await _presenceService.GetEligiblePresencePeerIdsAsync(userId, Context.ConnectionAborted);
-            if (peerIds.Count > 0)
+            if (peerIds.Count > 0
+                && !Context.ConnectionAborted.IsCancellationRequested
+                && _connectionTracker.IsUserOnline(userId))
             {
                 await _realtimeNotifier.NotifyPresenceChangedAsync(
                     peerIds,

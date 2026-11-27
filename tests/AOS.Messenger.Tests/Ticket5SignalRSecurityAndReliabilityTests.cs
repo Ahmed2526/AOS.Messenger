@@ -7,6 +7,7 @@ using AOS.Messenger.Domain.Entities;
 using AOS.Messenger.Domain.ValueObjects;
 using AOS.Messenger.Infrastructure.Persistence;
 using AOS.Messenger.Infrastructure.Persistence.Repositories;
+using AOS.Messenger.Tests.TestDoubles;
 using AOS.Messenger.Web.Filters;
 using AOS.Messenger.Web.Hubs;
 using AOS.Messenger.Web.Middleware;
@@ -147,7 +148,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             blockPersistence,
             userReader,
             capturingNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         // Message 1 succeeds and broadcasts
         var req1 = new SendMessageRequestDto("Hello before block", "block-test-key-1");
@@ -585,7 +587,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             blockPersistence,
             userReader,
             capturingNotifier,
-            logger);
+            logger,
+            NullMediaPersistence.Instance);
 
         const string idempotencyKey = "replay-key-ticket5-001";
         var sendRequest = new SendMessageRequestDto("Hello Idempotent World", idempotencyKey);

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Reflection;
 using System.Text;
+using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using AOS.Messenger.Application.Common;
@@ -649,5 +650,49 @@ public sealed class Phase9MediaStorageTests : IClassFixture<SqlTestDatabaseFixtu
             };
             return (proxy, calls);
         }
+    }
+
+    [Fact]
+    public async Task CloudflareR2MediaStorage_TranslatesAmazonClientExceptionAndTimeoutToMediaStorageException()
+    {
+        var timeoutCalls = 0;
+        var (s3Proxy, _) = RecordingAmazonS3Proxy.Create((methodName, _) => methodName switch
+        {
+            nameof(IAmazonS3.GetObjectMetadataAsync) => Task.FromException<GetObjectMetadataResponse>(
+                new AmazonClientException("Credentials/client failure")),
+            nameof(IAmazonS3.DeleteObjectAsync) => Interlocked.Increment(ref timeoutCalls) > 0
+                ? Task.FromException<DeleteObjectResponse>(new TaskCanceledException("HTTP timeout"))
+                : throw new NotSupportedException(),
+            _ => throw new NotSupportedException()
+        });
+
+        using var storage = new CloudflareR2MediaStorage(
+            s3Proxy,
+            new R2StorageOptions { BucketName = "aos-media" },
+            NullLogger<CloudflareR2MediaStorage>.Instance);
+
+        var key = $"pending/{MediaConstraints.GenerateStorageObjectId()}";
+        await Assert.ThrowsAsync<MediaStorageException>(() => storage.GetObjectMetadataAsync(key));
+        await Assert.ThrowsAsync<MediaStorageException>(() => storage.DeleteObjectAsync(key, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task LocalDiskMediaStorage_PromoteByCopyAsync_RejectsETagMismatchInSingleOpenPass()
+    {
+        var signing = new LocalMediaSigningService(
+            DataProtectionProvider.Create("LocalDiskTest"));
+        var localStorage = new LocalDiskMediaStorage(signing, _tempRoot);
+
+        var objId = MediaConstraints.GenerateStorageObjectId();
+        var stagingKey = $"pending/{objId}";
+        var permKey = $"media/{objId}";
+
+        var stagingPath = Path.Combine(_tempRoot, "pending", objId);
+        Directory.CreateDirectory(Path.GetDirectoryName(stagingPath)!);
+        await File.WriteAllBytesAsync(stagingPath, "hello-world"u8.ToArray());
+
+        await Assert.ThrowsAsync<ConflictException>(() =>
+            localStorage.PromoteByCopyAsync(stagingKey, permKey, "image/png", null, "\"wrong-etag\""));
+        Assert.False(File.Exists(Path.Combine(_tempRoot, "media", objId)));
     }
 }

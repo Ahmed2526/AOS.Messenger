@@ -129,15 +129,17 @@ public sealed class StickerProcessor : IStickerProcessor, IDisposable
         }
 
         FileStream? outputStream = null;
+        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        jobCts.CancelAfter(_gate.Timeout);
         try
         {
             outputStream = CreateDeleteOnCloseTempStream();
 
             var isAnimated = await Task.Run(
-                () => ProcessStickerLocked(inputStream, outputStream, pinnedFormat, scan.FrameCount, ct),
-                ct);
+                () => ProcessStickerLocked(inputStream, outputStream, pinnedFormat, scan.FrameCount, jobCts.Token),
+                jobCts.Token);
 
-            await outputStream.FlushAsync(ct);
+            await outputStream.FlushAsync(jobCts.Token);
             outputStream.Seek(0, SeekOrigin.Begin);
 
             var ownedOutput = outputStream;
@@ -151,6 +153,11 @@ public sealed class StickerProcessor : IStickerProcessor, IDisposable
                 StickerConstraints.CanonicalStickerSize,
                 StickerConstraints.CanonicalStickerSize,
                 isAnimated);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && jobCts.IsCancellationRequested)
+        {
+            _logger.LogWarning("Sticker processing timed out for sticker {StickerId}.", sticker.Id?.Value);
+            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
         }
         catch (MagickException ex)
         {
@@ -176,7 +183,7 @@ public sealed class StickerProcessor : IStickerProcessor, IDisposable
         }
     }
 
-    private static bool ProcessStickerLocked(
+    private bool ProcessStickerLocked(
         FileStream inputStream,
         FileStream outputStream,
         MagickFormat pinnedFormat,
@@ -186,6 +193,7 @@ public sealed class StickerProcessor : IStickerProcessor, IDisposable
         ct.ThrowIfCancellationRequested();
 
         var pingSettings = new MagickReadSettings { Format = pinnedFormat };
+        var headersValidated = false;
         inputStream.Seek(0, SeekOrigin.Begin);
         var info = new MagickImageInfo(inputStream, pingSettings);
         var canvasWidth = info.Width;
@@ -207,45 +215,54 @@ public sealed class StickerProcessor : IStickerProcessor, IDisposable
             }
         }
 
+        headersValidated = true;
         ct.ThrowIfCancellationRequested();
         inputStream.Seek(0, SeekOrigin.Begin);
 
-        if (pinnedFormat is MagickFormat.Gif or MagickFormat.WebP)
+        try
         {
-            var collectionSettings = new MagickReadSettings
+            if (pinnedFormat is MagickFormat.Gif or MagickFormat.WebP)
             {
-                Format = pinnedFormat,
-                FrameIndex = 0,
-                FrameCount = (uint)(StickerConstraints.MaxAnimationFrames + 1)
-            };
+                var collectionSettings = new MagickReadSettings
+                {
+                    Format = pinnedFormat,
+                    FrameIndex = 0,
+                    FrameCount = (uint)(StickerConstraints.MaxAnimationFrames + 1)
+                };
 
-            using var collection = new MagickImageCollection(inputStream, collectionSettings);
-            if (collection.Count == 0)
-            {
-                throw new DomainException("Uploaded sticker contains no image frames.");
+                using var collection = new MagickImageCollection(inputStream, collectionSettings);
+                if (collection.Count == 0)
+                {
+                    throw new DomainException("Uploaded sticker contains no image frames.");
+                }
+
+                if (collection.Count > StickerConstraints.MaxAnimationFrames)
+                {
+                    throw new DomainException(
+                        $"Animated stickers cannot exceed {StickerConstraints.MaxAnimationFrames} frames.");
+                }
+
+                if (collection.Count == 1)
+                {
+                    using var singleImage = new MagickImage(collection[0]);
+                    ProcessStaticSticker(singleImage, outputStream, ct);
+                    return false;
+                }
+
+                ProcessAnimatedSticker(collection, (int)canvasWidth, (int)canvasHeight, outputStream, ct);
+                return true;
             }
 
-            if (collection.Count > StickerConstraints.MaxAnimationFrames)
-            {
-                throw new DomainException(
-                    $"Animated stickers cannot exceed {StickerConstraints.MaxAnimationFrames} frames.");
-            }
-
-            if (collection.Count == 1)
-            {
-                using var singleImage = new MagickImage(collection[0]);
-                ProcessStaticSticker(singleImage, outputStream, ct);
-                return false;
-            }
-
-            ProcessAnimatedSticker(collection, (int)canvasWidth, (int)canvasHeight, outputStream, ct);
-            return true;
+            var staticSettings = new MagickReadSettings { Format = pinnedFormat };
+            using var image = new MagickImage(inputStream, staticSettings);
+            ProcessStaticSticker(image, outputStream, ct);
+            return false;
         }
-
-        var staticSettings = new MagickReadSettings { Format = pinnedFormat };
-        using var image = new MagickImage(inputStream, staticSettings);
-        ProcessStaticSticker(image, outputStream, ct);
-        return false;
+        catch (MagickException ex) when (MediaVerifier.IsTransientResourceExhaustion(ex, headersValidated))
+        {
+            _logger.LogWarning("Transient ImageMagick resource limit hit while processing sticker: {ErrorType}", ex.GetType().Name);
+            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
+        }
     }
 
     private static void ProcessStaticSticker(

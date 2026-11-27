@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Security.Claims;
@@ -52,61 +51,6 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
     {
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start node process for JavaScript verification.");
-
-        var outputBuilder = new System.Text.StringBuilder();
-        var errorBuilder = new System.Text.StringBuilder();
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
-            {
-                outputBuilder.AppendLine(e.Data);
-            }
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null)
-            {
-                errorBuilder.AppendLine(e.Data);
-            }
-        };
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        if (!process.WaitForExit(15000))
-        {
-            try
-            {
-                process.Kill(entireProcessTree: true);
-            }
-            catch
-            {
-                // Ignore kill errors on already-exited process
-            }
-            throw new TimeoutException("Node script timed out after 15 seconds.");
-        }
-
-        process.WaitForExit();
-        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
     }
 
     private WebApplicationFactory<Program> CreateFactory()
@@ -372,7 +316,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
     }
 
     [Fact]
-    public void ChatRealtimeJs_LobbyIncomingMessage_UpdatesPreview_IncrementsUnreadBadge_ReordersBelowPinned_AndDeduplicates()
+    public async Task ChatRealtimeJs_LobbyIncomingMessage_UpdatesPreview_IncrementsUnreadBadge_ReordersBelowPinned_AndDeduplicates()
     {
         var chatStateUrl = JsUrl("chat-state.js");
         var apiClientUrl = JsUrl("api-client.js");
@@ -636,13 +580,13 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             console.log('SUCCESS');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS", output);
     }
 
     [Fact]
-    public void ChatRealtimeJs_ActiveConversation_HandlesFocusedUnfocusedAndOtherConversationUnreadBadges()
+    public async Task ChatRealtimeJs_ActiveConversation_HandlesFocusedUnfocusedAndOtherConversationUnreadBadges()
     {
         var chatStateUrl = JsUrl("chat-state.js");
         var apiClientUrl = JsUrl("api-client.js");
@@ -908,13 +852,13 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             console.log('SUCCESS');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS", output);
     }
 
     [Fact]
-    public void ChatRealtimeJs_NewConversationArrival_TriggersSyncAndReplacesEmptyStateSafely()
+    public async Task ChatRealtimeJs_NewConversationArrival_TriggersSyncAndReplacesEmptyStateSafely()
     {
         var chatStateUrl = JsUrl("chat-state.js");
         var apiClientUrl = JsUrl("api-client.js");
@@ -1110,7 +1054,7 @@ public sealed class SidebarRealtimeNotificationsTests : IClassFixture<SqlTestDat
             console.log('SUCCESS');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS", output);
     }

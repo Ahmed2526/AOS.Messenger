@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using AOS.Messenger.Domain.Constants;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -103,10 +104,12 @@ internal sealed class DevMediaStartupFilter : IStartupFilter
         var tempPath = $"{finalPath}.{Guid.NewGuid():N}.tmp";
         var expectedLength = payload.ContentLength.Value;
         long totalBytesCopied = 0;
+        string etag;
 
         try
         {
             var buffer = new byte[81920];
+            using var sha256 = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             await using (var fs = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
                 int read;
@@ -118,6 +121,7 @@ internal sealed class DevMediaStartupFilter : IStartupFilter
                         break;
                     }
 
+                    sha256.AppendData(buffer, 0, read);
                     await fs.WriteAsync(buffer.AsMemory(0, read), context.RequestAborted);
                 }
             }
@@ -129,7 +133,18 @@ internal sealed class DevMediaStartupFilter : IStartupFilter
                 return;
             }
 
-            File.Move(tempPath, finalPath, overwrite: true);
+            etag = $"\"{Convert.ToHexStringLower(sha256.GetHashAndReset())}\"";
+
+            try
+            {
+                File.Move(tempPath, finalPath, overwrite: true);
+            }
+            catch (IOException)
+            {
+                TryDeleteFileQuietly(tempPath);
+                context.Response.StatusCode = StatusCodes.Status409Conflict;
+                return;
+            }
         }
         catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
         {
@@ -142,7 +157,6 @@ internal sealed class DevMediaStartupFilter : IStartupFilter
             throw;
         }
 
-        var etag = await _storage.ComputeETagAsync(finalPath, context.RequestAborted);
         context.Response.Headers.XContentTypeOptions = "nosniff";
         context.Response.Headers.XFrameOptions = "DENY";
         context.Response.Headers.CacheControl = "no-store, no-cache";
@@ -186,10 +200,17 @@ internal sealed class DevMediaStartupFilter : IStartupFilter
             context.Response.Headers.ContentDisposition = payload.ContentDisposition;
         }
 
-        await Results.File(
-            finalPath,
-            contentType: payload.ContentType,
-            enableRangeProcessing: true).ExecuteAsync(context);
+        try
+        {
+            await Results.File(
+                finalPath,
+                contentType: payload.ContentType,
+                enableRangeProcessing: true).ExecuteAsync(context);
+        }
+        catch (FileNotFoundException)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+        }
     }
 
     private static string NormalizeMediaType(string? contentType)

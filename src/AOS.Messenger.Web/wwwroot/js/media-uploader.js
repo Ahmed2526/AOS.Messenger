@@ -151,7 +151,7 @@ export function validateSelectedFile(file) {
 }
 
 function createBlobPreviewUrl(file, kind) {
-    if (kind !== 'image' && kind !== 'video') return null;
+    if (kind !== 'image') return null;
     if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
         try {
             return URL.createObjectURL(file);
@@ -321,7 +321,9 @@ export function createMediaUploader({
                 const thumb = document.createElement('img');
                 thumb.src = item.previewUrl;
                 thumb.alt = item.fileName;
-                thumb.className = 'w-10 h-10 rounded-lg object-cover shrink-0';
+                thumb.draggable = false;
+                thumb.setAttribute('draggable', 'false');
+                thumb.className = 'w-10 h-10 rounded-lg object-cover shrink-0 select-none';
                 chip.appendChild(thumb);
             } else {
                 const iconBox = document.createElement('div');

@@ -1,3 +1,4 @@
+using System.Buffers.Text;
 using System.Globalization;
 using System.Text;
 using AOS.Messenger.Application.Common;
@@ -40,9 +41,44 @@ public sealed class MessageService : IMessageService
         IUserReader userReader,
         IRealtimeNotifier realtimeNotifier,
         IReactionPersistence reactionPersistence,
+        IMediaPersistence mediaPersistence,
+        IStickerPersistence stickerPersistence,
         ILogger<MessageService> logger,
-        TimeProvider? timeProvider = null,
-        IMediaPersistence? mediaPersistence = null,
+        TimeProvider timeProvider)
+    {
+        ArgumentNullException.ThrowIfNull(messagePersistence);
+        ArgumentNullException.ThrowIfNull(conversationPersistence);
+        ArgumentNullException.ThrowIfNull(blockPersistence);
+        ArgumentNullException.ThrowIfNull(userReader);
+        ArgumentNullException.ThrowIfNull(realtimeNotifier);
+        ArgumentNullException.ThrowIfNull(reactionPersistence);
+        ArgumentNullException.ThrowIfNull(mediaPersistence);
+        ArgumentNullException.ThrowIfNull(stickerPersistence);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(timeProvider);
+
+        _messagePersistence = messagePersistence;
+        _conversationPersistence = conversationPersistence;
+        _blockPersistence = blockPersistence;
+        _userReader = userReader;
+        _realtimeNotifier = realtimeNotifier;
+        _reactionPersistence = reactionPersistence;
+        _mediaPersistence = mediaPersistence;
+        _stickerPersistence = stickerPersistence;
+        _logger = logger;
+        _timeProvider = timeProvider;
+    }
+
+    public MessageService(
+        IMessagePersistence messagePersistence,
+        IConversationPersistence conversationPersistence,
+        IBlockPersistence blockPersistence,
+        IUserReader userReader,
+        IRealtimeNotifier realtimeNotifier,
+        IReactionPersistence reactionPersistence,
+        ILogger<MessageService> logger,
+        TimeProvider timeProvider,
+        IMediaPersistence mediaPersistence,
         IStickerPersistence? stickerPersistence = null)
     {
         ArgumentNullException.ThrowIfNull(messagePersistence);
@@ -51,7 +87,9 @@ public sealed class MessageService : IMessageService
         ArgumentNullException.ThrowIfNull(userReader);
         ArgumentNullException.ThrowIfNull(realtimeNotifier);
         ArgumentNullException.ThrowIfNull(reactionPersistence);
+        ArgumentNullException.ThrowIfNull(mediaPersistence);
         ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(timeProvider);
 
         _messagePersistence = messagePersistence;
         _conversationPersistence = conversationPersistence;
@@ -59,10 +97,10 @@ public sealed class MessageService : IMessageService
         _userReader = userReader;
         _realtimeNotifier = realtimeNotifier;
         _reactionPersistence = reactionPersistence;
-        _mediaPersistence = mediaPersistence ?? NullMediaPersistence.Instance;
+        _mediaPersistence = mediaPersistence;
         _stickerPersistence = stickerPersistence;
         _logger = logger;
-        _timeProvider = timeProvider ?? TimeProvider.System;
+        _timeProvider = timeProvider;
     }
 
     public MessageService(
@@ -72,6 +110,7 @@ public sealed class MessageService : IMessageService
         IUserReader userReader,
         IRealtimeNotifier realtimeNotifier,
         ILogger<MessageService> logger,
+        IMediaPersistence mediaPersistence,
         TimeProvider? timeProvider = null)
         : this(
             messagePersistence,
@@ -81,24 +120,8 @@ public sealed class MessageService : IMessageService
             realtimeNotifier,
             NullReactionPersistence.Instance,
             logger,
-            timeProvider)
-    {
-    }
-
-    public MessageService(
-        IMessagePersistence messagePersistence,
-        IConversationPersistence conversationPersistence,
-        IBlockPersistence blockPersistence,
-        IUserReader userReader)
-        : this(
-            messagePersistence,
-            conversationPersistence,
-            blockPersistence,
-            userReader,
-            NullRealtimeNotifier.Instance,
-            NullReactionPersistence.Instance,
-            NullLogger<MessageService>.Instance,
-            TimeProvider.System)
+            timeProvider ?? TimeProvider.System,
+            mediaPersistence)
     {
     }
 
@@ -195,77 +218,124 @@ public sealed class MessageService : IMessageService
             throw new ForbiddenException("Cannot send message in a blocked conversation.");
         }
 
+        Message persisted;
+        IReadOnlyList<Media>? attachedMedia = null;
+        var isNewlyCreated = false;
         Message? parentMessage = null;
-        if (dto.ReplyToMessageId is not null)
-        {
-            parentMessage = await _messagePersistence.GetByIdAsync(conversationId, dto.ReplyToMessageId, ct);
-            if (parentMessage is null)
-            {
-                throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
-            }
 
-            // Verify parent is not prior to caller's cutoff
-            var cutoff = await GetEffectiveCutoffUtcAsync(conversationId, senderId, ct);
-            if (cutoff.HasValue && parentMessage.CreatedAtUtc < cutoff.Value)
-            {
-                throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
-            }
-
-            // Verify parent is not hidden via DeleteForMe for caller
-            var isHiddenForCaller = await _messagePersistence.IsMessageDeletedForUserAsync(conversationId, dto.ReplyToMessageId, senderId, ct);
-            if (isHiddenForCaller)
-            {
-                throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
-            }
-        }
-
-        if (hasSticker)
-        {
-            if (_stickerPersistence is null
-                || !await _stickerPersistence.CanUserAccessStickerAsync(senderId, stickerId!, forSending: true, ct))
-            {
-                throw new NotFoundException("Sticker", stickerId!.Value);
-            }
-        }
-
-        var nowUtc = _timeProvider.GetUtcNow();
-        var message = Message.Create(
-            conversationId,
+        var existingIdempotent = await _messagePersistence.GetByIdempotencyKeyAsync(
             senderId,
             trimmedIdempotencyKey,
-            normalizedContent,
-            nowUtc,
-            dto.ReplyToMessageId,
-            hasAttachments: hasAttachments,
-            stickerId: stickerId);
-
-        var persistResult = hasAttachments
-            ? await _messagePersistence.AddWithMediaAsync(message, mediaIds!, nowUtc, ct)
-            : await _messagePersistence.AddAsync(message, ct);
-
-        var (persisted, isNewlyCreated, attachedMedia) = (
-            persistResult.Message,
-            persistResult.IsNewlyCreated,
-            persistResult.AttachedMedia);
-
-        if (isNewlyCreated && persisted.StickerId is not null && _stickerPersistence is not null)
+            ct);
+        if (existingIdempotent is not null)
         {
-            try
+            if (existingIdempotent.IsDeletedForEveryone)
             {
-                await _stickerPersistence.UpsertRecentStickerAsync(
-                    senderId,
-                    persisted.StickerId,
-                    nowUtc,
-                    StickerConstraints.MaxRecentStickersPerUser,
-                    ct);
+                throw new ConflictException("This message was already deleted.");
             }
-            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+
+            IReadOnlyList<Media>? existingMedia = null;
+            if (existingIdempotent.HasAttachments)
             {
-                _logger.LogWarning(
-                    ex,
-                    "Failed to record recent sticker {StickerId} for user {UserId} after message commit.",
-                    persisted.StickerId.Value,
-                    senderId.Value);
+                var existingMediaMap = await _mediaPersistence.GetByMessageIdsAsync(
+                    existingIdempotent.ConversationId,
+                    [existingIdempotent.Id],
+                    ct);
+                existingMediaMap.TryGetValue(existingIdempotent.Id, out existingMedia);
+            }
+
+            var mediaMatches = !hasAttachments
+                || (existingMedia is not null
+                    && existingMedia.Count == mediaIds!.Count
+                    && existingMedia.Select(m => m.Id).SequenceEqual(mediaIds));
+
+            if (existingIdempotent.ConversationId != conversationId
+                || existingIdempotent.Content != normalizedContent
+                || existingIdempotent.ParentMessageId != dto.ReplyToMessageId
+                || existingIdempotent.HasAttachments != hasAttachments
+                || existingIdempotent.StickerId != stickerId
+                || !mediaMatches)
+            {
+                throw new ConflictException(
+                    "An existing message already exists with this idempotency key in a different context or with different content or attachments.");
+            }
+
+            persisted = existingIdempotent;
+            attachedMedia = existingMedia;
+        }
+        else
+        {
+            if (dto.ReplyToMessageId is not null)
+            {
+                parentMessage = await _messagePersistence.GetByIdAsync(conversationId, dto.ReplyToMessageId, ct);
+                if (parentMessage is null)
+                {
+                    throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
+                }
+
+                // Verify parent is not prior to caller's cutoff
+                var cutoff = await GetEffectiveCutoffUtcAsync(conversationId, senderId, ct);
+                if (cutoff.HasValue && parentMessage.CreatedAtUtc < cutoff.Value)
+                {
+                    throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
+                }
+
+                // Verify parent is not hidden via DeleteForMe for caller
+                var isHiddenForCaller = await _messagePersistence.IsMessageDeletedForUserAsync(conversationId, dto.ReplyToMessageId, senderId, ct);
+                if (isHiddenForCaller)
+                {
+                    throw new NotFoundException("Parent message", dto.ReplyToMessageId.Value);
+                }
+            }
+
+            if (hasSticker)
+            {
+                if (_stickerPersistence is null
+                    || !await _stickerPersistence.CanUserAccessStickerAsync(senderId, stickerId!, forSending: true, ct))
+                {
+                    throw new NotFoundException("Sticker", stickerId!.Value);
+                }
+            }
+
+            var nowUtc = _timeProvider.GetUtcNow();
+            var message = Message.Create(
+                conversationId,
+                senderId,
+                trimmedIdempotencyKey,
+                normalizedContent,
+                nowUtc,
+                dto.ReplyToMessageId,
+                hasAttachments: hasAttachments,
+                stickerId: stickerId);
+
+            var persistResult = hasAttachments
+                ? await _messagePersistence.AddWithMediaAsync(message, mediaIds!, nowUtc, ct)
+                : await _messagePersistence.AddAsync(message, ct);
+
+            (persisted, isNewlyCreated, attachedMedia) = (
+                persistResult.Message,
+                persistResult.IsNewlyCreated,
+                persistResult.AttachedMedia);
+
+            if (isNewlyCreated && persisted.StickerId is not null && _stickerPersistence is not null)
+            {
+                try
+                {
+                    await _stickerPersistence.UpsertRecentStickerAsync(
+                        senderId,
+                        persisted.StickerId,
+                        nowUtc,
+                        StickerConstraints.MaxRecentStickersPerUser,
+                        ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Failed to record recent sticker {StickerId} for user {UserId} after message commit.",
+                        persisted.StickerId.Value,
+                        senderId.Value);
+                }
             }
         }
 
@@ -293,7 +363,7 @@ public sealed class MessageService : IMessageService
                         ? MediaPreviewFormatter.FormatStickerPreview()
                         : parentMedia is { Count: > 0 }
                             ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
-                            : TruncatePreview(parent.Content ?? string.Empty);
+                            : MediaPreviewFormatter.FormatPreview(parent.Content, (IReadOnlyList<Media>?)null);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -527,7 +597,7 @@ public sealed class MessageService : IMessageService
             profiles.TryGetValue(m.SenderId, out var senderProfile);
             var senderName = FormatDisplayName(senderProfile);
             var senderHandle = FormatUserName(senderProfile);
-            var senderAvatarVersion = (!isConversationBlocked && senderProfile is { IsDeleted: false })
+            var senderAvatarVersion = ((!isConversationBlocked || m.SenderId == callerId) && senderProfile is { IsDeleted: false })
                 ? senderProfile.AvatarVersion
                 : null;
 
@@ -551,7 +621,7 @@ public sealed class MessageService : IMessageService
                         ? MediaPreviewFormatter.FormatStickerPreview()
                         : parentMedia is { Count: > 0 }
                             ? MediaPreviewFormatter.FormatPreview(parent.Content, parentMedia)
-                            : TruncatePreview(parent.Content ?? string.Empty);
+                            : MediaPreviewFormatter.FormatPreview(parent.Content, (IReadOnlyList<Media>?)null);
 
                 replyDto = new MessageReplyDto(
                     parent.Id,
@@ -776,7 +846,9 @@ public sealed class MessageService : IMessageService
             }
             else
             {
-                newLastMessagePreview = lastMessage.Content;
+                newLastMessagePreview = MediaPreviewFormatter.FormatPreview(
+                    lastMessage.Content,
+                    (IReadOnlyList<Media>?)null);
             }
         }
 
@@ -838,6 +910,14 @@ public sealed class MessageService : IMessageService
         await EnsureMessageVisibleToUserAsync(conversationId, message, callerId, ct);
 
         var nowUtc = _timeProvider.GetUtcNow();
+        if (message.IsDeletedForEveryone)
+        {
+            return new MessageDeletedForEveryoneDto(
+                conversationId.Value,
+                messageId.Value,
+                message.DeletedForEveryoneAtUtc ?? nowUtc);
+        }
+
         if (nowUtc - message.CreatedAtUtc > TimeSpan.FromHours(3))
         {
             throw new ForbiddenException("A message can only be deleted for everyone within 3 hours of creation.");
@@ -1059,44 +1139,10 @@ public sealed class MessageService : IMessageService
         return profile.UserName;
     }
 
-    private static string TruncatePreview(string content, int maxLength = 100)
-    {
-        if (string.IsNullOrEmpty(content) || content.Length <= maxLength)
-        {
-            return content;
-        }
-
-        var endIndex = 0;
-        var enumerator = StringInfo.GetTextElementEnumerator(content);
-        while (enumerator.MoveNext())
-        {
-            var element = (string)enumerator.Current;
-            if (enumerator.ElementIndex + element.Length > maxLength)
-            {
-                break;
-            }
-
-            endIndex = enumerator.ElementIndex + element.Length;
-        }
-
-        if (endIndex <= 0)
-        {
-            endIndex = Math.Min(maxLength, content.Length);
-            if (endIndex > 0 && char.IsHighSurrogate(content[endIndex - 1]))
-            {
-                endIndex--;
-            }
-        }
-
-        return endIndex < content.Length
-            ? string.Concat(content.AsSpan(0, endIndex), "...")
-            : content;
-    }
-
     private static string EncodeCursor(DateTimeOffset createdAtUtc, MessageId id)
     {
         var raw = $"{createdAtUtc.UtcTicks}:{id.Value}";
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(raw));
+        return Base64Url.EncodeToString(Encoding.UTF8.GetBytes(raw));
     }
 
     private static bool TryDecodeCursor(string cursor, out DateTimeOffset createdAtUtc, out MessageId id)
@@ -1104,9 +1150,16 @@ public sealed class MessageService : IMessageService
         createdAtUtc = default;
         id = null!;
 
+        if (string.IsNullOrWhiteSpace(cursor) || cursor.Length > 128)
+        {
+            return false;
+        }
+
         try
         {
-            var bytes = Convert.FromBase64String(cursor);
+            var bytes = cursor.IndexOfAny(['+', '/', '=']) >= 0
+                ? Convert.FromBase64String(cursor)
+                : Base64Url.DecodeFromChars(cursor);
             var decoded = Encoding.UTF8.GetString(bytes);
             var colonIndex = decoded.IndexOf(':');
             if (colonIndex <= 0)
@@ -1117,12 +1170,15 @@ public sealed class MessageService : IMessageService
             var ticksStr = decoded[..colonIndex];
             var idStr = decoded[(colonIndex + 1)..];
 
-            if (!long.TryParse(ticksStr, out var ticks))
+            if (!long.TryParse(ticksStr, NumberStyles.None, CultureInfo.InvariantCulture, out var ticks)
+                || ticks < DateTimeOffset.MinValue.UtcTicks
+                || ticks > DateTimeOffset.MaxValue.UtcTicks)
             {
                 return false;
             }
 
-            if (!long.TryParse(idStr, out var messageIdVal) || messageIdVal < 0)
+            if (!long.TryParse(idStr, NumberStyles.None, CultureInfo.InvariantCulture, out var messageIdVal)
+                || messageIdVal <= 0)
             {
                 return false;
             }
@@ -1131,7 +1187,7 @@ public sealed class MessageService : IMessageService
             id = new MessageId(messageIdVal);
             return true;
         }
-        catch
+        catch (FormatException)
         {
             return false;
         }

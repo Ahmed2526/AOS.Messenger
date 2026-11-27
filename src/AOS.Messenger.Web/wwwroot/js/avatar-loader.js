@@ -25,6 +25,10 @@ const AVATAR_URL_SAFETY_MARGIN_MS = 60 * 1000;
 
 const avatarUrlCache = new Map();
 const inFlightRequests = new Map();
+const avatarUrlUserFullEvictEpochs = new Map();
+const avatarUrlUserVersionEpochs = new Map();
+let avatarUrlGlobalEpoch = 0;
+const slotHydrationTokens = new WeakMap();
 const avatarFullImageLoader = createCachedImageLoader({
     maxItems: DEFAULT_AVATAR_FULL_MAX_ITEMS,
     maxBytes: DEFAULT_AVATAR_FULL_MAX_BYTES,
@@ -114,6 +118,9 @@ export function getAvatarInitials(name, handle = '') {
  * Clears all cached signed avatar URLs, cached full-size Blobs, in-flight promises, and closes the avatar lightbox.
  */
 export function clearAvatarUrlCache() {
+    avatarUrlGlobalEpoch++;
+    avatarUrlUserFullEvictEpochs.clear();
+    avatarUrlUserVersionEpochs.clear();
     avatarUrlCache.clear();
     inFlightRequests.clear();
     closeAvatarLightbox({ cacheCurrentFallback: false });
@@ -123,26 +130,42 @@ export function clearAvatarUrlCache() {
 /**
  * Evicts all cached signed avatar URLs, full-size Blobs, and in-flight fetches for a specific userId.
  * @param {string|object|null|undefined} userId
+ * @param {{ preserveVersion?: string|null }} [options]
  */
-export function evictUserAvatarCache(userId) {
+export function evictUserAvatarCache(userId, { preserveVersion = null } = {}) {
     const norm = normalizeId(userId);
     if (!norm) return;
+    const trimmedPreserve = preserveVersion ? String(preserveVersion).trim() : '';
     const prefix = `${norm}:`;
+    const preservePrefix = trimmedPreserve ? `${norm}:${trimmedPreserve}:` : '';
     for (const key of Array.from(avatarUrlCache.keys())) {
-        if (String(key).startsWith(prefix)) {
+        const keyStr = String(key);
+        if (keyStr.startsWith(prefix) && (!preservePrefix || !keyStr.startsWith(preservePrefix))) {
             avatarUrlCache.delete(key);
         }
     }
     for (const key of Array.from(inFlightRequests.keys())) {
-        if (String(key).startsWith(prefix)) {
+        const keyStr = String(key);
+        if (keyStr.startsWith(prefix) && (!preservePrefix || !keyStr.startsWith(preservePrefix))) {
             inFlightRequests.delete(key);
         }
     }
-    if (lightboxState.activeUserId && normalizeId(lightboxState.activeUserId) === norm) {
-        lightboxState.pendingFallback = null;
-        lightboxState.loadedFallback = null;
+    if (!trimmedPreserve) {
+        avatarUrlUserFullEvictEpochs.set(norm, (avatarUrlUserFullEvictEpochs.get(norm) || 0) + 1);
+        if (lightboxState.activeUserId && normalizeId(lightboxState.activeUserId) === norm) {
+            lightboxState.pendingFallback = null;
+            lightboxState.loadedFallback = null;
+        }
+        avatarFullImageLoader.evictScope(norm);
+    } else {
+        const prevVerEpoch = avatarUrlUserVersionEpochs.get(norm)?.epoch || 0;
+        avatarUrlUserVersionEpochs.set(norm, { epoch: prevVerEpoch + 1, preserveVersion: trimmedPreserve });
+        if (lightboxState.activeUserId && normalizeId(lightboxState.activeUserId) === norm && lightboxState.activeVersion !== trimmedPreserve) {
+            lightboxState.pendingFallback = null;
+            lightboxState.loadedFallback = null;
+        }
+        avatarFullImageLoader.evictScopeExcept(norm, makeCacheKey(norm, trimmedPreserve, 'full'));
     }
-    avatarFullImageLoader.evictScope(norm);
 }
 
 /**
@@ -209,11 +232,24 @@ export async function resolveAvatarUrl(
         return inFlightRequests.get(cacheKey);
     }
 
+    const startGlobalEpoch = avatarUrlGlobalEpoch;
+    const startUserFullEpoch = avatarUrlUserFullEvictEpochs.get(normId) || 0;
+    const startUserVersionEpoch = avatarUrlUserVersionEpochs.get(normId)?.epoch || 0;
+
     const promise = (async () => {
         try {
             const dto = await getAvatarUrlFn(normId, { size: variant });
             const resolvedUrl = dto?.url ?? dto?.Url ?? '';
             if (!isSafeMediaUrl(resolvedUrl)) {
+                return null;
+            }
+
+            if (avatarUrlGlobalEpoch !== startGlobalEpoch) return null;
+            if ((avatarUrlUserFullEvictEpochs.get(normId) || 0) !== startUserFullEpoch) return null;
+            const latestVersionState = avatarUrlUserVersionEpochs.get(normId);
+            if (latestVersionState
+                && latestVersionState.epoch !== startUserVersionEpoch
+                && latestVersionState.preserveVersion !== trimmedVersion) {
                 return null;
             }
 
@@ -224,8 +260,6 @@ export async function resolveAvatarUrl(
             const expiresAtMs = Number.isFinite(parsedExpiryMs)
                 ? Math.min(parsedExpiryMs - AVATAR_URL_SAFETY_MARGIN_MS, defaultExpiryMs)
                 : defaultExpiryMs;
-
-            if (inFlightRequests.get(cacheKey) !== promise) return null;
 
             if (expiresAtMs > currentNow) {
                 setBoundedMapEntry(avatarUrlCache, cacheKey, {
@@ -244,7 +278,9 @@ export async function resolveAvatarUrl(
         }
     });
 
-    inFlightRequests.set(cacheKey, promise);
+    if (!bypassCache) {
+        inFlightRequests.set(cacheKey, promise);
+    }
     return promise;
 }
 
@@ -272,6 +308,8 @@ function ensureSlotChildren(slotEl, name, handle, { createImg = true } = {}) {
         imgEl.className = 'w-full h-full object-cover rounded-full hidden';
         imgEl.loading = 'lazy';
         imgEl.decoding = 'async';
+        imgEl.draggable = false;
+        imgEl.setAttribute('draggable', 'false');
         imgEl.alt = name ? `${name}'s profile photo` : 'Profile photo';
         slotEl.appendChild(imgEl);
     }
@@ -374,6 +412,9 @@ function bindSlotImageListeners(slotEl, initialsEl, imgEl, { getAvatarUrlFn = ge
 export async function hydrateAvatarSlot(slotEl, { getAvatarUrlFn = getUserAvatarUrl, nowFn = () => Date.now() } = {}) {
     if (!slotEl || typeof slotEl.getAttribute !== 'function') return;
 
+    const slotToken = (slotHydrationTokens.get(slotEl) || 0) + 1;
+    slotHydrationTokens.set(slotEl, slotToken);
+
     const userId = slotEl.getAttribute('data-avatar-user-id') || '';
     const version = slotEl.getAttribute('data-avatar-version') || '';
     const name = slotEl.getAttribute('data-avatar-name') || '';
@@ -421,8 +462,8 @@ export async function hydrateAvatarSlot(slotEl, { getAvatarUrlFn = getUserAvatar
         nowFn
     });
 
-    // Guard against detached DOM nodes or concurrent profile change/clear while resolveAvatarUrl was awaiting
-    if (slotEl.isConnected === false || (imgEl && imgEl.isConnected === false)) {
+    // Guard against detached DOM nodes, superseded hydrations, or concurrent profile change/clear while resolveAvatarUrl was awaiting
+    if (slotHydrationTokens.get(slotEl) !== slotToken || slotEl.isConnected === false || (imgEl && imgEl.isConnected === false)) {
         return;
     }
     const currentUserId = slotEl.getAttribute('data-avatar-user-id') || '';
@@ -477,7 +518,7 @@ export function updateUserAvatarAcrossDom(userId, avatarVersion, displayName = n
     const preserveOpenLightbox = Boolean(nextVersion && isLightboxUser && isAvatarLightboxOpen() && prevVersion === nextVersion);
 
     if (!preserveOpenLightbox) {
-        evictUserAvatarCache(normId);
+        evictUserAvatarCache(normId, { preserveVersion: nextVersion || null });
     }
     if (!nextVersion) {
         closeAvatarLightboxIfUser(normId);
@@ -603,6 +644,8 @@ function ensureAvatarLightboxModal() {
     const img = document.createElement('img');
     img.id = 'avatar-lightbox-img';
     img.alt = 'Profile photo';
+    img.draggable = false;
+    img.setAttribute('draggable', 'false');
     img.className = 'hidden max-h-[78vh] max-w-[90vw] w-auto h-auto object-contain rounded-2xl shadow-2xl select-none';
     body.appendChild(img);
 

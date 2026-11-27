@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Text;
 using Xunit;
 
 namespace AOS.Messenger.Tests;
@@ -25,51 +23,6 @@ public sealed class MilestoneAPaginationTests
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         Assert.True(File.Exists(path), $"JS module not found: {path}");
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeModuleScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start node process for ES module verification.");
-
-        var outputBuilder = new StringBuilder();
-        var errorBuilder = new StringBuilder();
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) outputBuilder.AppendLine(e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) errorBuilder.AppendLine(e.Data);
-        };
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        if (!process.WaitForExit(15000))
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException("Node ES module verification timed out.");
-        }
-
-        process.WaitForExit();
-        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
     }
 
     private const string MockDomPrelude = """
@@ -349,7 +302,7 @@ public sealed class MilestoneAPaginationTests
         """;
 
     [Fact]
-    public void LoadOlderMessages_UsesPageSize20_PreservesScrollAnchor_SyncsStateAndDom_AndShowsHistoryStart()
+    public async Task LoadOlderMessages_UsesPageSize20_PreservesScrollAnchor_SyncsStateAndDom_AndShowsHistoryStart()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -434,12 +387,12 @@ public sealed class MilestoneAPaginationTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void LoadOlderMessages_On429OrNetworkError_ShowsRetryChip_EnforcesCooldown_AndAllowsManualForceRetry()
+    public async Task LoadOlderMessages_On429OrNetworkError_ShowsRetryChip_EnforcesCooldown_AndAllowsManualForceRetry()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -510,12 +463,12 @@ public sealed class MilestoneAPaginationTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void PaginationUi_TallViewport_ShowsManualLoadOlderButton_AndHidesWhenNoMore()
+    public async Task PaginationUi_TallViewport_ShowsManualLoadOlderButton_AndHidesWhenNoMore()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -538,12 +491,12 @@ public sealed class MilestoneAPaginationTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void LoadOlderMessages_AbortedOnConversationSwitch_NeverCorruptsNewConversation()
+    public async Task LoadOlderMessages_AbortedOnConversationSwitch_NeverCorruptsNewConversation()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -599,12 +552,12 @@ public sealed class MilestoneAPaginationTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void ReplyQuoteClick_FetchesUpTo3OlderPagesToLocateParent_AndHandlesUnavailableParent()
+    public async Task ReplyQuoteClick_FetchesUpTo3OlderPagesToLocateParent_AndHandlesUnavailableParent()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -671,12 +624,12 @@ public sealed class MilestoneAPaginationTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void ReconnectReconciliation_OfflineGapOver20_ReplacesWindowAndSyncsCursor_WhileSmallGapPreservesHistory()
+    public async Task ReconnectReconciliation_OfflineGapOver20_ReplacesWindowAndSyncsCursor_WhileSmallGapPreservesHistory()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -712,22 +665,29 @@ public sealed class MilestoneAPaginationTests
                 }
             });
 
+            let onReconnectingCb = null;
             let onReconnectedCb = null;
             let onClosedCb = null;
             let startCalls = 0;
+            const onlineHandlers = [];
+            const origWinAdd = dom.window.addEventListener;
+            dom.window.addEventListener = (t, fn) => {
+                if (t === 'online') onlineHandlers.push(fn);
+                return origWinAdd(t, fn);
+            };
             const fakeConnection = {
-                state: 'Connected',
+                state: 'Disconnected',
                 on: () => {},
                 off: () => {},
                 onclose: (cb) => { onClosedCb = cb; },
-                onreconnecting: () => {},
+                onreconnecting: (cb) => { onReconnectingCb = cb; },
                 onreconnected: (cb) => { onReconnectedCb = cb; },
                 start: async () => { startCalls++; fakeConnection.state = 'Connected'; },
                 stop: async () => {},
                 invoke: async () => {}
             };
             const signalRLib = {
-                HubConnectionState: { Connected: 'Connected' },
+                HubConnectionState: { Connected: 'Connected', Disconnected: 'Disconnected', Reconnecting: 'Reconnecting' },
                 HubConnectionBuilder: class {
                     withUrl() { return this; }
                     withAutomaticReconnect() { return this; }
@@ -801,16 +761,60 @@ public sealed class MilestoneAPaginationTests
             assert.equal(state.hasMore, true);
             assert.equal(els.container.getAttribute('data-next-cursor'), 'cursor-39');
             assert.equal(els.container.getAttribute('data-has-more'), 'true');
+            fakeConnection.state = 'Disconnected';
             const startsBeforeClose = startCalls;
             closeOnRefresh = true;
             await client.start();
             await new Promise(resolve => setTimeout(resolve, 30));
             assert.equal(startCalls, startsBeforeClose + 2, 'Closing during startup must schedule exactly one retry');
+
+            // [W3] While HubConnectionState is Reconnecting, start(), onreconnecting, and window 'online' must not call connection.start()
+            const startsWhileReconnecting = startCalls;
+            fakeConnection.state = 'Reconnecting';
+            if (typeof onReconnectingCb === 'function') onReconnectingCb(new Error('Network blip'));
+            const reconnectingStartRes = await client.start();
+            for (const fn of onlineHandlers) fn();
+            await new Promise(resolve => setTimeout(resolve, 20));
+            assert.equal(reconnectingStartRes, false);
+            assert.equal(startCalls, startsWhileReconnecting, 'start() and online handler must not invoke connection.start() while Reconnecting');
+
+            // Case 3 [W15]: Overlapping server window prunes deleted message absent from server bundle
+            fakeConnection.state = 'Connected';
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [
+                    { id: 40, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 40', createdAtUtc: '2026-11-23T12:40:00Z' }
+                ],
+                nextCursor: 'cursor-39',
+                hasMore: true
+            };
+            await onReconnectedCb();
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['40']);
+            assert.equal(state.messagesById.has('59'), false);
+
+            // Case 4 [W15]: Server returning messages: [] with hasMore=false clears stale rendered messages and shows empty placeholder
+            const emptyPlaceholderEl = dom.document.createElement('div');
+            emptyPlaceholderEl.id = 'no-messages-placeholder';
+            emptyPlaceholderEl.className = 'hidden';
+            els.stream.appendChild(emptyPlaceholderEl);
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [],
+                nextCursor: null,
+                hasMore: false
+            };
+            await onReconnectedCb();
+            assert.equal(els.container.children.length, 0);
+            assert.equal(state.messagesById.size, 0);
+            assert.equal(emptyPlaceholderEl.classList.contains('hidden'), false);
+
             client.destroy();
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 }

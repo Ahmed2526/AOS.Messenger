@@ -183,12 +183,11 @@ public sealed class SignalRRealtimeNotifier : IRealtimeNotifier
 
         if (_conversationPersistence is not null && _blockPersistence is not null)
         {
-            var conversations = await _conversationPersistence.GetConversationsForUserAsync(userId, ct);
+            var peerUserIds = await _conversationPersistence.GetPeerUserIdsWithExistingConversationAsync(userId, ct);
             var blockedPeerIds = await _blockPersistence.GetBidirectionalBlockedUserIdsAsync(userId, ct);
 
-            foreach (var conv in conversations)
+            foreach (var peerId in peerUserIds)
             {
-                var peerId = conv.GetOtherParticipant(userId);
                 if (!blockedPeerIds.Contains(peerId))
                 {
                     targetIds.Add(peerId.Value.ToString());

@@ -198,6 +198,11 @@ internal static class ImageFrameCounter
         }
 
         long riffPayloadSize = BinaryPrimitives.ReadUInt32LittleEndian(riffHeader[4..8]);
+        if (riffPayloadSize < 4)
+        {
+            throw new DomainException("Invalid WebP RIFF container size.");
+        }
+
         long riffEnd = Math.Min(stream.Length, 8L + riffPayloadSize);
 
         var anmfFrames = 0;
@@ -227,7 +232,7 @@ internal static class ImageFrameCounter
             long payloadSize = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader[4..8]);
             long paddedSize = payloadSize + (payloadSize & 1L);
 
-            if (payloadSize > stream.Length - payloadStart)
+            if (payloadSize > riffEnd - payloadStart)
             {
                 throw new DomainException("Truncated or oversized WebP chunk payload.");
             }

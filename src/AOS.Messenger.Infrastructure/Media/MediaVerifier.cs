@@ -176,6 +176,8 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
         FileStream? outputStream = null;
         FileStream? thumbStream = null;
+        using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        jobCts.CancelAfter(timeout);
         try
         {
             outputStream = CreateDeleteOnCloseTempStream();
@@ -188,16 +190,16 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                     expectedFormat,
                     animationScan,
                     maxFrames,
-                    ct),
-                ct);
+                    jobCts.Token),
+                jobCts.Token);
 
-            await outputStream.FlushAsync(ct);
+            await outputStream.FlushAsync(jobCts.Token);
             outputStream.Seek(0, SeekOrigin.Begin);
 
             FileStream? ownershipThumb = null;
             if (thumbStream.Length > 0)
             {
-                await thumbStream.FlushAsync(ct);
+                await thumbStream.FlushAsync(jobCts.Token);
                 thumbStream.Seek(0, SeekOrigin.Begin);
                 ownershipThumb = thumbStream;
                 thumbStream = null;
@@ -216,6 +218,11 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
                 thumbnailStream: ownershipThumb,
                 thumbnailContentType: ownershipThumb is not null ? "image/webp" : null,
                 thumbnailSizeBytes: ownershipThumb?.Length);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested && jobCts.IsCancellationRequested)
+        {
+            _logger.LogWarning("Image processing timed out for media {MediaId}.", media.Id);
+            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
         }
         catch (MagickException ex)
         {
@@ -258,7 +265,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         var headersValidated = false;
         inputStream.Seek(0, SeekOrigin.Begin);
         var info = new MagickImageInfo(inputStream, pingSettings);
-        ValidateImageDimensions(checked((int)info.Width), checked((int)info.Height));
+        ValidateImageDimensions(info.Width, info.Height);
 
         long estimatedTotalPixels = Math.Max(
             (long)info.Width * info.Height * animationScan.FrameCount,
@@ -281,7 +288,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             if (pinnedFormat is MagickFormat.Gif or MagickFormat.WebP)
             {
                 decodeSettings.FrameIndex = 0;
-                decodeSettings.FrameCount = (uint)maxFrames;
+                decodeSettings.FrameCount = (uint)(maxFrames + 1);
                 return ProcessAnimationCollectionLocked(inputStream, outputStream, thumbStream, pinnedFormat, decodeSettings, maxFrames, ct);
             }
 
@@ -290,9 +297,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             image.AutoOrient();
 
             // Read upright dimensions strictly AFTER AutoOrient()
-            var finalWidth = checked((int)image.Width);
-            var finalHeight = checked((int)image.Height);
-            ValidateImageDimensions(finalWidth, finalHeight);
+            ValidateImageDimensions(image.Width, image.Height);
+            var finalWidth = (int)image.Width;
+            var finalHeight = (int)image.Height;
 
             StripSingleImageMetadata(image);
             EncodeSingleImageWithinLimit(image, pinnedFormat, outputStream, ct);
@@ -360,9 +367,9 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         {
             ct.ThrowIfCancellationRequested();
 
-            var rawWidth = checked((int)frame.Width);
-            var rawHeight = checked((int)frame.Height);
-            ValidateImageDimensions(rawWidth, rawHeight);
+            ValidateImageDimensions(frame.Width, frame.Height);
+            var rawWidth = (int)frame.Width;
+            var rawHeight = (int)frame.Height;
 
             actualTotalPixels += (long)rawWidth * rawHeight;
             if (actualTotalPixels > _options.MaxTotalDecodedImagePixels)
@@ -372,16 +379,16 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
 
             frame.AutoOrient();
 
-            var uprightWidth = checked((int)frame.Width);
-            var uprightHeight = checked((int)frame.Height);
-            ValidateImageDimensions(uprightWidth, uprightHeight);
+            ValidateImageDimensions(frame.Width, frame.Height);
+            var uprightWidth = (int)frame.Width;
+            var uprightHeight = (int)frame.Height;
             maxWidth = Math.Max(maxWidth, uprightWidth);
             maxHeight = Math.Max(maxHeight, uprightHeight);
 
             StripSingleImageMetadata(frame);
         }
 
-        ValidateImageDimensions(maxWidth, maxHeight);
+        ValidateImageDimensions((ulong)maxWidth, (ulong)maxHeight);
 
         EncodeCollectionWithinLimit(collection, pinnedFormat, outputStream, ct);
 
@@ -706,16 +713,16 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         return new VerifiedMediaResult(canonicalMime, stagingMetadata.ContentLength);
     }
 
-    private static void ValidateImageDimensions(int width, int height)
+    private static void ValidateImageDimensions(ulong width, ulong height)
     {
-        if (width <= 0 || width > MediaConstraints.MaxImageWidth ||
-            height <= 0 || height > MediaConstraints.MaxImageHeight)
+        if (width == 0 || width > (ulong)MediaConstraints.MaxImageWidth ||
+            height == 0 || height > (ulong)MediaConstraints.MaxImageHeight)
         {
             throw new DomainException(
                 $"Image dimensions must not exceed {MediaConstraints.MaxImageWidth}x{MediaConstraints.MaxImageHeight} pixels.");
         }
 
-        if ((long)width * height > MediaConstraints.MaxImagePixels)
+        if (width > (ulong)MediaConstraints.MaxImagePixels / height)
         {
             throw new DomainException(
                 $"Image resolution exceeds the maximum allowed {MediaConstraints.MaxImagePixels:N0} pixels.");

@@ -98,6 +98,17 @@ public sealed class Sticker : Entity<StickerId>
             throw new DomainException("Content type cannot be empty.");
         }
 
+        var trimmedMime = declaredContentType.Trim();
+        if (trimmedMime.Length > 128)
+        {
+            throw new DomainException("Declared content type cannot exceed 128 characters.");
+        }
+
+        if (displayOrder < 0)
+        {
+            throw new DomainException("DisplayOrder cannot be negative.");
+        }
+
         if (declaredSizeBytes <= 0 || declaredSizeBytes > StickerConstraints.MaxRawStickerUploadBytes)
         {
             throw new DomainException(
@@ -114,7 +125,7 @@ public sealed class Sticker : Entity<StickerId>
             StorageObjectId = objectId,
             ObjectKey = $"{MediaConstraints.PendingKeyPrefix}{objectId}",
             StaticAssetPath = null,
-            ContentType = declaredContentType.Trim(),
+            ContentType = trimmedMime,
             DeclaredSizeBytes = declaredSizeBytes,
             Width = StickerConstraints.CanonicalStickerSize,
             Height = StickerConstraints.CanonicalStickerSize,
@@ -146,6 +157,16 @@ public sealed class Sticker : Entity<StickerId>
         State = StickerState.Ready;
     }
 
+    public void SetDisplayOrder(int displayOrder)
+    {
+        if (displayOrder < 0)
+        {
+            throw new DomainException("Sticker display order cannot be negative.");
+        }
+
+        DisplayOrder = displayOrder;
+    }
+
     public void MarkReady(
         string permanentObjectId,
         string permanentObjectKey,
@@ -167,14 +188,24 @@ public sealed class Sticker : Entity<StickerId>
 
         if (!MediaConstraints.IsValidStorageObjectId(permanentObjectId)
             || string.IsNullOrWhiteSpace(permanentObjectKey)
-            || !permanentObjectKey.StartsWith(MediaConstraints.StickerKeyPrefix, StringComparison.Ordinal))
+            || !string.Equals(permanentObjectKey, $"{MediaConstraints.StickerKeyPrefix}{permanentObjectId}", StringComparison.Ordinal))
         {
             throw new DomainException("Invalid permanent sticker storage key.");
         }
 
-        if (verifiedSizeBytes <= 0)
+        var maxOutputBytes = isAnimated
+            ? StickerConstraints.MaxAnimatedWebpOutputBytes
+            : StickerConstraints.MaxStaticWebpOutputBytes;
+        if (verifiedSizeBytes <= 0 || verifiedSizeBytes > maxOutputBytes)
         {
-            throw new DomainException("Verified sticker size must be positive.");
+            throw new DomainException($"Verified sticker size must be between 1 byte and {maxOutputBytes} bytes.");
+        }
+
+        if (width is < 1 or > StickerConstraints.CanonicalStickerSize
+            || height is < 1 or > StickerConstraints.CanonicalStickerSize)
+        {
+            throw new DomainException(
+                $"Sticker dimensions must be between 1 and {StickerConstraints.CanonicalStickerSize} pixels.");
         }
 
         State = StickerState.Ready;
@@ -241,6 +272,11 @@ public sealed class Sticker : Entity<StickerId>
 
     public void MarkPurged(DateTimeOffset purgedAtUtc)
     {
+        if (State is not (StickerState.Failed or StickerState.Archived))
+        {
+            throw new DomainException($"Cannot mark sticker as purged from state '{State}'.");
+        }
+
         PurgedAtUtc = purgedAtUtc;
     }
 }

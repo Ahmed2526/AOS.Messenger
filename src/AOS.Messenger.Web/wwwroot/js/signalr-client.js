@@ -164,13 +164,13 @@ export function createSignalRClient({
     }
 
     function scheduleReconnect() {
-        if (isTerminated || retryTimerId !== null || startInFlight || isConnected()) return;
+        if (isTerminated || retryTimerId !== null || startInFlight || !isDisconnected()) return;
         const idx = Math.min(retryAttempt, reconnectBackoffDelays.length - 1);
         const delayMs = Math.max(0, Number(reconnectBackoffDelays[idx]) || 0);
         retryAttempt++;
         retryTimerId = setTimeout(() => {
             retryTimerId = null;
-            if (!isTerminated && !isConnected()) {
+            if (!isTerminated && isDisconnected()) {
                 start();
             }
         }, delayMs);
@@ -194,6 +194,15 @@ export function createSignalRClient({
             ? lib.HubConnectionState.Connected
             : 'Connected';
         return connection.state === 'Connected' || connection.state === connectedConst;
+    }
+
+    function isDisconnected() {
+        const disconnectedConst = lib.HubConnectionState && lib.HubConnectionState.Disconnected
+            ? lib.HubConnectionState.Disconnected
+            : 'Disconnected';
+        return connection.state == null
+            || connection.state === 'Disconnected'
+            || connection.state === disconnectedConst;
     }
 
     function triggerSessionExpired() {
@@ -398,11 +407,31 @@ export function createSignalRClient({
             }
 
             const messages = bundle?.messages ?? bundle?.Messages ?? [];
-            if (!containerEl || !Array.isArray(messages) || messages.length === 0) return;
+            if (!containerEl || !Array.isArray(messages)) return;
 
-            const newestRendered = getNewestRenderedMessageInfo(containerEl);
             const bundleHasMore = Boolean(bundle?.hasMore ?? bundle?.HasMore);
             const bundleNextCursor = bundle?.nextCursor ?? bundle?.NextCursor ?? null;
+
+            if (messages.length === 0) {
+                if (!bundleHasMore) {
+                    state.paginationAbortController?.abort();
+                    renderMessages(containerEl, [], state.currentUserId, state.activeMeta, { scrollToEnd: false, hasMore: false });
+                    if (state.messagesById && typeof state.messagesById.clear === 'function') {
+                        state.messagesById.clear();
+                    }
+                    state.nextCursor = null;
+                    state.hasMore = false;
+                    state.hasPaginatedOlder = false;
+                    syncPaginationAttributes(containerEl, null, false);
+                    if (typeof onReconciledWindowReplaced === 'function') {
+                        onReconciledWindowReplaced();
+                    }
+                    updateSidebarLastMessage(convId, 'No messages yet', null, false, true);
+                }
+                return;
+            }
+
+            const newestRendered = getNewestRenderedMessageInfo(containerEl);
             const sortedBundle = [...messages].sort(compareMessages);
             const oldestBundle = sortedBundle[0];
             const oldestBundleId = getMessageId(oldestBundle);
@@ -412,7 +441,7 @@ export function createSignalRClient({
                 if (oldestBundleTime > newestRendered.time ||
                     (oldestBundleTime === newestRendered.time && oldestIdBig > newestRendered.id)) {
                     state.paginationAbortController?.abort();
-                    renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true });
+                    renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true, hasMore: bundleHasMore });
                     if (state.messagesById && typeof state.messagesById.clear === 'function') {
                         state.messagesById.clear();
                         for (const msg of sortedBundle) {
@@ -435,6 +464,41 @@ export function createSignalRClient({
                 }
             }
 
+            // Prune rendered rows missing from the authoritative server window (>= oldestBundle) without touching older paginated history
+            const bundleIds = new Set(sortedBundle.map(getMessageId).filter(Boolean));
+            const oldestIdBig = parseBigIntSafe(oldestBundleId);
+            let prunedAny = false;
+            const renderedRows = typeof containerEl.querySelectorAll === 'function'
+                ? Array.from(containerEl.querySelectorAll('.message-bubble-row'))
+                : [];
+            for (const row of renderedRows) {
+                const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                if (!rowIdStr || bundleIds.has(rowIdStr)) continue;
+
+                let withinServerWindow = false;
+                if (Number.isFinite(oldestBundleTime)) {
+                    const rowTimeAttr = row.getAttribute('data-created-at');
+                    const rowTime = rowTimeAttr ? Date.parse(rowTimeAttr) : NaN;
+                    const rowIdBig = parseBigIntSafe(rowIdStr);
+                    if (Number.isFinite(rowTime) &&
+                        (rowTime > oldestBundleTime || (rowTime === oldestBundleTime && rowIdBig >= oldestIdBig))) {
+                        withinServerWindow = true;
+                    }
+                }
+
+                if (withinServerWindow) {
+                    applyMessageDeletedForMe(rowIdStr, null, null, null, true, { hasMore: bundleHasMore });
+                    if (state.messagesById && typeof state.messagesById.delete === 'function') {
+                        state.messagesById.delete(String(rowIdStr));
+                    }
+                    if (typeof onMessageDeleted === 'function') {
+                        onMessageDeleted(rowIdStr);
+                    }
+                    prunedAny = true;
+                }
+            }
+
+            const effectiveNewestRendered = getNewestRenderedMessageInfo(containerEl);
             const missingNewer = [];
 
             for (const msg of messages) {
@@ -496,11 +560,11 @@ export function createSignalRClient({
                 }
 
                 const rawCreatedAt = msg.createdAtUtc ?? msg.CreatedAtUtc;
-                if (newestRendered && rawCreatedAt) {
+                if (effectiveNewestRendered && rawCreatedAt) {
                     const msgTime = Date.parse(rawCreatedAt);
                     const msgIdVal = parseBigIntSafe(msgId);
                     if (!Number.isNaN(msgTime) &&
-                        (msgTime < newestRendered.time || (msgTime === newestRendered.time && msgIdVal <= newestRendered.id))) {
+                        (msgTime < effectiveNewestRendered.time || (msgTime === effectiveNewestRendered.time && msgIdVal <= effectiveNewestRendered.id))) {
                         continue;
                     }
                 }
@@ -508,7 +572,16 @@ export function createSignalRClient({
                 missingNewer.push(msg);
             }
 
-            if (missingNewer.length === 0) return;
+            if (missingNewer.length === 0) {
+                if (prunedAny && sortedBundle.length > 0) {
+                    const latestSurviving = sortedBundle[sortedBundle.length - 1];
+                    const latestSurvivingId = getMessageId(latestSurviving);
+                    if (latestSurvivingId) {
+                        updateSidebarLastMessage(convId, formatMessagePreview(latestSurviving), latestSurvivingId, true);
+                    }
+                }
+                return;
+            }
 
             missingNewer.sort(compareMessages);
 
@@ -969,7 +1042,7 @@ export function createSignalRClient({
     };
 
     const handleOnline = () => {
-        if (isTerminated || isConnected()) return;
+        if (isTerminated || !isDisconnected()) return;
         clearRetryTimer();
         retryAttempt = 0;
         start();
@@ -984,9 +1057,9 @@ export function createSignalRClient({
     function start() {
         if (isTerminated) return Promise.resolve(false);
         if (startInFlight) return startInFlight;
+        if (!isDisconnected()) return Promise.resolve(isConnected());
 
         const runStart = (async () => {
-            let shouldScheduleRetry = false;
             try {
                 await connection.start();
                 if (isTerminated) return false;
@@ -1033,14 +1106,13 @@ export function createSignalRClient({
                 if (!isTerminated) {
                     needsReconcileOnStart = true;
                     setStatus('disconnected', 'Disconnected from chat. Retrying...');
-                    shouldScheduleRetry = true;
                 }
                 return false;
             } finally {
                 if (startInFlight === runStart) {
                     startInFlight = null;
                 }
-                if (!isTerminated && (shouldScheduleRetry || !isConnected())) {
+                if (!isTerminated && isDisconnected()) {
                     scheduleReconnect();
                 }
             }

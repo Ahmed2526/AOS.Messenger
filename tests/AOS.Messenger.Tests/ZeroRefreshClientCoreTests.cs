@@ -1,5 +1,3 @@
-using System.Diagnostics;
-using System.Text;
 using Xunit;
 
 namespace AOS.Messenger.Tests;
@@ -25,51 +23,6 @@ public sealed class ZeroRefreshClientCoreTests
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         Assert.True(File.Exists(path), $"JS module not found: {path}");
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeModuleScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardInputEncoding = new UTF8Encoding(false),
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start node process for ES module verification.");
-
-        var outputBuilder = new StringBuilder();
-        var errorBuilder = new StringBuilder();
-        process.OutputDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) outputBuilder.AppendLine(e.Data);
-        };
-        process.ErrorDataReceived += (_, e) =>
-        {
-            if (e.Data is not null) errorBuilder.AppendLine(e.Data);
-        };
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        if (!process.WaitForExit(15000))
-        {
-            try { process.Kill(entireProcessTree: true); } catch { }
-            throw new TimeoutException("Node ES module verification timed out.");
-        }
-
-        process.WaitForExit();
-        return (process.ExitCode, outputBuilder.ToString(), errorBuilder.ToString());
     }
 
     private const string MockDomPrelude = """
@@ -305,7 +258,7 @@ public sealed class ZeroRefreshClientCoreTests
         """;
 
     [Fact]
-    public void ChatState_ManagesEpochs_PendingBuffer_LruDrafts_AndFullWipe()
+    public async Task ChatState_ManagesEpochs_PendingBuffer_LruDrafts_AndFullWipe()
     {
         var statePath = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-state.js");
         var nonCommentSource = string.Join("\n", File.ReadAllLines(statePath)
@@ -374,12 +327,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void ApiClient_HandlesAuth_Csrf_204_ProblemDetails_AndRateLimits()
+    public async Task ApiClient_HandlesAuth_Csrf_204_ProblemDetails_AndRateLimits()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -497,12 +450,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void ChatRouter_EnforcesGuards_AbortEpochRace_IdentityCheck_Popstate_AndPagination()
+    public async Task ChatRouter_EnforcesGuards_AbortEpochRace_IdentityCheck_Popstate_AndPagination()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -699,12 +652,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void MessageRenderer_OrdersDeterministically_SanitizesXss_SyncsAllHeaderForms_AndWipesSidebar()
+    public async Task MessageRenderer_OrdersDeterministically_SanitizesXss_SyncsAllHeaderForms_AndWipesSidebar()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -870,12 +823,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void Phase7And8Modules_SupportDynamicConversationId_AndResetForSwitch()
+    public async Task Phase7And8Modules_SupportDynamicConversationId_AndResetForSwitch()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -970,12 +923,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void Presence_RequiresMatchingNonEmptyPeerId_AndSupportsSkipInitialFetch()
+    public async Task Presence_RequiresMatchingNonEmptyPeerId_AndSupportsSkipInitialFetch()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -1080,12 +1033,12 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 
     [Fact]
-    public void MessageActions_And_MessageRenderer_CleanupVideosObserversAndGuardEmptyPlaceholder()
+    public async Task MessageActions_And_MessageRenderer_CleanupVideosObserversAndGuardEmptyPlaceholder()
     {
         var script = $$"""
             import assert from 'node:assert/strict';
@@ -1208,9 +1161,15 @@ public sealed class ZeroRefreshClientCoreTests
             container.appendChild(vRow);
             hydrateMediaElements(vRow);
 
+            container.setAttribute('data-has-more', 'true');
             renderMessages(container, [], 'u1');
             assert.equal(disconnectedObservers.length, 1);
             assert.equal(v2Paused, 1);
+            assert.equal(emptyPlaceholder.classList.contains('hidden'), true, 'Placeholder must remain hidden when data-has-more="true"');
+
+            container.setAttribute('data-has-more', 'false');
+            renderMessages(container, [], 'u1');
+            assert.equal(emptyPlaceholder.classList.contains('hidden'), false, 'Placeholder must show when empty and data-has-more="false"');
 
             const vid3 = dom.document.createElement('video');
             let v3Paused = 0;
@@ -1224,7 +1183,7 @@ public sealed class ZeroRefreshClientCoreTests
             console.log('OK');
             """;
 
-        var (exitCode, output, error) = RunNodeModuleScript(script);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(script);
         Assert.True(exitCode == 0, $"Node failed ({exitCode}): {error}\n{output}");
     }
 }

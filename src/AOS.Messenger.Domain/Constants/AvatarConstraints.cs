@@ -48,15 +48,21 @@ public static class AvatarConstraints
 
         if (!string.IsNullOrWhiteSpace(declaredContentType))
         {
-            var trimmedMime = declaredContentType.Trim();
-            if (trimmedMime.Length > MediaConstraints.MaxDeclaredContentTypeLength)
+            if (declaredContentType.Length > MediaConstraints.MaxDeclaredContentTypeLength)
             {
                 throw new DomainException($"Content type cannot exceed {MediaConstraints.MaxDeclaredContentTypeLength} characters.");
             }
 
-            if (!spec.AllowedDeclaredMimes.Contains(trimmedMime))
+            var semiIdx = declaredContentType.IndexOf(';');
+            var normalizedMime = (semiIdx >= 0 ? declaredContentType[..semiIdx] : declaredContentType)
+                .Trim()
+                .ToLowerInvariant();
+
+            if (!string.IsNullOrEmpty(normalizedMime)
+                && !string.Equals(normalizedMime, "application/octet-stream", StringComparison.Ordinal)
+                && !spec.AllowedDeclaredMimes.Contains(normalizedMime))
             {
-                throw new DomainException($"Content type '{trimmedMime}' is not valid for '{ext}' profile photos.");
+                throw new DomainException($"Declared content type is not valid for '{ext}' profile photos.");
             }
         }
 

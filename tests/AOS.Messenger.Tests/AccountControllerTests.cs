@@ -13,6 +13,8 @@ public sealed class AccountControllerTests
     private sealed class FakeIdentityService : IIdentityService
     {
         public bool LoginResult { get; set; } = true;
+        public bool LoginIsLockedOut { get; set; }
+        public string? LoginError { get; set; } = "Invalid credentials.";
         public bool RegisterResult { get; set; } = true;
         public bool ConfirmEmailCalled { get; private set; }
 
@@ -24,9 +26,11 @@ public sealed class AccountControllerTests
 
         public Task<(bool Succeeded, bool RequiresTwoFactor, bool IsLockedOut, bool IsDeleted, string? Error)> LoginAsync(
             LoginUserDto dto, string? ipAddress, string? userAgent, CancellationToken ct = default) =>
-            Task.FromResult(LoginResult
-                ? (true, false, false, false, (string?)null)
-                : (false, false, false, false, (string?)"Invalid credentials."));
+            Task.FromResult(LoginIsLockedOut
+                ? (false, false, true, false, (string?)null)
+                : LoginResult
+                    ? (true, false, false, false, (string?)null)
+                    : (false, false, false, false, LoginError));
 
         public Task LogoutAsync(CancellationToken ct = default) => Task.CompletedTask;
         public Task<bool> SoftDeleteAccountAsync(UserId userId, CancellationToken ct = default) => Task.FromResult(true);
@@ -585,6 +589,61 @@ public sealed class AccountControllerTests
         var entry = Assert.Single(logger.Entries);
         Assert.Equal(Microsoft.Extensions.Logging.LogLevel.Warning, entry.Level);
         Assert.Contains(userId.Value.ToString(), entry.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Login_WhenLockedOut_ReturnsIdenticalGenericErrorAsWrongPassword_AndPostMutationsRequireFromForm()
+    {
+        var (lockoutController, _, _, _) = CreateController();
+        var (wrongPwController, _, _, _) = CreateController();
+
+        // Swap FakeIdentityService via dedicated controller instances built like CreateController
+        var lockoutSvc = new FakeIdentityService { LoginIsLockedOut = true };
+        var wrongPwSvc = new FakeIdentityService { LoginResult = false, LoginError = "Invalid username or password." };
+        var lockoutHttp = new DefaultHttpContext();
+        lockoutController = new AccountController(
+            lockoutSvc,
+            new FakeSessionService(),
+            new FakeCurrentUser(),
+            new FakeEmailSender(),
+            logger: new RecordingAccountLogger())
+        {
+            ControllerContext = new ControllerContext { HttpContext = lockoutHttp },
+            Url = new TestUrlHelper(),
+            TempData = new Microsoft.AspNetCore.Mvc.ViewFeatures.TempDataDictionary(lockoutHttp, new FakeTempDataProvider())
+        };
+
+        var wrongPwHttp = new DefaultHttpContext();
+        wrongPwController = new AccountController(
+            wrongPwSvc,
+            new FakeSessionService(),
+            new FakeCurrentUser(),
+            new FakeEmailSender(),
+            logger: new RecordingAccountLogger())
+        {
+            ControllerContext = new ControllerContext { HttpContext = wrongPwHttp },
+            Url = new TestUrlHelper(),
+            TempData = new Microsoft.AspNetCore.Mvc.ViewFeatures.TempDataDictionary(wrongPwHttp, new FakeTempDataProvider())
+        };
+
+        await lockoutController.Login(new LoginViewModel { UserNameOrEmail = "locked", Password = "Wrong1!" });
+        await wrongPwController.Login(new LoginViewModel { UserNameOrEmail = "normal", Password = "Wrong1!" });
+
+        var lockoutErr = Assert.Single(lockoutController.ModelState[string.Empty]!.Errors).ErrorMessage;
+        var wrongPwErr = Assert.Single(wrongPwController.ModelState[string.Empty]!.Errors).ErrorMessage;
+        Assert.Equal("Invalid username or password.", lockoutErr);
+        Assert.Equal(wrongPwErr, lockoutErr);
+
+        // Verify email-triggering/sensitive POST actions strictly bind from [FromForm]
+        foreach (var methodName in new[] { "Register", "ConfirmEmail", "ForgotPassword", "ResetPassword", "RecoverAccount", "ConfirmRecovery" })
+        {
+            var postMethod = typeof(AccountController).GetMethods()
+                .Single(m => m.Name == methodName && m.IsDefined(typeof(HttpPostAttribute), false));
+            var parameters = postMethod.GetParameters().Where(p => p.ParameterType != typeof(CancellationToken)).ToArray();
+            Assert.NotEmpty(parameters);
+            Assert.All(parameters, p => Assert.True(p.IsDefined(typeof(FromFormAttribute), false),
+                $"{methodName} parameter '{p.Name}' must carry [FromForm]."));
+        }
     }
 
     private sealed class ThrowingRealtimeNotifier : IRealtimeNotifier

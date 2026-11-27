@@ -129,11 +129,6 @@ public sealed class AvatarService : IAvatarService
             throw new DomainException(upload.FailureReason ?? "Profile photo verification failed.");
         }
 
-        if (upload.State == MediaState.Deleted)
-        {
-            throw new ConflictException("Avatar upload was already cancelled.");
-        }
-
         if (upload.State != MediaState.Uploaded)
         {
             return null;
@@ -165,17 +160,12 @@ public sealed class AvatarService : IAvatarService
         if (upload.State == MediaState.Uploaded)
         {
             var profile = await _userReader.GetByIdAsync(callerId, ct);
-            return new AvatarUpdatedResponseDto(profile?.AvatarVersion, _timeProvider.GetUtcNow());
+            return new AvatarUpdatedResponseDto(profile?.AvatarVersion, upload.CompletedAtUtc ?? _timeProvider.GetUtcNow());
         }
 
         if (upload.State == MediaState.Failed)
         {
             throw new DomainException(upload.FailureReason ?? "Profile photo verification failed.");
-        }
-
-        if (upload.State == MediaState.Deleted)
-        {
-            throw new ConflictException("Avatar upload was already cancelled.");
         }
 
         var stagingKey = upload.ObjectKey;
@@ -185,8 +175,21 @@ public sealed class AvatarService : IAvatarService
             var nowUtc = _timeProvider.GetUtcNow();
             upload.MarkFailed("Uploaded avatar object was not found in staging storage.", nowUtc);
             upload.MarkPurged(nowUtc);
-            await _avatarPersistence.UpdatePendingAsync(upload, ct);
+            try
+            {
+                await _avatarPersistence.UpdatePendingAsync(upload, ct);
+            }
+            catch (ConflictException ex)
+            {
+                return await HandleConcurrentConflictAsync(uploadId, callerId, ex.Message, ct);
+            }
+
             throw new DomainException("Uploaded file was not found in staging storage. Please upload again.");
+        }
+
+        if (string.IsNullOrWhiteSpace(stagingMeta.ETag))
+        {
+            throw new MediaStorageException("Uploaded avatar metadata is missing required ETag.");
         }
 
         if (stagingMeta.ContentLength <= 0
@@ -199,12 +202,18 @@ public sealed class AvatarService : IAvatarService
                     ? "Uploaded file size does not match the initiated upload size."
                     : $"Profile photo size exceeds maximum allowed {AvatarConstraints.MaxRawAvatarUploadBytes} bytes.";
 
-            await FailAndCleanStagingAsync(
+            var recovered = await FailAndCleanStagingAsync(
                 upload,
+                callerId,
                 stagingKey,
                 failureMessage,
                 stagingMeta.ContentLength > 0 ? stagingMeta.ContentLength : null,
                 ct);
+            if (recovered is not null)
+            {
+                return recovered;
+            }
+
             throw new DomainException(failureMessage);
         }
 
@@ -215,7 +224,12 @@ public sealed class AvatarService : IAvatarService
         }
         catch (DomainException ex)
         {
-            await FailAndCleanStagingAsync(upload, stagingKey, ex.Message, stagingMeta.ContentLength, ct);
+            var recovered = await FailAndCleanStagingAsync(upload, callerId, stagingKey, ex.Message, stagingMeta.ContentLength, ct);
+            if (recovered is not null)
+            {
+                return recovered;
+            }
+
             throw;
         }
         catch (Exception ex) when (ex is NotFoundException or ConflictException)
@@ -287,18 +301,41 @@ public sealed class AvatarService : IAvatarService
                 committedAtUtc,
                 ct);
         }
-        catch (Exception ex) when (ex is NotFoundException or ConflictException)
+        catch (Exception ex) when (ex is NotFoundException or ConflictException or DomainException)
         {
+            PendingAvatarUpload? persistedUpload = null;
+            UserAvatarMetadata? liveMetadata = null;
             try
             {
-                return await HandleConcurrentConflictAsync(uploadId, callerId, ex.Message, ct);
+                persistedUpload = await _avatarPersistence.GetPendingByIdNoTrackingAsync(uploadId, CancellationToken.None);
+                liveMetadata = await _avatarPersistence.GetUserAvatarMetadataAsync(callerId, CancellationToken.None);
             }
-            finally
+            catch (Exception lookupEx) when (lookupEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(lookupEx, "Failed to inspect live avatar state during conflict cleanup for upload {UploadId}.", uploadId.Value);
+            }
+
+            if (liveMetadata is null || !string.Equals(liveMetadata.FullObjectKey, fullKey, StringComparison.Ordinal))
             {
                 await BestEffortDeleteStorageAsync(fullKey, CancellationToken.None);
+            }
+
+            if (liveMetadata is null || !string.Equals(liveMetadata.ThumbObjectKey, thumbKey, StringComparison.Ordinal))
+            {
                 await BestEffortDeleteStorageAsync(thumbKey, CancellationToken.None);
+            }
+
+            if (persistedUpload is not null && persistedUpload.State != MediaState.Pending)
+            {
                 await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None);
             }
+
+            if (ex is DomainException)
+            {
+                throw;
+            }
+
+            return await HandleConcurrentConflictAsync(uploadId, callerId, ex.Message, ct, persistedUpload);
         }
         // Other persistence errors can leave the commit outcome unknown. Keep staging for retry
         // and let the orphan sweep remove any permanent objects that are not referenced.
@@ -417,8 +454,9 @@ public sealed class AvatarService : IAvatarService
             variant == AvatarSizeVariant.Full ? "full" : "thumb");
     }
 
-    private async Task FailAndCleanStagingAsync(
+    private async Task<AvatarUpdatedResponseDto?> FailAndCleanStagingAsync(
         PendingAvatarUpload upload,
+        UserId callerId,
         string stagingKey,
         string failureReason,
         long? verifiedSizeBytes,
@@ -433,7 +471,14 @@ public sealed class AvatarService : IAvatarService
         }
         catch (ConflictException)
         {
-            return;
+            var reloaded = await _avatarPersistence.GetPendingByIdNoTrackingAsync(upload.Id, ct);
+            if (reloaded is not null && reloaded.State == MediaState.Uploaded)
+            {
+                var profile = await _userReader.GetByIdAsync(callerId, ct);
+                return new AvatarUpdatedResponseDto(profile?.AvatarVersion, reloaded.CompletedAtUtc ?? _timeProvider.GetUtcNow());
+            }
+
+            return null;
         }
 
         if (await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None))
@@ -447,19 +492,22 @@ public sealed class AvatarService : IAvatarService
             {
             }
         }
+
+        return null;
     }
 
     private async Task<AvatarUpdatedResponseDto> HandleConcurrentConflictAsync(
         AvatarUploadId uploadId,
         UserId callerId,
         string conflictMessage,
-        CancellationToken ct)
+        CancellationToken ct,
+        PendingAvatarUpload? preloaded = null)
     {
-        var reloaded = await _avatarPersistence.GetPendingByIdNoTrackingAsync(uploadId, ct);
+        var reloaded = preloaded ?? await _avatarPersistence.GetPendingByIdNoTrackingAsync(uploadId, ct);
         if (reloaded is not null && reloaded.State == MediaState.Uploaded)
         {
             var profile = await _userReader.GetByIdAsync(callerId, ct);
-            return new AvatarUpdatedResponseDto(profile?.AvatarVersion, _timeProvider.GetUtcNow());
+            return new AvatarUpdatedResponseDto(profile?.AvatarVersion, reloaded.CompletedAtUtc ?? _timeProvider.GetUtcNow());
         }
 
         if (reloaded is not null && reloaded.State == MediaState.Failed)

@@ -254,10 +254,7 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
 
         isSending = true;
         closeEmojiOverlays();
-        const emojiBtn = getEmojiBtn();
-        if (sendBtn) sendBtn.disabled = true;
-        if (emojiBtn) emojiBtn.disabled = true;
-        inputEl.disabled = true;
+        syncDisabledState();
 
         if (typingEmitter && typeof typingEmitter.stopTyping === 'function') {
             typingEmitter.stopTyping();
@@ -336,16 +333,10 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         } finally {
             if (epoch === state.switchEpoch) {
                 isSending = false;
-                const currentSendBtn = getSendBtn();
-                const currentEmojiBtn = getEmojiBtn();
+                syncDisabledState();
                 const currentInput = getInputEl();
-                if (currentSendBtn) currentSendBtn.disabled = locked;
-                if (currentEmojiBtn) currentEmojiBtn.disabled = locked;
-                if (currentInput) {
-                    currentInput.disabled = locked;
-                    if (!locked && typeof currentInput.focus === 'function') {
-                        currentInput.focus();
-                    }
+                if (currentInput && !locked && typeof currentInput.focus === 'function') {
+                    currentInput.focus();
                 }
             }
         }
@@ -459,6 +450,18 @@ export function createComposer({ state, typingEmitter = null, emojiPicker = null
         if (!inputEl || !emojiBtn || inputEl.disabled) return;
         if (emojiAutocomplete && typeof emojiAutocomplete.close === 'function') {
             emojiAutocomplete.close();
+        }
+        const attachMenu = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('composer-attach-menu')
+            : null;
+        if (attachMenu && attachMenu.classList) {
+            attachMenu.classList.add('hidden');
+        }
+        const attachBtn = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('composer-attach-btn')
+            : null;
+        if (attachBtn && typeof attachBtn.setAttribute === 'function') {
+            attachBtn.setAttribute('aria-expanded', 'false');
         }
         if (emojiPicker && typeof emojiPicker.toggle === 'function') {
             emojiPicker.toggle(emojiBtn, inputEl, { surface: 'composer', initialMode: 'emoji' });

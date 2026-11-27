@@ -274,4 +274,90 @@ public sealed class Phase9MediaDomainTests
         Assert.Throws<DomainException>(() => MediaConstraints.ResolveAllowedMedia(oversizedFileName, "image/png"));
         Assert.Throws<DomainException>(() => MediaConstraints.ResolveAllowedMedia("photo.png", oversizedMime));
     }
+
+    [Fact]
+    public void Media_MarkUploaded_RejectsOver33Megapixels()
+    {
+        var media = Media.CreatePending(
+            UserId.New(),
+            ConversationId.New(),
+            MediaKind.Image,
+            "huge.png",
+            "image/png",
+            2048,
+            DateTimeOffset.UtcNow);
+
+        var objId = MediaConstraints.GenerateStorageObjectId();
+        Assert.Throws<DomainException>(() =>
+            media.MarkUploaded(
+                $"media/{objId}",
+                "image/png",
+                1024,
+                7000,
+                5000,
+                null,
+                DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
+    public void Sticker_MarkReadyAndMarkPurged_EnforceKeyDimensionsOutputBudgetAndStateInvariants()
+    {
+        var packId = StickerPackId.New();
+        var uploaderId = UserId.New();
+        var now = DateTimeOffset.UtcNow;
+
+        Assert.Throws<DomainException>(() =>
+            Sticker.CreatePendingCustom(packId, uploaderId, new string('x', 129), 1024, "😀", 1, now));
+        Assert.Throws<DomainException>(() =>
+            Sticker.CreatePendingCustom(packId, uploaderId, "image/png", 1024, "😀", -1, now));
+
+        var pending = Sticker.CreatePendingCustom(packId, uploaderId, "image/png", 1024, "😀", 1, now);
+        var permId = MediaConstraints.GenerateStorageObjectId();
+        var otherPermId = MediaConstraints.GenerateStorageObjectId();
+
+        // Key mismatch must fail
+        Assert.Throws<DomainException>(() =>
+            pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{otherPermId}", 100, 512, 512, false, now));
+
+        // Dimension bounds
+        Assert.Throws<DomainException>(() =>
+            pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{permId}", 100, 0, 512, false, now));
+        Assert.Throws<DomainException>(() =>
+            pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{permId}", 100, 512, StickerConstraints.CanonicalStickerSize + 1, false, now));
+
+        // Output byte ceiling for static & animated WebP
+        Assert.Throws<DomainException>(() =>
+            pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{permId}", StickerConstraints.MaxStaticWebpOutputBytes + 1, 512, 512, false, now));
+        Assert.Throws<DomainException>(() =>
+            pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{permId}", StickerConstraints.MaxAnimatedWebpOutputBytes + 1, 512, 512, true, now));
+
+        // MarkPurged disallowed from Pending or Ready
+        Assert.Throws<DomainException>(() => pending.MarkPurged(now));
+
+        pending.MarkReady(permId, $"{MediaConstraints.StickerKeyPrefix}{permId}", 2048, 512, 512, false, now);
+        Assert.Throws<DomainException>(() => pending.MarkPurged(now));
+
+        pending.MarkArchived(now.AddMinutes(1));
+        pending.MarkPurged(now.AddMinutes(2));
+        Assert.NotNull(pending.PurgedAtUtc);
+    }
+
+    [Fact]
+    public void AvatarAndStickerConstraints_NormalizeMimeParametersAndOctetStream_WithoutEchoingRawInput()
+    {
+        Assert.Equal("image/png", AvatarConstraints.ResolveAllowedAvatarUpload("avatar.png", "image/png; charset=binary"));
+        Assert.Equal("image/webp", AvatarConstraints.ResolveAllowedAvatarUpload("avatar.webp", "application/octet-stream"));
+
+        Assert.Equal("image/png", StickerConstraints.ResolveAllowedStickerUpload("sticker.png", "image/png; name=\"s.png\""));
+        Assert.Equal("image/gif", StickerConstraints.ResolveAllowedStickerUpload("sticker.gif", "application/octet-stream"));
+
+        const string sentinel = "evil-echo-marker/custom";
+        var avatarEx = Assert.Throws<DomainException>(() =>
+            AvatarConstraints.ResolveAllowedAvatarUpload("avatar.png", sentinel));
+        Assert.DoesNotContain(sentinel, avatarEx.Message, StringComparison.OrdinalIgnoreCase);
+
+        var stickerEx = Assert.Throws<DomainException>(() =>
+            StickerConstraints.ResolveAllowedStickerUpload("sticker.png", sentinel));
+        Assert.DoesNotContain(sentinel, stickerEx.Message, StringComparison.OrdinalIgnoreCase);
+    }
 }

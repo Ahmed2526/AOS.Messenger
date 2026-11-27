@@ -217,28 +217,45 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             throw new NotFoundException("Media object", "staged");
         }
 
-        if (!string.IsNullOrWhiteSpace(ifMatchETag))
-        {
-            var currentETag = await ComputeETagAsync(stagingPath, ct);
-            if (!string.Equals(currentETag, ifMatchETag.Trim(), StringComparison.Ordinal))
-            {
-                throw new ConflictException("The staged media object changed concurrently during promotion.");
-            }
-        }
-
         var permanentPath = ResolveSafePath(permanentKey);
         Directory.CreateDirectory(Path.GetDirectoryName(permanentPath)!);
 
         var tempPath = $"{permanentPath}.{Guid.NewGuid():N}.tmp";
         try
         {
+            var expectedETag = string.IsNullOrWhiteSpace(ifMatchETag) ? null : ifMatchETag.Trim();
+            using var sha256 = expectedETag is not null
+                ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256)
+                : null;
+
             await using (var src = new FileStream(stagingPath, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, useAsync: true))
             await using (var dst = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
-                await src.CopyToAsync(dst, ct);
+                var buffer = new byte[81920];
+                int read;
+                while ((read = await src.ReadAsync(buffer.AsMemory(), ct)) > 0)
+                {
+                    sha256?.AppendData(buffer, 0, read);
+                    await dst.WriteAsync(buffer.AsMemory(0, read), ct);
+                }
+            }
+
+            if (sha256 is not null)
+            {
+                var currentETag = $"\"{Convert.ToHexStringLower(sha256.GetHashAndReset())}\"";
+                if (!string.Equals(currentETag, expectedETag, StringComparison.Ordinal))
+                {
+                    TryDeleteFileQuietly(tempPath);
+                    throw new ConflictException("The staged media object changed concurrently during promotion.");
+                }
             }
 
             File.Move(tempPath, permanentPath, overwrite: false);
+        }
+        catch (FileNotFoundException)
+        {
+            TryDeleteFileQuietly(tempPath);
+            throw new NotFoundException("Media object", "staged");
         }
         catch (IOException ex) when (File.Exists(permanentPath))
         {

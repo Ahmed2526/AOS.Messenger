@@ -260,6 +260,8 @@ namespace AOS.Messenger.Infrastructure.Migrations
                         .HasDatabaseName("IX_Messages_StickerId")
                         .HasFilter("[StickerId] IS NOT NULL");
 
+                    SqlServerIndexBuilderExtensions.IncludeProperties(b.HasIndex("StickerId"), new[] { "ConversationId", "CreatedAtUtc", "IsDeletedForEveryone" });
+
                     b.HasIndex("ConversationId", "Id")
                         .IsUnique();
 

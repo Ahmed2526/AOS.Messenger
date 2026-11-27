@@ -75,53 +75,37 @@ public sealed class AvatarPersistence : IAvatarPersistence
                     $"You have reached the maximum of {maxConcurrentPending} concurrent pending uploads.");
             }
 
-            var mediaUsedBytes = await _db.Media
-                .Where(m => m.UploaderId == upload.UserId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => m.State == MediaState.Failed
-                    ? (long?)(m.VerifiedSizeBytes ?? 0L)
-                    : (long?)(m.VerifiedSizeBytes ?? m.DeclaredSizeBytes), ct) ?? 0L;
+            var (totalUsedBytes, totalInitiatedBytes) = await QuotaAccountingQueries.GetDailyQuotaUsageAsync(
+                _db,
+                upload.UserId,
+                dailyQuotaWindowStartUtc,
+                ct);
 
-            var avatarUsedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == upload.UserId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => p.State == MediaState.Failed
-                    ? (long?)(p.VerifiedSizeBytes ?? 0L)
-                    : (long?)(p.VerifiedSizeBytes ?? p.DeclaredSizeBytes), ct) ?? 0L;
-
-            var stickerUsedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == upload.UserId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => s.State == StickerState.Failed
-                    ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : s.State == StickerState.Ready || s.State == StickerState.Archived
-                        ? (long?)s.DeclaredSizeBytes
-                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
-
-            var totalUsedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
             if (upload.DeclaredSizeBytes > dailyQuotaBytes - totalUsedBytes)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
             }
 
-            var mediaInitiatedBytes = await _db.Media
-                .Where(m => m.UploaderId == upload.UserId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => (long?)m.DeclaredSizeBytes, ct) ?? 0L;
-
-            var avatarInitiatedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == upload.UserId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => (long?)p.DeclaredSizeBytes, ct) ?? 0L;
-
-            var stickerInitiatedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == upload.UserId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => (long?)s.DeclaredSizeBytes, ct) ?? 0L;
-
             var maxInitiatedBytes = dailyQuotaBytes <= long.MaxValue / 2
                 ? dailyQuotaBytes * 2
                 : long.MaxValue;
 
-            if (upload.DeclaredSizeBytes > maxInitiatedBytes - (mediaInitiatedBytes + avatarInitiatedBytes + stickerInitiatedBytes))
+            if (upload.DeclaredSizeBytes > maxInitiatedBytes - totalInitiatedBytes)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
+            }
+
+            var latestAvatarUpdatedAtUtc = await _db.Users
+                .AsNoTracking()
+                .Where(u => u.Id == upload.UserId.Value)
+                .Select(u => u.AvatarUpdatedAtUtc)
+                .FirstOrDefaultAsync(ct);
+
+            if (latestAvatarUpdatedAtUtc.HasValue)
+            {
+                upload.EnsureCreatedAfter(latestAvatarUpdatedAtUtc.Value);
             }
 
             _db.PendingAvatarUploads.Add(upload);
@@ -180,16 +164,52 @@ public sealed class AvatarPersistence : IAvatarPersistence
         ArgumentNullException.ThrowIfNull(upload);
 
         AvatarCommitResult? result = null;
+        string? firstAttemptPrevFull = null;
+        string? firstAttemptPrevThumb = null;
         var strategy = _db.Database.CreateExecutionStrategy();
         var commitAttempted = false;
         try
         {
             await strategy.ExecuteAsync(CommitAsync);
         }
-        catch (Exception ex) when (commitAttempted && (ex is NotFoundException or ConflictException))
+        catch (Exception ex) when (ex is DbUpdateException or SqlException)
         {
-            // A retry can observe a completed upload after the original commit response was lost.
-            throw new InvalidOperationException("The avatar commit outcome could not be confirmed.", ex);
+            if (commitAttempted)
+            {
+                try
+                {
+                    _db.ChangeTracker.Clear();
+                    var trackedUpload = await _db.PendingAvatarUploads
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(p => p.Id == upload.Id, CancellationToken.None);
+                    var committedUser = await _db.Users
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(u => u.Id == upload.UserId.Value, CancellationToken.None);
+
+                    if (trackedUpload?.State == MediaState.Uploaded
+                        && committedUser is not null
+                        && !committedUser.IsDeleted
+                        && committedUser.EmailConfirmed)
+                    {
+                        var appliedByThisUpload =
+                            string.Equals(committedUser.AvatarObjectKey, fullObjectKey, StringComparison.Ordinal)
+                            && string.Equals(committedUser.AvatarThumbnailObjectKey, thumbObjectKey, StringComparison.Ordinal);
+
+                        return new AvatarCommitResult(
+                            Applied: appliedByThisUpload,
+                            DisplayName: committedUser.DisplayName,
+                            CurrentAvatarVersion: committedUser.AvatarVersion,
+                            PreviousFullObjectKey: appliedByThisUpload ? firstAttemptPrevFull : null,
+                            PreviousThumbObjectKey: appliedByThisUpload ? firstAttemptPrevThumb : null);
+                    }
+                }
+                catch (Exception recoveryEx) when (recoveryEx is DbUpdateException or SqlException)
+                {
+                    // Fall through to ConflictException without leaking raw SQL exceptions.
+                }
+            }
+
+            throw new ConflictException("The avatar commit could not be confirmed due to a concurrent update or database error. Please try again.", ex);
         }
 
         return result!;
@@ -206,6 +226,37 @@ public sealed class AvatarPersistence : IAvatarPersistence
             if (trackedUpload is null)
             {
                 throw new NotFoundException("AvatarUpload", upload.Id.Value);
+            }
+
+            if (trackedUpload.State == MediaState.Uploaded && commitAttempted)
+            {
+                var committedUser = await _db.Users
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(u => u.Id == trackedUpload.UserId.Value, ct);
+
+                if (committedUser is null || committedUser.IsDeleted || !committedUser.EmailConfirmed)
+                {
+                    throw new NotFoundException("User", trackedUpload.UserId.Value);
+                }
+
+                var appliedByThisUpload =
+                    string.Equals(committedUser.AvatarObjectKey, fullObjectKey, StringComparison.Ordinal)
+                    && string.Equals(committedUser.AvatarThumbnailObjectKey, thumbObjectKey, StringComparison.Ordinal);
+
+                await tx.CommitAsync(ct);
+
+                result = new AvatarCommitResult(
+                    Applied: appliedByThisUpload,
+                    DisplayName: committedUser.DisplayName,
+                    CurrentAvatarVersion: committedUser.AvatarVersion,
+                    PreviousFullObjectKey: appliedByThisUpload ? firstAttemptPrevFull : null,
+                    PreviousThumbObjectKey: appliedByThisUpload ? firstAttemptPrevThumb : null);
+                return;
+            }
+
+            if (trackedUpload.State == MediaState.Failed)
+            {
+                throw new DomainException(trackedUpload.FailureReason ?? "Profile photo verification failed.");
             }
 
             if (trackedUpload.State != MediaState.Pending)
@@ -251,6 +302,8 @@ public sealed class AvatarPersistence : IAvatarPersistence
 
             var prevFull = user.AvatarObjectKey;
             var prevThumb = user.AvatarThumbnailObjectKey;
+            firstAttemptPrevFull ??= prevFull;
+            firstAttemptPrevThumb ??= prevThumb;
 
             user.AvatarObjectKey = fullObjectKey;
             user.AvatarThumbnailObjectKey = thumbObjectKey;
@@ -258,7 +311,7 @@ public sealed class AvatarPersistence : IAvatarPersistence
             user.AvatarSizeBytes = fullSizeBytes;
             user.AvatarThumbnailSizeBytes = thumbSizeBytes;
             user.AvatarVersion = avatarVersion;
-            user.AvatarUpdatedAtUtc = nowUtc;
+            user.AvatarUpdatedAtUtc = nowUtc >= trackedUpload.CreatedAtUtc ? nowUtc : trackedUpload.CreatedAtUtc;
             user.ConcurrencyStamp = Guid.NewGuid().ToString();
 
             try
@@ -315,7 +368,9 @@ public sealed class AvatarPersistence : IAvatarPersistence
             user.AvatarSizeBytes = null;
             user.AvatarThumbnailSizeBytes = null;
             user.AvatarVersion = null;
-            user.AvatarUpdatedAtUtc = nowUtc;
+            user.AvatarUpdatedAtUtc = user.AvatarUpdatedAtUtc.HasValue && user.AvatarUpdatedAtUtc.Value > nowUtc
+                ? user.AvatarUpdatedAtUtc.Value.AddTicks(1)
+                : nowUtc;
             user.ConcurrencyStamp = Guid.NewGuid().ToString();
 
             try
@@ -350,32 +405,5 @@ public sealed class AvatarPersistence : IAvatarPersistence
                 u.AvatarContentType,
                 u.AvatarVersion))
             .FirstOrDefaultAsync(ct);
-    }
-
-    public async Task<IReadOnlyList<UserId>> GetNotifyPeerUserIdsAsync(UserId userId, CancellationToken ct = default)
-    {
-        ArgumentNullException.ThrowIfNull(userId);
-
-        var peerIds = await _db.Conversations
-            .AsNoTracking()
-            .Where(c => c.Participant1Id == userId || c.Participant2Id == userId)
-            .Select(c => c.Participant1Id == userId ? c.Participant2Id : c.Participant1Id)
-            .Distinct()
-            .ToListAsync(ct);
-
-        if (peerIds.Count == 0)
-        {
-            return [];
-        }
-
-        var blockedIds = await _db.UserBlocks
-            .AsNoTracking()
-            .Where(b => b.BlockerId == userId || b.BlockedUserId == userId)
-            .Select(b => b.BlockerId == userId ? b.BlockedUserId : b.BlockerId)
-            .Distinct()
-            .ToListAsync(ct);
-
-        var blockedSet = blockedIds.ToHashSet();
-        return peerIds.Where(id => !blockedSet.Contains(id)).ToList();
     }
 }

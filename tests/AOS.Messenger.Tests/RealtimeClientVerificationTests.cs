@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Reflection;
 using System.Security.Claims;
 using System.Text.RegularExpressions;
@@ -61,35 +60,6 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     {
         var path = Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", fileName);
         return new Uri(path).AbsoluteUri;
-    }
-
-    private static (int ExitCode, string Output, string Error) RunNodeScript(string script)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = "node",
-            Arguments = "--input-type=module -",
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using var process = Process.Start(psi);
-        if (process == null)
-        {
-            throw new InvalidOperationException("Failed to start node process for JavaScript verification.");
-        }
-
-        process.StandardInput.Write(script);
-        process.StandardInput.Close();
-
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
-        process.WaitForExit(10000);
-
-        return (process.ExitCode, output, error);
     }
 
     // =========================================================================
@@ -188,7 +158,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     // =========================================================================
 
     [Fact]
-    public void ChatRealtimeJs_GetMessageId_HandlesMultipleIdRepresentations()
+    public async Task ChatRealtimeJs_GetMessageId_HandlesMultipleIdRepresentations()
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -213,13 +183,13 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log('SUCCESS');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS", output);
     }
 
     [Fact]
-    public void ChatRealtimeJs_IsMessageRendered_ChecksElementIdAndDataAttribute()
+    public async Task ChatRealtimeJs_IsMessageRendered_ChecksElementIdAndDataAttribute()
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -250,7 +220,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log('SUCCESS');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS", output);
     }
@@ -327,7 +297,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     }
 
     [Fact]
-    public void ChatRealtime_SimulatedClientDeduplication_NeverProducesDuplicateMessages_UnderConcurrentRestAndSignalR()
+    public async Task ChatRealtime_SimulatedClientDeduplication_NeverProducesDuplicateMessages_UnderConcurrentRestAndSignalR()
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -425,7 +395,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log('SUCCESS_DEDUPLICATION_VERIFIED');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS_DEDUPLICATION_VERIFIED", output);
     }
@@ -440,7 +410,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     [InlineData("<b>Hello</b> & 'world'", "&lt;b&gt;Hello&lt;/b&gt; &amp; &#39;world&#39;")]
     [InlineData("<img src=x onerror=alert(document.cookie)>", "&lt;img src=x onerror=alert(document.cookie)&gt;")]
     [InlineData("Foo & Bar < Baz > \"Qux\" 'Corge'", "Foo &amp; Bar &lt; Baz &gt; &quot;Qux&quot; &#39;Corge&#39;")]
-    public void ChatRealtimeJs_EscapeHtml_SanitizesSpecialCharacters(string rawInput, string expectedEscaped)
+    public async Task ChatRealtimeJs_EscapeHtml_SanitizesSpecialCharacters(string rawInput, string expectedEscaped)
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -451,7 +421,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log(result);
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Equal(expectedEscaped, output.TrimEnd('\r', '\n'));
     }
@@ -475,7 +445,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
     }
 
     [Fact]
-    public void ChatRealtimeJs_CreateMessageBubbleHtml_DeletedForEveryone_MasksContent()
+    public async Task ChatRealtimeJs_CreateMessageBubbleHtml_DeletedForEveryone_MasksContent()
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -502,13 +472,13 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log('SUCCESS_DELETED_MASKED');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS_DELETED_MASKED", output);
     }
 
     [Fact]
-    public void ChatRealtime_NodeExecution_VerifiesAdversarialXssPayloadsAreInert()
+    public async Task ChatRealtime_NodeExecution_VerifiesAdversarialXssPayloadsAreInert()
     {
         var rendererUrl = JsUrl("message-renderer.js");
 
@@ -558,7 +528,7 @@ public sealed class RealtimeClientVerificationTests : IClassFixture<SqlTestDatab
             console.log('SUCCESS_XSS_DEFENSE_VERIFIED');
         ";
 
-        var (exitCode, output, error) = RunNodeScript(testScript);
+        var (exitCode, output, error) = await NodeTestProcess.RunAsync(testScript);
         Assert.True(exitCode == 0, $"Node script failed with exitCode {exitCode}. Output: {output}. Error: {error}");
         Assert.Contains("SUCCESS_XSS_DEFENSE_VERIFIED", output);
     }

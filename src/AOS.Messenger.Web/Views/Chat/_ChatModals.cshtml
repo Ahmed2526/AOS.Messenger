@@ -65,7 +65,7 @@
         <button type="button" id="media-lightbox-prev-btn" class="hidden absolute left-2 z-10 w-10 h-10 rounded-full bg-black/50 hover:bg-black/75 text-white flex items-center justify-center transition-colors cursor-pointer" title="Previous image" aria-label="Previous image">
             <span class="material-symbols-outlined text-[22px]">chevron_left</span>
         </button>
-        <img id="media-lightbox-img" alt="" class="max-h-[78vh] max-w-[90vw] w-auto h-auto object-contain rounded-lg select-none" />
+        <img id="media-lightbox-img" alt="" draggable="false" class="max-h-[78vh] max-w-[90vw] w-auto h-auto object-contain rounded-lg select-none" />
         <div id="media-lightbox-error" class="hidden px-4 py-3 rounded-xl bg-white/10 text-white text-xs font-medium">Media unavailable</div>
         <button type="button" id="media-lightbox-next-btn" class="hidden absolute right-2 z-10 w-10 h-10 rounded-full bg-black/50 hover:bg-black/75 text-white flex items-center justify-center transition-colors cursor-pointer" title="Next image" aria-label="Next image">
             <span class="material-symbols-outlined text-[22px]">chevron_right</span>
@@ -83,7 +83,7 @@
             </button>
         </div>
         <div class="w-40 h-40 rounded-2xl bg-[#F8F6F3] dark:bg-[#302F2C] border border-[#E3DCD7] dark:border-[#514D48] flex items-center justify-center p-3">
-            <img id="sticker-info-img" alt="Sticker preview" width="512" height="512" decoding="async" class="w-32 h-32 object-contain drop-shadow-sm select-none" />
+            <img id="sticker-info-img" alt="Sticker preview" width="512" height="512" decoding="async" draggable="false" class="w-32 h-32 object-contain drop-shadow-sm select-none" />
         </div>
         <div class="min-w-0 w-full">
             <h3 id="sticker-info-pack-name" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2] truncate">Stickers</h3>
@@ -125,7 +125,7 @@
         <div id="sticker-creator-preview-area" class="hidden flex flex-col items-center gap-3">
             <div class="relative w-52 h-52 rounded-2xl border border-[#E3DCD7] dark:border-[#514D48] overflow-hidden flex items-center justify-center bg-[repeating-conic-gradient(#e5e0db_0%_25%,#f8f6f3_0%_50%)] dark:bg-[repeating-conic-gradient(#3b3835_0%_25%,#2d2b28_0%_50%)] [background-size:16px_16px]">
                 <canvas id="sticker-creator-canvas" width="512" height="512" class="w-full h-full cursor-grab active:cursor-grabbing touch-none"></canvas>
-                <img id="sticker-creator-anim-preview" alt="Animated sticker preview" width="512" height="512" class="hidden w-full h-full object-contain select-none" />
+                <img id="sticker-creator-anim-preview" alt="Animated sticker preview" width="512" height="512" draggable="false" class="hidden w-full h-full object-contain select-none" />
                 <span id="sticker-creator-anim-badge" class="hidden absolute bottom-2 left-2 px-2 py-0.5 rounded-full bg-black/65 text-white text-[10px] font-bold">Animated WebP</span>
             </div>
 
@@ -195,6 +195,25 @@
         <div class="flex items-center justify-end gap-2 pt-1">
             <button type="button" id="sticker-confirm-cancel-btn" class="px-3.5 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-50">Cancel</button>
             <button type="button" id="sticker-confirm-accept-btn" class="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold active:scale-[0.98] transition-all shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Delete</button>
+        </div>
+    </div>
+</div>
+
+<!-- Chat Action Confirmation Modal -->
+<div id="chat-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="chat-confirm-title" aria-describedby="chat-confirm-message" class="hidden fixed inset-0 z-[75] flex items-center justify-center bg-black/55 p-4 backdrop-blur-xs">
+    <div class="bg-white dark:bg-[#3A3835] border border-[#E3DCD7] dark:border-[#514D48] rounded-2xl shadow-xl w-full max-w-sm p-5 flex flex-col gap-3.5">
+        <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-full bg-red-50 dark:bg-red-950/40 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+                <span class="material-symbols-outlined text-[20px]">warning</span>
+            </div>
+            <div class="min-w-0 flex-1">
+                <h3 id="chat-confirm-title" class="text-sm font-bold text-[#2B2725] dark:text-[#F0E9E2]">Confirm action</h3>
+                <p id="chat-confirm-message" class="text-xs text-[#6E6560] dark:text-[#C9C0B9] mt-1 leading-relaxed break-words"></p>
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 pt-1">
+            <button type="button" id="chat-confirm-cancel-btn" class="px-3.5 py-2 rounded-xl border border-[#E3DCD7] dark:border-[#514D48] text-xs font-semibold text-[#6E6560] dark:text-[#C9C0B9] hover:bg-[#F0E9DF] dark:hover:bg-[#45423E] transition-colors cursor-pointer disabled:opacity-50">Cancel</button>
+            <button type="button" id="chat-confirm-accept-btn" class="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold active:scale-[0.98] transition-all shadow-2xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed">Delete</button>
         </div>
     </div>
 </div>

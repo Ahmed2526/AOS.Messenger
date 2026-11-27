@@ -67,7 +67,7 @@ public sealed class StickerService : IStickerService
         var activeFavorites = favorites
             .Where(record => record.Sticker.State == StickerState.Ready
                              && record.Sticker.PurgedAtUtc is null
-                             && !record.Pack.IsDeleted)
+                             && (!record.Pack.IsSystemPack || !record.Pack.IsDeleted))
             .ToList();
 
         var favoriteIds = activeFavorites.Select(f => f.Sticker.Id).ToHashSet();
@@ -99,7 +99,7 @@ public sealed class StickerService : IStickerService
         var recentDtos = recents
             .Where(record => record.Sticker.State == StickerState.Ready
                              && record.Sticker.PurgedAtUtc is null
-                             && !record.Pack.IsDeleted)
+                             && (!record.Pack.IsSystemPack || !record.Pack.IsDeleted))
             .Select(record => ToStickerDto(record.Sticker, record.Pack, callerId, favoriteIds.Contains(record.Sticker.Id)))
             .ToList();
 
@@ -120,11 +120,8 @@ public sealed class StickerService : IStickerService
             throw new NotFoundException("User", callerId.Value);
         }
 
-        var existingPacks = await _stickerPersistence.GetUserCustomPacksAsync(callerId, ct);
-        var nextSortOrder = existingPacks.Count == 0 ? 1 : existingPacks.Max(p => p.SortOrder) + 1;
-
         var authorName = ResolveCustomPackAuthorName(profile);
-        var pack = StickerPack.CreateCustom(callerId, dto.Name, authorName, nextSortOrder, _timeProvider.GetUtcNow());
+        var pack = StickerPack.CreateCustom(callerId, dto.Name, authorName, sortOrder: 0, _timeProvider.GetUtcNow());
 
         var created = await _stickerPersistence.CreateCustomPackWithLimitCheckAsync(
             pack,
@@ -232,14 +229,13 @@ public sealed class StickerService : IStickerService
             targetPack = await _stickerPersistence.GetOrCreateDefaultCustomPackAsync(callerId, authorName, nowUtc, ct);
         }
 
-        var nextOrder = await _stickerPersistence.GetNextDisplayOrderInPackAsync(targetPack.Id, ct);
         var pending = Sticker.CreatePendingCustom(
             targetPack.Id,
             callerId,
             canonicalMime,
             dto.SizeBytes,
             normalizedTags,
-            nextOrder,
+            displayOrder: 0,
             nowUtc);
 
         var created = await _stickerPersistence.TryCreatePendingStickerWithQuotaCheckAsync(
@@ -319,8 +315,21 @@ public sealed class StickerService : IStickerService
             var nowUtc = _timeProvider.GetUtcNow();
             sticker.MarkFailed("Uploaded sticker object was not found in staging storage.", nowUtc);
             sticker.MarkPurged(nowUtc);
-            await _stickerPersistence.UpdateStickerAsync(sticker, ct);
+            try
+            {
+                await _stickerPersistence.UpdateStickerAsync(sticker, ct);
+            }
+            catch (ConflictException ex)
+            {
+                return await HandleConcurrentConflictAsync(stickerId, callerId, ex.Message, ct);
+            }
+
             throw new DomainException("Uploaded sticker file was not found in staging storage. Please upload again.");
+        }
+
+        if (string.IsNullOrWhiteSpace(stagingMeta.ETag))
+        {
+            throw new MediaStorageException("Uploaded sticker metadata is missing a valid ETag.");
         }
 
         if (stagingMeta.ContentLength <= 0
@@ -333,12 +342,18 @@ public sealed class StickerService : IStickerService
                     ? "Uploaded sticker size does not match the initiated upload size."
                     : $"Sticker upload size exceeds maximum allowed {StickerConstraints.MaxRawStickerUploadBytes} bytes.";
 
-            await FailAndCleanStagingAsync(
+            var (recovered, _) = await FailAndCleanStagingAsync(
                 sticker,
+                callerId,
                 stagingKey,
                 failureMessage,
                 stagingMeta.ContentLength > 0 ? stagingMeta.ContentLength : null,
                 ct);
+            if (recovered is not null)
+            {
+                return recovered;
+            }
+
             throw new DomainException(failureMessage);
         }
 
@@ -349,7 +364,18 @@ public sealed class StickerService : IStickerService
         }
         catch (DomainException ex)
         {
-            await FailAndCleanStagingAsync(sticker, stagingKey, ex.Message, stagingMeta.ContentLength, ct);
+            var (recovered, _) = await FailAndCleanStagingAsync(
+                sticker,
+                callerId,
+                stagingKey,
+                ex.Message,
+                stagingMeta.ContentLength,
+                ct);
+            if (recovered is not null)
+            {
+                return recovered;
+            }
+
             throw;
         }
         catch (Exception ex) when (ex is NotFoundException or ConflictException)
@@ -407,7 +433,7 @@ public sealed class StickerService : IStickerService
 
         try
         {
-            await _stickerPersistence.UpdateStickerAsync(sticker, ct);
+            await _stickerPersistence.CommitReadyStickerIfPackActiveAsync(sticker, committedAtUtc, ct);
         }
         catch (Exception ex)
         {
@@ -488,7 +514,41 @@ public sealed class StickerService : IStickerService
         }
 
         var stagingKey = sticker.ObjectKey!;
-        await FailAndCleanStagingAsync(sticker, stagingKey, "Upload cancelled by user.", verifiedSizeBytes: null, ct);
+        long? measuredBytes = null;
+        try
+        {
+            var meta = await _mediaStorage.GetObjectMetadataAsync(stagingKey, ct);
+            if (meta is not null && meta.ContentLength > 0)
+            {
+                measuredBytes = meta.ContentLength;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to inspect staging object metadata while cancelling sticker {StickerId}; falling back to declared bytes.", stickerId.Value);
+            measuredBytes = sticker.DeclaredSizeBytes;
+        }
+
+        var (readyConflictDto, unresolvedConflict) = await FailAndCleanStagingAsync(
+            sticker,
+            callerId,
+            stagingKey,
+            "Upload cancelled by user.",
+            verifiedSizeBytes: measuredBytes,
+            ct);
+        if (readyConflictDto is not null)
+        {
+            throw new ConflictException($"Sticker upload cannot be cancelled from state '{StickerState.Ready}'.");
+        }
+
+        if (unresolvedConflict is not null)
+        {
+            throw unresolvedConflict;
+        }
     }
 
     public async Task ArchiveCustomStickerAsync(
@@ -521,14 +581,14 @@ public sealed class StickerService : IStickerService
         if (record is null
             || record.Sticker.PurgedAtUtc is not null
             || record.Sticker.State != StickerState.Ready
-            || record.Pack.IsDeleted)
+            || (record.Pack.IsSystemPack && record.Pack.IsDeleted))
         {
             throw new NotFoundException("Sticker", dto.StickerId.Value);
         }
 
         var allowed = await _stickerPersistence.CanUserAccessStickerAsync(
             callerId,
-            dto.StickerId,
+            record,
             forSending: false,
             ct);
 
@@ -584,7 +644,7 @@ public sealed class StickerService : IStickerService
 
         var canAccess = await _stickerPersistence.CanUserAccessStickerAsync(
             callerId,
-            stickerId,
+            record,
             forSending: false,
             ct);
 
@@ -712,8 +772,9 @@ public sealed class StickerService : IStickerService
             : trimmed;
     }
 
-    private async Task FailAndCleanStagingAsync(
+    private async Task<(StickerDto? ReadyDto, ConflictException? UnresolvedConflict)> FailAndCleanStagingAsync(
         Sticker sticker,
+        UserId callerId,
         string stagingKey,
         string failureReason,
         long? verifiedSizeBytes,
@@ -726,9 +787,21 @@ public sealed class StickerService : IStickerService
         {
             await _stickerPersistence.UpdateStickerAsync(sticker, ct);
         }
-        catch (ConflictException)
+        catch (ConflictException ex)
         {
-            return;
+            var reloaded = await _stickerPersistence.GetStickerWithPackAsync(sticker.Id, CancellationToken.None);
+            if (reloaded is not null && reloaded.Sticker.State == StickerState.Ready)
+            {
+                var isFav = await _stickerPersistence.IsStickerFavoritedByUserAsync(callerId, sticker.Id, CancellationToken.None);
+                return (ToStickerDto(reloaded.Sticker, reloaded.Pack, callerId, isFav), ex);
+            }
+
+            if (reloaded?.Sticker.State == StickerState.Failed)
+            {
+                return (null, null);
+            }
+
+            return (null, ex);
         }
 
         if (await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None))
@@ -742,6 +815,8 @@ public sealed class StickerService : IStickerService
             {
             }
         }
+
+        return (null, null);
     }
 
     private async Task<StickerDto> HandleConcurrentConflictAsync(

@@ -74,47 +74,17 @@ public sealed class MediaPersistence : IMediaPersistence
                     $"You have reached the maximum of {maxConcurrentPending} concurrent pending uploads.");
             }
 
-            var mediaUsedBytes = await _db.Media
-                .Where(m => m.UploaderId == media.UploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => m.State == MediaState.Failed
-                    ? (long?)(m.VerifiedSizeBytes ?? 0L)
-                    : (long?)(m.VerifiedSizeBytes ?? m.DeclaredSizeBytes), ct) ?? 0L;
-
-            var avatarUsedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == media.UploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => p.State == MediaState.Failed
-                    ? (long?)(p.VerifiedSizeBytes ?? 0L)
-                    : (long?)(p.VerifiedSizeBytes ?? p.DeclaredSizeBytes), ct) ?? 0L;
-
-            var stickerUsedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == media.UploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => s.State == StickerState.Failed
-                    ? (long?)(s.VerifiedSizeBytes ?? 0L)
-                    : s.State == StickerState.Ready || s.State == StickerState.Archived
-                        ? (long?)s.DeclaredSizeBytes
-                        : (long?)(s.VerifiedSizeBytes ?? s.DeclaredSizeBytes), ct) ?? 0L;
-
-            var usedBytes = mediaUsedBytes + avatarUsedBytes + stickerUsedBytes;
+            var (usedBytes, initiatedBytes) = await QuotaAccountingQueries.GetDailyQuotaUsageAsync(
+                _db,
+                media.UploaderId,
+                dailyQuotaWindowStartUtc,
+                ct);
 
             if (media.DeclaredSizeBytes > dailyQuotaBytes - usedBytes)
             {
                 await tx.RollbackAsync(ct);
                 throw new DomainException("Daily upload quota exceeded. Please try again later.");
             }
-
-            var mediaInitiatedBytes = await _db.Media
-                .Where(m => m.UploaderId == media.UploaderId && m.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(m => (long?)m.DeclaredSizeBytes, ct) ?? 0L;
-
-            var avatarInitiatedBytes = await _db.PendingAvatarUploads
-                .Where(p => p.UserId == media.UploaderId && p.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(p => (long?)p.DeclaredSizeBytes, ct) ?? 0L;
-
-            var stickerInitiatedBytes = await _db.Stickers
-                .Where(s => s.UploaderId == media.UploaderId && s.CreatedAtUtc >= dailyQuotaWindowStartUtc)
-                .SumAsync(s => (long?)s.DeclaredSizeBytes, ct) ?? 0L;
-
-            var initiatedBytes = mediaInitiatedBytes + avatarInitiatedBytes + stickerInitiatedBytes;
 
             var maxInitiatedBytes = dailyQuotaBytes <= long.MaxValue / 2
                 ? dailyQuotaBytes * 2
@@ -149,6 +119,60 @@ public sealed class MediaPersistence : IMediaPersistence
         return await _db.Media
             .AsNoTracking()
             .FirstOrDefaultAsync(m => m.Id == id, ct);
+    }
+
+    public async Task<AuthorizedMediaDownloadContext> GetAuthorizedDownloadContextAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        ArgumentNullException.ThrowIfNull(conversationId);
+        ArgumentNullException.ThrowIfNull(messageId);
+        ArgumentNullException.ThrowIfNull(mediaId);
+
+        var row = await _db.Conversations
+            .AsNoTracking()
+            .Where(c => c.Id == conversationId)
+            .Select(c => new
+            {
+                IsParticipant = c.Participant1Id == callerId || c.Participant2Id == callerId,
+                Media = _db.Media
+                    .Where(m => m.Id == mediaId
+                                && m.ConversationId == conversationId
+                                && m.MessageId == messageId
+                                && m.State == MediaState.Attached
+                                && _db.Messages.Any(msg =>
+                                    msg.ConversationId == conversationId
+                                    && msg.Id == messageId
+                                    && !msg.IsDeletedForEveryone
+                                    && !_db.UserMessageDeletions.Any(d =>
+                                        d.ConversationId == conversationId
+                                        && d.MessageId == messageId
+                                        && d.UserId == callerId)
+                                    && !_db.UserConversationStates.Any(s =>
+                                        s.ConversationId == conversationId
+                                        && s.UserId == callerId
+                                        && ((s.ClearedAtUtc != null && msg.CreatedAtUtc < s.ClearedAtUtc)
+                                            || (s.DeletedAtUtc != null && msg.CreatedAtUtc < s.DeletedAtUtc)))))
+                    .FirstOrDefault()
+            })
+            .FirstOrDefaultAsync(ct);
+
+        if (row is null)
+        {
+            return new AuthorizedMediaDownloadContext(
+                ConversationExists: false,
+                IsParticipant: false,
+                Media: null);
+        }
+
+        return new AuthorizedMediaDownloadContext(
+            ConversationExists: true,
+            IsParticipant: row.IsParticipant,
+            Media: row.IsParticipant ? row.Media : null);
     }
 
     public async Task<IReadOnlyDictionary<MessageId, IReadOnlyList<Media>>> GetByMessageIdsAsync(
@@ -207,19 +231,11 @@ public sealed class MediaPersistence : IMediaPersistence
         ArgumentNullException.ThrowIfNull(keys);
 
         var keySet = new HashSet<(ConversationId ConversationId, MessageId MessageId)>();
-        var convIds = new HashSet<ConversationId>();
-        var msgIds = new HashSet<MessageId>();
-
         foreach (var key in keys)
         {
             ArgumentNullException.ThrowIfNull(key.ConversationId);
             ArgumentNullException.ThrowIfNull(key.MessageId);
-
-            if (keySet.Add(key))
-            {
-                convIds.Add(key.ConversationId);
-                msgIds.Add(key.MessageId);
-            }
+            keySet.Add(key);
         }
 
         if (keySet.Count == 0)
@@ -228,37 +244,36 @@ public sealed class MediaPersistence : IMediaPersistence
         }
 
         var grouped = new Dictionary<(ConversationId, MessageId), List<Media>>();
-        foreach (var convChunk in convIds.Chunk(200))
+        foreach (var keyChunk in keySet.Chunk(250))
         {
-            var convChunkList = convChunk.ToList();
-            foreach (var msgChunk in msgIds.Chunk(500))
+            var chunkSet = keyChunk.ToHashSet();
+            var chunkConvIds = chunkSet.Select(k => k.ConversationId).Distinct().ToList();
+            var chunkMsgIds = chunkSet.Select(k => k.MessageId).Distinct().ToList();
+
+            var items = await _db.Media
+                .AsNoTracking()
+                .Where(m => chunkConvIds.Contains(m.ConversationId)
+                            && m.MessageId != null
+                            && chunkMsgIds.Contains(m.MessageId!)
+                            && m.State == MediaState.Attached)
+                .OrderBy(m => m.DisplayOrder)
+                .ToListAsync(ct);
+
+            foreach (var item in items)
             {
-                var msgChunkList = msgChunk.ToList();
-                var items = await _db.Media
-                    .AsNoTracking()
-                    .Where(m => convChunkList.Contains(m.ConversationId)
-                                && m.MessageId != null
-                                && msgChunkList.Contains(m.MessageId!)
-                                && m.State == MediaState.Attached)
-                    .OrderBy(m => m.DisplayOrder)
-                    .ToListAsync(ct);
-
-                foreach (var item in items)
+                var exactKey = (item.ConversationId, item.MessageId!);
+                if (!chunkSet.Contains(exactKey))
                 {
-                    var exactKey = (item.ConversationId, item.MessageId!);
-                    if (!keySet.Contains(exactKey))
-                    {
-                        continue;
-                    }
-
-                    if (!grouped.TryGetValue(exactKey, out var list))
-                    {
-                        list = [];
-                        grouped[exactKey] = list;
-                    }
-
-                    list.Add(item);
+                    continue;
                 }
+
+                if (!grouped.TryGetValue(exactKey, out var list))
+                {
+                    list = [];
+                    grouped[exactKey] = list;
+                }
+
+                list.Add(item);
             }
         }
 

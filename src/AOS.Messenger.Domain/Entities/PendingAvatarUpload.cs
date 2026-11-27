@@ -75,6 +75,14 @@ public sealed class PendingAvatarUpload : Entity<AvatarUploadId>
         };
     }
 
+    public void EnsureCreatedAfter(DateTimeOffset minExclusiveUtc)
+    {
+        if (CreatedAtUtc <= minExclusiveUtc)
+        {
+            CreatedAtUtc = minExclusiveUtc.AddTicks(1);
+        }
+    }
+
     public void MarkCompleted(long verifiedSizeBytes, DateTimeOffset nowUtc)
     {
         if (State != MediaState.Pending)

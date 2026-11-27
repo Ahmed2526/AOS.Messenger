@@ -28,6 +28,8 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -52,6 +54,7 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         IServiceCollection services = new ServiceCollection();
         services.AddLogging();
         services.AddSingleton(TimeProvider.System);
+        services.AddSingleton<IHostEnvironment>(new DevelopmentHostEnvironment());
 
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -63,6 +66,7 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
 
         services.AddInfrastructureServices(configuration);
         AOS.Messenger.Application.ApplicationServiceRegistration.AddApplicationServices(services);
+        services.AddSingleton<IRealtimeNotifier, NoOpRealtimeNotifier>();
 
         return services.BuildServiceProvider();
     }
@@ -682,9 +686,10 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         // Must declare re-entrancy flag
         Assert.Contains("isSending", content);
 
-        // Must disable input during flight
-        Assert.Contains("inputEl.disabled = true", content);
-        Assert.Contains("sendBtn.disabled = true", content);
+        // Must disable input and buttons during flight via syncDisabledState()
+        Assert.Contains("syncDisabledState()", content);
+        Assert.Contains("inputEl.disabled = shouldDisable", content);
+        Assert.Contains("sendBtn.disabled = shouldDisable", content);
 
         // Must restore state cleanly when complete
         Assert.Contains("isSending = false", content);
@@ -808,5 +813,26 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
             public Task ReceiveReactionUpdated(ReactionUpdatedDto reaction) => Task.CompletedTask;
             public Task ReceiveUserProfileUpdated(UserProfileUpdatedDto profile) => Task.CompletedTask;
         }
+    }
+
+    private sealed class DevelopmentHostEnvironment : IHostEnvironment
+    {
+        public string EnvironmentName { get; set; } = Environments.Development;
+        public string ApplicationName { get; set; } = "AOS.Messenger.Tests";
+        public string ContentRootPath { get; set; } = AppContext.BaseDirectory;
+        public IFileProvider ContentRootFileProvider { get; set; } = new NullFileProvider();
+    }
+
+    private sealed class NoOpRealtimeNotifier : IRealtimeNotifier
+    {
+        public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto editedMessage, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto deletedMessage, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyMessageDeletedForMeAsync(UserId userId, MessageDeletedForMeDto deletedMessage, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyReactionUpdatedAsync(ConversationId conversationId, ReactionUpdatedDto reaction, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyUserProfileUpdatedAsync(UserId userId, UserProfileUpdatedDto profile, CancellationToken ct = default) => Task.CompletedTask;
     }
 }

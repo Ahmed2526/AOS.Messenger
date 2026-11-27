@@ -599,11 +599,8 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         var (provider, db) = CreateTestEnvironment();
         var (userA, userB, conv) = await SeedParticipantsAndConversationAsync(db, now);
 
-        var userReader = provider.GetRequiredService<IUserReader>();
         var typingService = new TypingService(
-            provider.GetRequiredService<IConversationPersistence>(),
-            provider.GetRequiredService<IBlockPersistence>(),
-            userReader);
+            provider.GetRequiredService<IConversationPersistence>());
 
         var recipient = await typingService.ValidateAndGetTypingRecipientAsync(
             new UserId(userA.Id),
@@ -622,9 +619,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
 
         var nonParticipant = UserId.New();
         var typingService = new TypingService(
-            provider.GetRequiredService<IConversationPersistence>(),
-            provider.GetRequiredService<IBlockPersistence>(),
-            provider.GetRequiredService<IUserReader>());
+            provider.GetRequiredService<IConversationPersistence>());
 
         var recipient = await typingService.ValidateAndGetTypingRecipientAsync(
             nonParticipant,
@@ -647,9 +642,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         await blockPersistence.AddBlockAsync(UserBlock.Create(receiverId, senderId, now));
 
         var typingService = new TypingService(
-            provider.GetRequiredService<IConversationPersistence>(),
-            blockPersistence,
-            provider.GetRequiredService<IUserReader>());
+            provider.GetRequiredService<IConversationPersistence>());
 
         var recipient = await typingService.ValidateAndGetTypingRecipientAsync(senderId, conv.Id.Value);
         Assert.Null(recipient);
@@ -663,9 +656,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         var (userA, userB, conv) = await SeedParticipantsAndConversationAsync(db, now);
 
         var typingService = new TypingService(
-            provider.GetRequiredService<IConversationPersistence>(),
-            provider.GetRequiredService<IBlockPersistence>(),
-            provider.GetRequiredService<IUserReader>());
+            provider.GetRequiredService<IConversationPersistence>());
 
         Assert.NotNull(await typingService.ValidateAndGetTypingRecipientAsync(new UserId(userA.Id), conv.Id.Value));
 
@@ -692,9 +683,7 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         var receiverId = new UserId(userB.Id);
 
         var typingService = new TypingService(
-            provider.GetRequiredService<IConversationPersistence>(),
-            provider.GetRequiredService<IBlockPersistence>(),
-            provider.GetRequiredService<IUserReader>());
+            provider.GetRequiredService<IConversationPersistence>());
 
         var capturingNotifier = new CapturingReceiptNotifier();
         var connectionTracker = new InMemoryConnectionTracker();
@@ -1214,6 +1203,95 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
         var peerHttp = getPeerPresence.GetCustomAttribute<HttpGetAttribute>();
         Assert.NotNull(peerHttp);
         Assert.Equal("{userId:guid}", peerHttp.Template);
+    }
+
+    [Fact]
+    public async Task ChatHub_OnConnectedAsync_WhenConnectionRemovedBeforePresenceBroadcast_DoesNotBroadcastOnline()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var (provider, db) = CreateTestEnvironment();
+        var (userA, _, _) = await SeedParticipantsAndConversationAsync(db, now);
+        var callerId = new UserId(userA.Id);
+        var sessionId = Guid.NewGuid();
+
+        var connectionTracker = new InMemoryConnectionTracker();
+        var capturingNotifier = new CapturingReceiptNotifier();
+        var cts = new CancellationTokenSource();
+
+        var hub = new ChatHub(
+            provider.GetRequiredService<IConversationService>(),
+            connectionTracker,
+            new TestCurrentUser { Id = callerId },
+            NullLogger<ChatHub>.Instance,
+            new RevokingPresenceService(provider.GetRequiredService<IPresenceService>(), connectionTracker, callerId, "aborted-conn-1", cts),
+            new TypingService(provider.GetRequiredService<IConversationPersistence>()),
+            capturingNotifier)
+        {
+            Context = new AbortableHubCallerContext("aborted-conn-1", CreateClaimsPrincipal(callerId, sessionId), cts.Token)
+        };
+
+        await hub.OnConnectedAsync();
+
+        Assert.Empty(capturingNotifier.PresenceChanges);
+    }
+
+    private sealed class RevokingPresenceService : IPresenceService
+    {
+        private readonly IPresenceService _inner;
+        private readonly InMemoryConnectionTracker _tracker;
+        private readonly UserId _userId;
+        private readonly string _connectionId;
+        private readonly CancellationTokenSource _cts;
+
+        public RevokingPresenceService(
+            IPresenceService inner,
+            InMemoryConnectionTracker tracker,
+            UserId userId,
+            string connectionId,
+            CancellationTokenSource cts)
+        {
+            _inner = inner;
+            _tracker = tracker;
+            _userId = userId;
+            _connectionId = connectionId;
+            _cts = cts;
+        }
+
+        public async Task<IReadOnlyList<UserId>> GetEligiblePresencePeerIdsAsync(UserId userId, CancellationToken ct = default)
+        {
+            var peers = await _inner.GetEligiblePresencePeerIdsAsync(userId, ct);
+            // Simulate concurrent session revocation completing while eligibility check was in flight.
+            _tracker.RemoveConnection(_userId, _connectionId);
+            _cts.Cancel();
+            return peers;
+        }
+
+        public Task<UserPresenceDto?> GetPeerPresenceAsync(UserId callerId, UserId targetUserId, CancellationToken ct = default) =>
+            _inner.GetPeerPresenceAsync(callerId, targetUserId, ct);
+
+        public Task<IReadOnlyDictionary<Guid, UserPresenceDto>> GetPresenceForConversationsAsync(UserId callerId, CancellationToken ct = default) =>
+            _inner.GetPresenceForConversationsAsync(callerId, ct);
+
+        public Task RecordLastSeenAsync(UserId userId, DateTimeOffset lastSeenAtUtc, CancellationToken ct = default) =>
+            _inner.RecordLastSeenAsync(userId, lastSeenAtUtc, ct);
+    }
+
+    private sealed class AbortableHubCallerContext : HubCallerContext
+    {
+        public AbortableHubCallerContext(string connectionId, ClaimsPrincipal user, CancellationToken abortedToken)
+        {
+            ConnectionId = connectionId;
+            User = user;
+            ConnectionAborted = abortedToken;
+        }
+
+        public override string ConnectionId { get; }
+        public override string? UserIdentifier => User?.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        public override ClaimsPrincipal? User { get; }
+        public override IDictionary<object, object?> Items { get; } = new Dictionary<object, object?>();
+        public override IFeatureCollection Features { get; } = new FeatureCollection();
+        public override CancellationToken ConnectionAborted { get; }
+        public override void Abort() { }
     }
 
     // =========================================================================

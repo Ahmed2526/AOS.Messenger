@@ -380,9 +380,9 @@ export function completeAvatarUpload(uploadId, { signal } = {}) {
     return apiFetch(url, { method: 'POST', signal });
 }
 
-export function getAvatarUploadStatus(uploadId) {
+export function getAvatarUploadStatus(uploadId, { signal } = {}) {
     const url = `/api/profile/avatar/${encodeURIComponent(uploadId)}/status`;
-    return apiFetch(url);
+    return apiFetch(url, { signal });
 }
 
 /**

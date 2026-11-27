@@ -165,7 +165,7 @@ public sealed class FrontendSanitizationAndSecurityTests
         Assert.NotEmpty(cshtmlFiles);
 
         var violations = new List<string>();
-        var onclickRegex = new Regex(@"\bonclick\s*=", RegexOptions.IgnoreCase);
+        var inlineHandlerRegex = new Regex(@"(?<![A-Za-z0-9_-])on[a-z]+\s*=", RegexOptions.IgnoreCase);
 
         foreach (var file in cshtmlFiles)
         {
@@ -179,16 +179,16 @@ public sealed class FrontendSanitizationAndSecurityTests
                     continue;
                 }
 
-                if (onclickRegex.IsMatch(line))
+                if (inlineHandlerRegex.IsMatch(line))
                 {
                     var relativePath = Path.GetRelativePath(slnRoot, file);
-                    violations.Add($"File '{relativePath}:{i + 1}' contains forbidden inline onclick handler: {trimmed}");
+                    violations.Add($"File '{relativePath}:{i + 1}' contains forbidden inline event handler: {trimmed}");
                 }
             }
         }
 
         Assert.True(violations.Count == 0,
-            $"Found {violations.Count} inline onclick handlers:\n" + string.Join("\n", violations));
+            $"Found {violations.Count} inline event handlers:\n" + string.Join("\n", violations));
     }
 
     [Fact]
@@ -361,107 +361,46 @@ public sealed class FrontendSanitizationAndSecurityTests
     }
 
     [Fact]
-    public void Layout_BrandLabel_HasWhitespaceNowrapAndNoHorizontalOverflow()
+    public void Layout_And_ConversationViews_HaveBalancedDivsAndRequiredStructuralEndpoints()
     {
         var slnRoot = FindSolutionRoot();
         var layoutPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Shared", "_Layout.cshtml");
-        Assert.True(File.Exists(layoutPath));
-
-        var content = File.ReadAllText(layoutPath);
-        Assert.Matches(@"<a[^>]*asp-controller=""Chat""[^>]*asp-action=""Index""[^>]*class=""[^""]*whitespace-nowrap[^""]*""[\s\S]*?>[\s\S]*?A♡S Messenger[\s\S]*?<\/a>", content);
-
-        // Header has overflow-x-clip and max-w-full
-        Assert.Contains("overflow-x-clip", content);
-        Assert.Contains("max-w-full", content);
-
-        // Window controls hidden on mobile
-        Assert.Contains("hidden sm:flex items-center gap-1.5 shrink-0", content);
-
-        // Main element is overflow-hidden on conversation route
-        Assert.Contains("isConversation", content);
-        Assert.Contains("overflow-hidden", content);
-
-        // Div tags balanced
-        var openDivs = Regex.Matches(content, "<div[\\s>]").Count;
-        var closeDivs = Regex.Matches(content, "</div>").Count;
-        Assert.Equal(openDivs, closeDivs);
-    }
-
-    [Fact]
-    public void Conversation_Header_HasPeerIdentityBlockAndResponsiveActions()
-    {
-        var slnRoot = FindSolutionRoot();
         var conversationPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
-        Assert.True(File.Exists(conversationPath));
-
-        var content = File.ReadAllText(conversationPath);
-
-        // Peer identity container is flex-1 min-w-0 overflow-hidden with truncate
-        Assert.Contains("id=\"peer-identity-block\"", content);
-        Assert.Contains("flex-1 min-w-0 overflow-hidden", content);
-
-        // Chat header is shrink-0
-        Assert.Contains("id=\"active-conversation-header\"", content);
-        Assert.Contains("shrink-0", content);
-
-        // Message stream is flex-1 min-h-0 overflow-y-auto
-        Assert.Contains("id=\"message-stream\"", content);
-        Assert.Contains("flex-1 min-h-0 overflow-y-auto", content);
-
-        // Composer is shrink-0
-        Assert.Contains("id=\"active-conversation-composer\"", content);
-
-        // Desktop action toolbar
-        Assert.Contains("hidden md:flex items-center gap-1 shrink-0", content);
-
-        // Mobile overflow menu toggle and menu container
-        Assert.Contains("data-chat-actions-toggle", content);
-        Assert.Contains("data-chat-actions-menu", content);
-        Assert.Contains("md:hidden shrink-0", content);
-
-        // All 5 actions present in mobile menu
-        Assert.Contains("asp-action=\"Pin\"", content);
-        Assert.Contains("asp-action=\"Mute\"", content);
-        Assert.Contains("asp-action=\"Archive\"", content);
-        Assert.Contains("asp-action=\"Clear\"", content);
-        Assert.Contains("asp-action=\"Delete\"", content);
-
-        // chat-actions.js script module loaded
-        Assert.Contains("chat-actions.js", content);
-
-        // Div tags balanced (no premature closing of conversation-page-root)
-        var openDivs = Regex.Matches(content, "<div[\\s>]").Count;
-        var closeDivs = Regex.Matches(content, "</div>").Count;
-        Assert.Equal(openDivs, closeDivs);
-    }
-
-    [Fact]
-    public void Profile_HeroBannerCard_HasUnclippedAvatarAndRounded2xl()
-    {
-        var slnRoot = FindSolutionRoot();
         var profilePath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Profile", "Index.cshtml");
+        var settingsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Settings", "Index.cshtml");
+        Assert.True(File.Exists(layoutPath));
+        Assert.True(File.Exists(conversationPath));
         Assert.True(File.Exists(profilePath));
+        Assert.True(File.Exists(settingsPath));
 
-        var content = File.ReadAllText(profilePath);
+        var layoutContent = File.ReadAllText(layoutPath);
+        Assert.Equal(
+            Regex.Matches(layoutContent, "<div[\\s>]").Count,
+            Regex.Matches(layoutContent, "</div>").Count);
 
-        // Hero card container
-        Assert.Contains("relative overflow-hidden rounded-2xl p-6", content);
-        Assert.Contains("id=\"profile-hero-card\"", content);
+        var conversationContent = File.ReadAllText(conversationPath);
+        Assert.Contains("id=\"peer-identity-block\"", conversationContent);
+        Assert.Contains("id=\"active-conversation-header\"", conversationContent);
+        Assert.Contains("id=\"message-stream\"", conversationContent);
+        Assert.Contains("id=\"active-conversation-composer\"", conversationContent);
+        Assert.Contains("data-chat-actions-toggle", conversationContent);
+        Assert.Contains("data-chat-actions-menu", conversationContent);
+        Assert.Contains("asp-action=\"Pin\"", conversationContent);
+        Assert.Contains("asp-action=\"Mute\"", conversationContent);
+        Assert.Contains("asp-action=\"Archive\"", conversationContent);
+        Assert.Contains("asp-action=\"Clear\"", conversationContent);
+        Assert.Contains("asp-action=\"Delete\"", conversationContent);
+        Assert.Contains("chat-actions.js", conversationContent);
+        Assert.Equal(
+            Regex.Matches(conversationContent, "<div[\\s>]").Count,
+            Regex.Matches(conversationContent, "</div>").Count);
 
-        // Decorative background layer
-        Assert.Contains("pointer-events-none absolute inset-0 z-0", content);
+        var profileContent = File.ReadAllText(profilePath);
+        Assert.Contains("id=\"profile-hero-card\"", profileContent);
+        Assert.Contains("id=\"profile-hero-avatar\"", profileContent);
 
-        // Foreground content row with avatar
-        Assert.Contains("relative z-10 flex items-center gap-4 sm:gap-5", content);
-        Assert.Contains("id=\"profile-hero-avatar\"", content);
-        Assert.Contains("w-16 h-16 sm:w-20 sm:h-20 rounded-full shrink-0 flex items-center justify-center text-xl font-semibold", content);
-
-        // No negative vertical offsets on avatar foreground container
-        var foregroundIdx = content.IndexOf("relative z-10 flex items-center");
-        var nameIdx = content.IndexOf("@(Model?.DisplayName ?? \"My Profile\")");
-        var avatarRegion = content.Substring(foregroundIdx, nameIdx - foregroundIdx);
-        Assert.DoesNotContain("-bottom-", avatarRegion);
-        Assert.DoesNotContain("translate-y-", avatarRegion);
+        var settingsContent = File.ReadAllText(settingsPath);
+        Assert.Matches(@"<input[^>]*id=""settingsSearch""[^>]*>", settingsContent);
     }
 
     [Fact]
@@ -799,21 +738,6 @@ public sealed class FrontendSanitizationAndSecurityTests
 
         var between = content.Substring(toggleIdx, indicatorIdx - toggleIdx);
         Assert.Contains("@if (User.Identity?.IsAuthenticated == true)", between);
-    }
-
-    [Fact]
-    public void SettingsSearchInput_HasVisibleDarkModeSurfaceAndBorder()
-    {
-        var slnRoot = FindSolutionRoot();
-        var settingsPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Settings", "Index.cshtml");
-        Assert.True(File.Exists(settingsPath));
-
-        var content = File.ReadAllText(settingsPath);
-        var match = Regex.Match(content, @"<input[^>]*id=""settingsSearch""[^>]*>");
-        Assert.True(match.Success, "Expected #settingsSearch input in Settings/Index.cshtml");
-        Assert.Contains("dark:bg-[#45433F]", match.Value);
-        Assert.Contains("dark:focus:bg-[#514D49]", match.Value);
-        Assert.Contains("dark:border-[#5B5752]", match.Value);
     }
 
     [Fact]

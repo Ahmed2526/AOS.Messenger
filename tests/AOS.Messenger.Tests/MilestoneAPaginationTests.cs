@@ -766,7 +766,7 @@ public sealed class MilestoneAPaginationTests
                     { id: 12, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'New 12', createdAtUtc: '2026-11-23T11:12:00Z' }
                 ],
                 nextCursor: 'cursor-10',
-                hasMore: false
+                hasMore: true
             };
             await onReconnectedCb();
             assert.equal(windowReplacedCount, 0);
@@ -986,12 +986,14 @@ public sealed class MilestoneAPaginationTests
             assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['60', '61']);
             assert.equal(dom.document.getElementById('msg-60').getAttribute('data-deleted'), 'true');
 
-            // Case 8 (Follow-up #3): Second reconnect while first reconcile is in flight carries over buffered edits to paginated rows
+            // Case 8 (Follow-up #3 + carryOver replay guard): Second reconnect carries buffered edit for historical row 5,
+            // skips stale carried edit when replacement bundle has a newer version of row 70, and replays new edits during Reconcile #2
             const receiveEditedHandler = hubHandlers.get('ReceiveMessageEdited');
             assert.equal(typeof receiveEditedHandler, 'function');
             const overlapSeed = [
                 { id: 5, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Original 5', createdAtUtc: '2026-11-23T10:05:00Z' },
-                { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 70', createdAtUtc: '2026-11-23T14:00:00Z' }
+                { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 70', createdAtUtc: '2026-11-23T14:00:00Z' },
+                { id: 71, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 71', createdAtUtc: '2026-11-23T14:01:00Z' }
             ];
             state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, overlapSeed, 'cursor-4', true);
             renderMessages(els.container, overlapSeed, 'u1', state.activeMeta);
@@ -999,7 +1001,8 @@ public sealed class MilestoneAPaginationTests
                 viewerUserId: 'u1',
                 conversation: { id: 'conv-1', canSend: true },
                 messages: [
-                    { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 70', createdAtUtc: '2026-11-23T14:00:00Z' }
+                    { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Server v2 edit', editedAtUtc: '2026-11-23T14:02:00Z', createdAtUtc: '2026-11-23T14:00:00Z' },
+                    { id: 71, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 71', createdAtUtc: '2026-11-23T14:01:00Z' }
                 ],
                 nextCursor: 'cursor-69',
                 hasMore: true
@@ -1009,22 +1012,91 @@ public sealed class MilestoneAPaginationTests
             pendingBundleGate = () => new Promise(resolve => { releaseRecon1 = resolve; });
             const recon1Promise = onReconnectedCb();
             await new Promise(resolve => setTimeout(resolve, 10));
+            // Carried edits from Reconcile #1: historical row 5 + older v1 edit on bundle row 70
             receiveEditedHandler({
                 conversationId: 'conv-1',
                 messageId: 5,
                 content: 'Edited 5 during first reconnect',
                 editedAtUtc: '2026-11-23T14:01:00Z'
             });
+            receiveEditedHandler({
+                conversationId: 'conv-1',
+                messageId: 70,
+                content: 'Stale v1 edit',
+                editedAtUtc: '2026-11-23T14:01:30Z'
+            });
             pendingBundleGate = () => new Promise(resolve => { releaseRecon2 = resolve; });
             const recon2Promise = onReconnectedCb();
             await new Promise(resolve => setTimeout(resolve, 10));
+            // Fresh edit received during Reconcile #2 must still replay cleanly
+            receiveEditedHandler({
+                conversationId: 'conv-1',
+                messageId: 71,
+                content: 'Live edit 71 during second reconnect',
+                editedAtUtc: '2026-11-23T14:03:00Z'
+            });
             pendingBundleGate = null;
             releaseRecon1();
             await recon1Promise;
             releaseRecon2();
             await recon2Promise;
-            const row5Text = dom.document.getElementById('msg-5').querySelector('.message-text-content').textContent;
-            assert.equal(row5Text, 'Edited 5 during first reconnect');
+            assert.equal(dom.document.getElementById('msg-5').querySelector('.message-text-content').textContent, 'Edited 5 during first reconnect');
+            assert.equal(dom.document.getElementById('msg-70').querySelector('.message-text-content').textContent, 'Server v2 edit');
+            assert.equal(dom.document.getElementById('msg-71').querySelector('.message-text-content').textContent, 'Live edit 71 during second reconnect');
+
+            // Case 9 (Follow-up epoch guard): Stale activeReconcile from an earlier switchEpoch must NOT capture current-epoch events
+            const epochSeed = [
+                { id: 79, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 79', createdAtUtc: '2026-11-23T14:10:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, epochSeed, 'cursor-78', true);
+            renderMessages(els.container, epochSeed, 'u1', state.activeMeta);
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: epochSeed,
+                nextCursor: 'cursor-78',
+                hasMore: true
+            };
+            let releaseStaleEpochRecon = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseStaleEpochRecon = resolve; });
+            const staleEpochPromise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            // Simulate leaving conv-1 and returning to conv-1 with a new switchEpoch before the stale reconnect bundle resolves
+            state.switchEpoch++;
+            receiveMessageHandler({ id: 80, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Current epoch 80', createdAtUtc: '2026-11-23T14:11:00Z' });
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['79', '80'], 'Current-epoch message must render immediately instead of being swallowed by stale-epoch reconcile');
+            pendingBundleGate = null;
+            releaseStaleEpochRecon();
+            await staleEpochPromise;
+
+            // Case 10 (Follow-up complete-bundle pruning): bundleHasMore=false prunes pre-request older rows absent from bundle while protecting post-request rows
+            const completeSeed = [
+                { id: 90, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Old 90', createdAtUtc: '2026-11-23T15:00:00Z' },
+                { id: 91, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 91', createdAtUtc: '2026-11-23T15:01:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, completeSeed, 'cursor-89', true);
+            renderMessages(els.container, completeSeed, 'u1', state.activeMeta);
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [
+                    { id: 91, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 91', createdAtUtc: '2026-11-23T15:01:00Z' }
+                ],
+                nextCursor: null,
+                hasMore: false
+            };
+            let releaseCompleteGate = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseCompleteGate = resolve; });
+            const completePromise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            const postRequest92 = { id: 92, conversationId: 'conv-1', senderId: 'u1', senderName: 'Alice', content: 'Post 92', createdAtUtc: '2026-11-23T15:02:00Z', isOutgoing: true };
+            insertMessageOrdered(els.container, postRequest92, 'u1', state.activeMeta);
+            state.messagesById.set('92', postRequest92);
+            pendingBundleGate = null;
+            releaseCompleteGate();
+            await completePromise;
+            assert.equal(state.messagesById.has('90'), false, 'Pre-request older row 90 must be pruned when bundleHasMore=false');
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['91', '92']);
 
             client.destroy();
             console.log('OK');

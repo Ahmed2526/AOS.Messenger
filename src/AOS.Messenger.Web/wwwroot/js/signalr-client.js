@@ -162,11 +162,37 @@ export function createSignalRClient({
 
     function bufferIfReconciling(eventConvId, evt) {
         if (!activeReconcile || !eventConvId || !evt) return false;
+        if (activeReconcile.epoch !== state.switchEpoch) return false;
         if (!sameId(activeReconcile.convId, eventConvId)) return false;
-        if (activeReconcile.events.length < MAX_RECONCILE_BUFFER_EVENTS) {
+        const totalBuffered = (activeReconcile.carriedEvents ? activeReconcile.carriedEvents.length : 0) + activeReconcile.events.length;
+        if (totalBuffered < MAX_RECONCILE_BUFFER_EVENTS) {
             activeReconcile.events.push(evt);
         } else {
             activeReconcile.overflowed = true;
+        }
+        return true;
+    }
+
+    function shouldSkipCarriedEdit(evt, bundleMessagesById) {
+        if (!evt || evt.type !== 'ReceiveMessageEdited' || !bundleMessagesById || bundleMessagesById.size === 0) {
+            return false;
+        }
+        const payload = evt.payload;
+        if (!payload) return false;
+        const editMsgId = normalizeId(payload.messageId !== undefined ? payload.messageId : payload.MessageId);
+        if (!editMsgId || !bundleMessagesById.has(String(editMsgId))) {
+            return false;
+        }
+        const bundleMsg = bundleMessagesById.get(String(editMsgId));
+        if (bundleMsg && (bundleMsg.isDeletedForEveryone ?? bundleMsg.IsDeletedForEveryone)) {
+            return true;
+        }
+        const bundleEditedRaw = bundleMsg?.editedAtUtc ?? bundleMsg?.EditedAtUtc;
+        const carriedEditedRaw = payload.editedAtUtc ?? payload.EditedAtUtc;
+        const bundleTime = bundleEditedRaw ? Date.parse(bundleEditedRaw) : NaN;
+        const carriedTime = carriedEditedRaw ? Date.parse(carriedEditedRaw) : NaN;
+        if (Number.isFinite(bundleTime) && Number.isFinite(carriedTime)) {
+            return bundleTime >= carriedTime;
         }
         return true;
     }
@@ -412,15 +438,20 @@ export function createSignalRClient({
             activeReconcile.epoch === expectedEpoch
             ? activeReconcile
             : null;
+        const carriedEvents = carryOver
+            ? [...(carryOver.carriedEvents || []), ...(carryOver.events || [])].slice(0, MAX_RECONCILE_BUFFER_EVENTS)
+            : [];
         const myReconcile = {
             seq: ++reconcileSeq,
             convId,
             epoch: expectedEpoch,
-            events: carryOver ? carryOver.events.slice(0, MAX_RECONCILE_BUFFER_EVENTS) : [],
+            carriedEvents,
+            events: [],
             overflowed: Boolean(carryOver?.overflowed)
         };
         activeReconcile = myReconcile;
         let bundleSucceeded = false;
+        const appliedBundleMessagesById = new Map();
 
         try {
             const bundle = await getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE });
@@ -471,6 +502,13 @@ export function createSignalRClient({
 
             const messages = bundle?.messages ?? bundle?.Messages ?? [];
             if (!containerEl || !Array.isArray(messages)) return;
+
+            for (const msg of messages) {
+                const msgId = getMessageId(msg);
+                if (msgId) {
+                    appliedBundleMessagesById.set(String(msgId), msg);
+                }
+            }
 
             const bundleHasMore = Boolean(bundle?.hasMore ?? bundle?.HasMore);
             const bundleNextCursor = bundle?.nextCursor ?? bundle?.NextCursor ?? null;
@@ -589,8 +627,8 @@ export function createSignalRClient({
                 const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
                 if (!rowIdStr || bundleIds.has(rowIdStr) || !preRequestRowIds.has(String(rowIdStr))) continue;
 
-                let withinServerWindow = false;
-                if (Number.isFinite(oldestBundleTime)) {
+                let withinServerWindow = !bundleHasMore;
+                if (!withinServerWindow && Number.isFinite(oldestBundleTime)) {
                     const rowTimeAttr = row.getAttribute('data-created-at');
                     const rowTime = rowTimeAttr ? Date.parse(rowTimeAttr) : NaN;
                     const rowIdBig = parseBigIntSafe(rowIdStr);
@@ -730,8 +768,14 @@ export function createSignalRClient({
             if (activeReconcile === myReconcile) {
                 activeReconcile = null;
                 if (!isTerminated && expectedEpoch === state.switchEpoch && sameId(state.activeConversationId, convId)) {
-                    if (myReconcile.events.length > 0) {
-                        replayBufferedEvents(convId, myReconcile.events);
+                    const carriedToReplay = bundleSucceeded
+                        ? myReconcile.carriedEvents.filter(evt => !shouldSkipCarriedEdit(evt, appliedBundleMessagesById))
+                        : myReconcile.carriedEvents;
+                    const eventsToReplay = carriedToReplay.length > 0
+                        ? [...carriedToReplay, ...myReconcile.events]
+                        : myReconcile.events;
+                    if (eventsToReplay.length > 0) {
+                        replayBufferedEvents(convId, eventsToReplay);
                     }
                     if (bundleSucceeded && myReconcile.overflowed && overflowRetryCount < MAX_RECONCILE_OVERFLOW_RETRIES) {
                         shouldFollowUpReconcile = true;

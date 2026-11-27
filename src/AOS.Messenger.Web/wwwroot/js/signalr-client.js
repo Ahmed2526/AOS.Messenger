@@ -64,6 +64,8 @@ function isDocumentVisibleAndFocused() {
 }
 
 export const MAX_SEEN_INCOMING_IDS = 500;
+const MAX_RECONCILE_BUFFER_EVENTS = 200;
+const MAX_RECONCILE_OVERFLOW_RETRIES = 3;
 const DEFAULT_RECONNECT_RETRY_DELAYS_MS = [2000, 5000, 10000, 30000, 60000];
 
 /**
@@ -161,10 +163,29 @@ export function createSignalRClient({
     function bufferIfReconciling(eventConvId, evt) {
         if (!activeReconcile || !eventConvId || !evt) return false;
         if (!sameId(activeReconcile.convId, eventConvId)) return false;
-        if (activeReconcile.events.length < 200) {
+        if (activeReconcile.events.length < MAX_RECONCILE_BUFFER_EVENTS) {
             activeReconcile.events.push(evt);
+        } else {
+            activeReconcile.overflowed = true;
         }
         return true;
+    }
+
+    function updateSidebarForIncomingMessage(convId, previewText, msgId, shouldReorder = true) {
+        if (!convId || typeof document === 'undefined') return false;
+        const existingItem = findSidebarItem(convId);
+        if (!existingItem) return false;
+
+        const currentLastId = typeof existingItem.getAttribute === 'function'
+            ? existingItem.getAttribute('data-last-message-id')
+            : null;
+        const currentBig = parseBigIntSafe(currentLastId);
+        const incomingBig = parseBigIntSafe(msgId);
+        if (currentBig > 0n && incomingBig > 0n && incomingBig < currentBig) {
+            return true;
+        }
+
+        return updateSidebarLastMessage(convId, previewText, msgId, false, false, shouldReorder);
     }
 
     function clearRetryTimer() {
@@ -369,7 +390,7 @@ export function createSignalRClient({
      * @param {string} convId
      * @param {number} [expectedEpoch]
      */
-    async function reconcileActiveConversation(convId, expectedEpoch = state.switchEpoch) {
+    async function reconcileActiveConversation(convId, expectedEpoch = state.switchEpoch, overflowRetryCount = 0) {
         if (isTerminated || !convId) return;
 
         const preRequestContainerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
@@ -386,8 +407,20 @@ export function createSignalRClient({
             }
         }
 
-        const myReconcile = { seq: ++reconcileSeq, convId, events: [] };
+        const carryOver = activeReconcile &&
+            sameId(activeReconcile.convId, convId) &&
+            activeReconcile.epoch === expectedEpoch
+            ? activeReconcile
+            : null;
+        const myReconcile = {
+            seq: ++reconcileSeq,
+            convId,
+            epoch: expectedEpoch,
+            events: carryOver ? carryOver.events.slice(0, MAX_RECONCILE_BUFFER_EVENTS) : [],
+            overflowed: Boolean(carryOver?.overflowed)
+        };
         activeReconcile = myReconcile;
+        let bundleSucceeded = false;
 
         try {
             const bundle = await getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE });
@@ -404,6 +437,7 @@ export function createSignalRClient({
                 }
                 return;
             }
+            bundleSucceeded = true;
 
             const containerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
                 ? document.getElementById('messages-container')
@@ -692,11 +726,20 @@ export function createSignalRClient({
                 console.warn('[SignalR] State reconciliation error:', err?.status || err);
             }
         } finally {
+            let shouldFollowUpReconcile = false;
             if (activeReconcile === myReconcile) {
                 activeReconcile = null;
-                if (!isTerminated && expectedEpoch === state.switchEpoch && sameId(state.activeConversationId, convId) && myReconcile.events.length > 0) {
-                    replayBufferedEvents(convId, myReconcile.events);
+                if (!isTerminated && expectedEpoch === state.switchEpoch && sameId(state.activeConversationId, convId)) {
+                    if (myReconcile.events.length > 0) {
+                        replayBufferedEvents(convId, myReconcile.events);
+                    }
+                    if (bundleSucceeded && myReconcile.overflowed && overflowRetryCount < MAX_RECONCILE_OVERFLOW_RETRIES) {
+                        shouldFollowUpReconcile = true;
+                    }
                 }
+            }
+            if (shouldFollowUpReconcile) {
+                await reconcileActiveConversation(convId, expectedEpoch, overflowRetryCount + 1);
             }
         }
     }
@@ -751,7 +794,7 @@ export function createSignalRClient({
 
         if (!isReplay && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message }) ||
             bufferIfReconciling(eventConvId, { type: 'ReceiveMessage', payload: message }))) {
-            const foundDuringSwitch = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
+            const foundDuringSwitch = updateSidebarForIncomingMessage(eventConvId, previewText, msgId, true);
             if (!foundDuringSwitch) {
                 syncSidebarConversations(() => state.activeConversationId);
             }
@@ -761,7 +804,7 @@ export function createSignalRClient({
             return;
         }
 
-        const sidebarFound = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
+        const sidebarFound = updateSidebarForIncomingMessage(eventConvId, previewText, msgId, true);
         const isActive = sameId(eventConvId, state.activeConversationId);
 
         if (!isActive) {
@@ -1044,13 +1087,15 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
-        activeReconcile = null;
+        const activeId = state.activeConversationId;
+        const epoch = state.switchEpoch;
+        if (activeReconcile && (!activeId || !sameId(activeReconcile.convId, activeId) || activeReconcile.epoch !== epoch)) {
+            activeReconcile = null;
+        }
         requestedConversationId = null;
         joinedConversationId = null;
         setStatus('connected');
 
-        const activeId = state.activeConversationId;
-        const epoch = state.switchEpoch;
         let attemptedTarget = null;
 
         try {

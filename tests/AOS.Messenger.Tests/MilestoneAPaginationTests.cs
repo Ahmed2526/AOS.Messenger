@@ -659,9 +659,13 @@ public sealed class MilestoneAPaginationTests
             let nextBundle = null;
             let pendingBundleGate = null;
             let failSidebarSync = false;
+            let bundleFetchCount = 0;
+            const bundleQueue = [];
             configureApiClient({
                 fetchImpl: async (url) => {
                     if (url.includes('/bundle')) {
+                        bundleFetchCount++;
+                        const bundlePayload = bundleQueue.length > 0 ? bundleQueue.shift() : nextBundle;
                         if (pendingBundleGate) {
                             await pendingBundleGate();
                         }
@@ -670,7 +674,7 @@ public sealed class MilestoneAPaginationTests
                             ok: true,
                             redirected: false,
                             headers: { get: () => 'application/json' },
-                            text: async () => JSON.stringify(nextBundle)
+                            text: async () => JSON.stringify(bundlePayload)
                         };
                     }
                     if (failSidebarSync && url.includes('/conversations')) {
@@ -838,10 +842,17 @@ public sealed class MilestoneAPaginationTests
             assert.equal(state.messagesById.size, 0);
             assert.equal(emptyPlaceholderEl.classList.contains('hidden'), false);
 
-            // Case 5 (Thread #13): Concurrent live ReceiveMessage + post-request HTTP insert during reconcile are preserved and never pruned
+            // Case 5 (Thread #13 + follow-up #2): Concurrent live ReceiveMessage + post-request HTTP insert during reconcile are preserved,
+            // and replaying older message 45 does not overwrite newer sidebar preview/id 46
             emptyPlaceholderEl.classList.add('hidden');
             const receiveMessageHandler = hubHandlers.get('ReceiveMessage');
             assert.equal(typeof receiveMessageHandler, 'function');
+            if (sidebarItemEl.parentNode !== conversationListEl) {
+                conversationListEl.appendChild(sidebarItemEl);
+            }
+            failSidebarSync = true;
+            sidebarItemEl.setAttribute('data-last-message-id', '42');
+            sidebarPreviewEl.textContent = 'Keep 42';
             const seedPreRequest = [
                 { id: 40, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 40', createdAtUtc: '2026-11-23T12:40:00Z' },
                 { id: 41, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Pre-request deleted 41', createdAtUtc: '2026-11-23T12:41:00Z' },
@@ -868,11 +879,16 @@ public sealed class MilestoneAPaginationTests
             const postRequestHttpMsg = { id: 46, conversationId: 'conv-1', senderId: 'u1', senderName: 'Alice', content: 'Post-request HTTP 46', createdAtUtc: '2026-11-23T12:46:00Z', isOutgoing: true };
             insertMessageOrdered(els.container, postRequestHttpMsg, 'u1', state.activeMeta);
             state.messagesById.set('46', postRequestHttpMsg);
+            sidebarItemEl.setAttribute('data-last-message-id', '46');
+            sidebarPreviewEl.textContent = 'Post-request HTTP 46';
             pendingBundleGate = null;
             releaseGate();
             await reconcilePromise1;
+            failSidebarSync = false;
             assert.equal(state.messagesById.has('41'), false, 'Pre-request deleted row 41 within server window must be pruned');
             assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['40', '42', '45', '46']);
+            assert.equal(sidebarItemEl.getAttribute('data-last-message-id'), '46', 'Replaying older message 45 must preserve newer sidebar id 46');
+            assert.equal(sidebarPreviewEl.textContent, 'Post-request HTTP 46');
 
             // Case 5b (Thread #13): Empty server bundle during active reconcile clears pre-request stale rows without wiping concurrent live events
             nextBundle = {
@@ -920,6 +936,95 @@ public sealed class MilestoneAPaginationTests
             assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['9']);
             assert.equal(sidebarItemEl.getAttribute('data-last-message-id'), '9');
             assert.equal(sidebarPreviewEl.textContent, 'Msg 9');
+
+            // Case 7 (Follow-up #1): Exceeding 200-event reconcile buffer triggers authoritative follow-up bundle fetch after replay
+            const receiveReceiptHandler = hubHandlers.get('ReceiveReceiptUpdated');
+            const receiveDeletedEveryoneHandler = hubHandlers.get('ReceiveMessageDeletedForEveryone');
+            assert.equal(typeof receiveReceiptHandler, 'function');
+            assert.equal(typeof receiveDeletedEveryoneHandler, 'function');
+            const overflowSeed = [
+                { id: 60, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 60', createdAtUtc: '2026-11-23T13:00:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, overflowSeed, 'cursor-59', true);
+            renderMessages(els.container, overflowSeed, 'u1', state.activeMeta);
+            bundleQueue.push(
+                {
+                    viewerUserId: 'u1',
+                    conversation: { id: 'conv-1', canSend: true },
+                    messages: [
+                        { id: 60, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 60', createdAtUtc: '2026-11-23T13:00:00Z' }
+                    ],
+                    nextCursor: 'cursor-59',
+                    hasMore: true
+                },
+                {
+                    viewerUserId: 'u1',
+                    conversation: { id: 'conv-1', canSend: true },
+                    messages: [
+                        { id: 60, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: '', isDeletedForEveryone: true, createdAtUtc: '2026-11-23T13:00:00Z' },
+                        { id: 61, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Recovered 61', createdAtUtc: '2026-11-23T13:01:00Z' }
+                    ],
+                    nextCursor: 'cursor-59',
+                    hasMore: true
+                }
+            );
+            const fetchesBeforeOverflow = bundleFetchCount;
+            let releaseOverflowGate = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseOverflowGate = resolve; });
+            const overflowPromise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            for (let i = 0; i < 200; i++) {
+                receiveReceiptHandler({ conversationId: 'conv-1', userId: 'u2', upToMessageId: 60, receiptType: 'delivered' });
+            }
+            // Events past the 200-item buffer cap must set overflowed and be restored by follow-up reconcile
+            receiveDeletedEveryoneHandler({ conversationId: 'conv-1', messageId: 60 });
+            receiveMessageHandler({ id: 61, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Recovered 61', createdAtUtc: '2026-11-23T13:01:00Z' });
+            pendingBundleGate = null;
+            releaseOverflowGate();
+            await overflowPromise;
+            assert.equal(bundleFetchCount - fetchesBeforeOverflow, 2, 'Buffer overflow must trigger one follow-up authoritative bundle fetch');
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['60', '61']);
+            assert.equal(dom.document.getElementById('msg-60').getAttribute('data-deleted'), 'true');
+
+            // Case 8 (Follow-up #3): Second reconnect while first reconcile is in flight carries over buffered edits to paginated rows
+            const receiveEditedHandler = hubHandlers.get('ReceiveMessageEdited');
+            assert.equal(typeof receiveEditedHandler, 'function');
+            const overlapSeed = [
+                { id: 5, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Original 5', createdAtUtc: '2026-11-23T10:05:00Z' },
+                { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 70', createdAtUtc: '2026-11-23T14:00:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, overlapSeed, 'cursor-4', true);
+            renderMessages(els.container, overlapSeed, 'u1', state.activeMeta);
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [
+                    { id: 70, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 70', createdAtUtc: '2026-11-23T14:00:00Z' }
+                ],
+                nextCursor: 'cursor-69',
+                hasMore: true
+            };
+            let releaseRecon1 = null;
+            let releaseRecon2 = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseRecon1 = resolve; });
+            const recon1Promise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            receiveEditedHandler({
+                conversationId: 'conv-1',
+                messageId: 5,
+                content: 'Edited 5 during first reconnect',
+                editedAtUtc: '2026-11-23T14:01:00Z'
+            });
+            pendingBundleGate = () => new Promise(resolve => { releaseRecon2 = resolve; });
+            const recon2Promise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            pendingBundleGate = null;
+            releaseRecon1();
+            await recon1Promise;
+            releaseRecon2();
+            await recon2Promise;
+            const row5Text = dom.document.getElementById('msg-5').querySelector('.message-text-content').textContent;
+            assert.equal(row5Text, 'Edited 5 during first reconnect');
 
             client.destroy();
             console.log('OK');

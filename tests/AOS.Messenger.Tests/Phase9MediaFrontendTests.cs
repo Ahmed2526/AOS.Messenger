@@ -709,6 +709,90 @@ public sealed class Phase9MediaFrontendTests
             assert.ok(cancelledIds.includes('00000000-0000-0000-0000-000000000099'));
             uploaderCancelRace.destroy();
 
+            // [PR3-M3] 503 during completeMediaUpload preserves mediaId so Retry runs completion ONLY & Cancel cleans pending slot;
+            //           409 during completeMediaUpload cancels old mediaId and re-uploads from scratch on Retry.
+            let m3InitCalls = 0;
+            let m3PutCalls = 0;
+            let m3CompleteCalls = 0;
+            let m3CancelCalls = [];
+            let m3NextCompleteStatus = 503;
+            const m3Api = {
+                async initiateMediaUpload(_cId, dto) {
+                    const id = `00000000-0000-0000-0000-00000000020${++m3InitCalls}`;
+                    return { mediaId: id, uploadUrl: `https://r2.example.com/upload/${id}`, requiredContentType: dto.contentType };
+                },
+                async completeMediaUpload(_cId, mediaId) {
+                    m3CompleteCalls++;
+                    if (m3NextCompleteStatus !== 200) {
+                        const err = new Error(`Status ${m3NextCompleteStatus}`);
+                        err.status = m3NextCompleteStatus;
+                        throw err;
+                    }
+                    return { id: mediaId, kind: 'image' };
+                },
+                async cancelMediaUpload(_cId, mediaId) {
+                    m3CancelCalls.push(mediaId);
+                },
+                async sendMessage(_cId, payload) {
+                    return { id: 901, conversationId: convId, attachments: payload.mediaIds.map(id => ({ id, kind: 'image' })) };
+                }
+            };
+            const m3CreateXhr = () => ({
+                withCredentials: true,
+                status: 200,
+                upload: {},
+                open() {},
+                setRequestHeader() {},
+                abort() { this.onabort?.(); },
+                send() {
+                    m3PutCalls++;
+                    this.status = 200;
+                    this.onload?.();
+                }
+            });
+            const m3Uploader = createMediaUploader({ state, api: m3Api, createXhr: m3CreateXhr, nowFn: () => nowMs });
+            m3Uploader.init();
+            m3Uploader.setLocked(false);
+
+            // Case A: 503 timeout preserves mediaId -> Retry skips initiate & PUT and succeeds on complete only
+            m3Uploader.addFiles([{ name: 'timeout.png', type: 'image/png', size: 120 }]);
+            const job503 = m3Uploader.startUploadJob({ conversationId: convId });
+            await job503.promise;
+            assert.equal(job503.status, 'failed');
+            assert.equal(job503.retryable, true);
+            assert.equal(job503.items[0].mediaId, '00000000-0000-0000-0000-000000000201');
+            assert.equal(m3CancelCalls.length, 0);
+
+            m3NextCompleteStatus = 200;
+            m3Uploader.retryJob(job503.id);
+            await job503.promise;
+            assert.equal(m3InitCalls, 1, '503 retry must not re-initiate upload');
+            assert.equal(m3PutCalls, 1, '503 retry must not re-PUT to R2');
+            assert.equal(m3CompleteCalls, 2, '503 retry must invoke completeMediaUpload only');
+
+            // Case B: 503 followed by Cancel cancels the pending server upload
+            m3NextCompleteStatus = 503;
+            m3Uploader.addFiles([{ name: 'cancel503.png', type: 'image/png', size: 120 }]);
+            const job503Cancel = m3Uploader.startUploadJob({ conversationId: convId });
+            await job503Cancel.promise;
+            assert.equal(job503Cancel.items[0].mediaId, '00000000-0000-0000-0000-000000000202');
+            await m3Uploader.cancelJob(job503Cancel.id);
+            assert.ok(m3CancelCalls.includes('00000000-0000-0000-0000-000000000202'));
+
+            // Case C: 409 staged conflict cancels old mediaId and clears it so Retry performs a fresh upload
+            m3NextCompleteStatus = 409;
+            m3Uploader.addFiles([{ name: 'conflict409.png', type: 'image/png', size: 120 }]);
+            const job409 = m3Uploader.startUploadJob({ conversationId: convId });
+            await job409.promise;
+            assert.equal(job409.items[0].mediaId, null);
+            assert.ok(m3CancelCalls.includes('00000000-0000-0000-0000-000000000203'));
+            m3NextCompleteStatus = 200;
+            m3Uploader.retryJob(job409.id);
+            await job409.promise;
+            assert.equal(m3InitCalls, 4);
+            assert.equal(m3PutCalls, 4);
+            m3Uploader.destroy();
+
             uploader.destroy();
             lightbox.destroy();
 

@@ -441,11 +441,22 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
         }
     }
 
+    public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
+        string prefix,
+        CancellationToken ct = default) =>
+        ListObjectsAsync(prefix, startAfterKey: null, ct);
+
     public async IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
         string prefix,
+        string? startAfterKey,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidatePrefix(prefix);
+        if (!string.IsNullOrEmpty(startAfterKey)
+            && !startAfterKey.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            throw new DomainException("Storage listing resume key must match the requested prefix.");
+        }
 
         string? continuationToken = null;
         do
@@ -458,6 +469,9 @@ public sealed class CloudflareR2MediaStorage : IMediaStorage, IDisposable
                     BucketName = _bucketName,
                     Prefix = prefix,
                     MaxKeys = 500,
+                    StartAfter = continuationToken is null && !string.IsNullOrEmpty(startAfterKey)
+                        ? startAfterKey
+                        : null,
                     ContinuationToken = continuationToken
                 }, ct);
             }

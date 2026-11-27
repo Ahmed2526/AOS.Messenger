@@ -328,6 +328,28 @@ public class ExceptionHandlingMiddlewareTests
     }
 
     [Fact]
+    public async Task InvokeAsync_MediaProcessingBusyException_Returns503ServiceUnavailable()
+    {
+        var context = CreateHttpContext();
+        var middleware = new ExceptionHandlingMiddleware(
+            next: _ => throw new MediaProcessingBusyException("Image processing capacity is currently busy. Please try again."),
+            logger: NullLogger<ExceptionHandlingMiddleware>.Instance,
+            environment: new TestHostEnvironment { EnvironmentName = "Production" });
+
+        await middleware.InvokeAsync(context);
+
+        Assert.Equal((int)HttpStatusCode.ServiceUnavailable, context.Response.StatusCode);
+        Assert.Equal("application/problem+json", context.Response.ContentType);
+
+        var json = await ReadResponseBodyAsync(context);
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+        Assert.Equal(503, root.GetProperty("status").GetInt32());
+        Assert.Equal("Service Unavailable", root.GetProperty("title").GetString());
+        Assert.Equal("Image processing capacity is currently busy. Please try again.", root.GetProperty("detail").GetString());
+    }
+
+    [Fact]
     public async Task InvokeAsync_BadHttpRequestException413_Returns413WithNoStoreAndScrubbedDetail()
     {
         var context = CreateHttpContext();

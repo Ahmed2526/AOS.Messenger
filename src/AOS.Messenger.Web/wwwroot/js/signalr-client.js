@@ -154,7 +154,18 @@ export function createSignalRClient({
     let retryAttempt = 0;
     let startInFlight = null;
     let needsReconcileOnStart = false;
+    let reconcileSeq = 0;
+    let activeReconcile = null;
     const seenIncomingIds = new Set();
+
+    function bufferIfReconciling(eventConvId, evt) {
+        if (!activeReconcile || !eventConvId || !evt) return false;
+        if (!sameId(activeReconcile.convId, eventConvId)) return false;
+        if (activeReconcile.events.length < 200) {
+            activeReconcile.events.push(evt);
+        }
+        return true;
+    }
 
     function clearRetryTimer() {
         if (retryTimerId !== null) {
@@ -211,6 +222,7 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        activeReconcile = null;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();
@@ -360,9 +372,26 @@ export function createSignalRClient({
     async function reconcileActiveConversation(convId, expectedEpoch = state.switchEpoch) {
         if (isTerminated || !convId) return;
 
+        const preRequestContainerEl = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('messages-container')
+            : null;
+        const preRequestRowIds = new Set();
+        if (preRequestContainerEl && typeof preRequestContainerEl.querySelectorAll === 'function') {
+            const initialRows = preRequestContainerEl.querySelectorAll('.message-bubble-row');
+            for (let i = 0; i < initialRows.length; i++) {
+                const rowId = initialRows[i] && typeof initialRows[i].getAttribute === 'function'
+                    ? initialRows[i].getAttribute('data-message-id')
+                    : null;
+                if (rowId) preRequestRowIds.add(String(rowId));
+            }
+        }
+
+        const myReconcile = { seq: ++reconcileSeq, convId, events: [] };
+        activeReconcile = myReconcile;
+
         try {
             const bundle = await getConversationBundle(convId, { pageSize: DEFAULT_MESSAGE_PAGE_SIZE });
-            if (isTerminated || expectedEpoch !== state.switchEpoch || !sameId(state.activeConversationId, convId)) {
+            if (isTerminated || expectedEpoch !== state.switchEpoch || !sameId(state.activeConversationId, convId) || activeReconcile !== myReconcile) {
                 return;
             }
 
@@ -415,18 +444,47 @@ export function createSignalRClient({
             if (messages.length === 0) {
                 if (!bundleHasMore) {
                     state.paginationAbortController?.abort();
-                    renderMessages(containerEl, [], state.currentUserId, state.activeMeta, { scrollToEnd: false, hasMore: false });
-                    if (state.messagesById && typeof state.messagesById.clear === 'function') {
-                        state.messagesById.clear();
+                    const currentRows = typeof containerEl.querySelectorAll === 'function'
+                        ? Array.from(containerEl.querySelectorAll('.message-bubble-row'))
+                        : [];
+                    const hasPostRequestRows = currentRows.some(row => {
+                        const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                        return rowIdStr && !preRequestRowIds.has(String(rowIdStr));
+                    });
+
+                    if (!hasPostRequestRows) {
+                        renderMessages(containerEl, [], state.currentUserId, state.activeMeta, { scrollToEnd: false, hasMore: false });
+                        if (state.messagesById && typeof state.messagesById.clear === 'function') {
+                            state.messagesById.clear();
+                        }
+                        state.nextCursor = null;
+                        state.hasMore = false;
+                        state.hasPaginatedOlder = false;
+                        syncPaginationAttributes(containerEl, null, false);
+                        if (typeof onReconciledWindowReplaced === 'function') {
+                            onReconciledWindowReplaced();
+                        }
+                        updateSidebarLastMessage(convId, 'No messages yet', null, false, true);
+                    } else {
+                        for (const row of currentRows) {
+                            const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                            if (!rowIdStr || !preRequestRowIds.has(String(rowIdStr))) continue;
+                            applyMessageDeletedForMe(rowIdStr, null, null, null, true, { hasMore: false });
+                            if (state.messagesById && typeof state.messagesById.delete === 'function') {
+                                state.messagesById.delete(String(rowIdStr));
+                            }
+                            if (typeof onMessageDeleted === 'function') {
+                                onMessageDeleted(rowIdStr);
+                            }
+                        }
+                        state.nextCursor = null;
+                        state.hasMore = false;
+                        state.hasPaginatedOlder = false;
+                        syncPaginationAttributes(containerEl, null, false);
+                        if (typeof onReconciledWindowReplaced === 'function') {
+                            onReconciledWindowReplaced();
+                        }
                     }
-                    state.nextCursor = null;
-                    state.hasMore = false;
-                    state.hasPaginatedOlder = false;
-                    syncPaginationAttributes(containerEl, null, false);
-                    if (typeof onReconciledWindowReplaced === 'function') {
-                        onReconciledWindowReplaced();
-                    }
-                    updateSidebarLastMessage(convId, 'No messages yet', null, false, true);
                 }
                 return;
             }
@@ -441,12 +499,34 @@ export function createSignalRClient({
                 if (oldestBundleTime > newestRendered.time ||
                     (oldestBundleTime === newestRendered.time && oldestIdBig > newestRendered.id)) {
                     state.paginationAbortController?.abort();
+                    const preservedPostRequestMsgs = [];
+                    if (typeof containerEl.querySelectorAll === 'function' && state.messagesById) {
+                        const existingRows = Array.from(containerEl.querySelectorAll('.message-bubble-row'));
+                        for (const row of existingRows) {
+                            const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
+                            if (rowIdStr && !preRequestRowIds.has(String(rowIdStr)) && state.messagesById.has(String(rowIdStr))) {
+                                preservedPostRequestMsgs.push(state.messagesById.get(String(rowIdStr)));
+                            }
+                        }
+                    }
                     renderMessages(containerEl, sortedBundle, state.currentUserId, state.activeMeta, { scrollToEnd: true, hasMore: bundleHasMore });
                     if (state.messagesById && typeof state.messagesById.clear === 'function') {
                         state.messagesById.clear();
                         for (const msg of sortedBundle) {
                             const msgId = getMessageId(msg);
                             if (msgId) state.messagesById.set(msgId, msg);
+                        }
+                    }
+                    let latestPreserved = null;
+                    for (const msg of preservedPostRequestMsgs) {
+                        const msgId = getMessageId(msg);
+                        if (!msgId || isMessageRendered(msgId)) continue;
+                        const inserted = insertMessageOrdered(containerEl, msg, state.currentUserId, state.activeMeta);
+                        if (inserted) {
+                            if (state.messagesById && typeof state.messagesById.set === 'function') {
+                                state.messagesById.set(msgId, msg);
+                            }
+                            latestPreserved = msg;
                         }
                     }
                     state.nextCursor = bundleNextCursor;
@@ -456,7 +536,7 @@ export function createSignalRClient({
                     if (typeof onReconciledWindowReplaced === 'function') {
                         onReconciledWindowReplaced();
                     }
-                    const latestReplaced = sortedBundle[sortedBundle.length - 1];
+                    const latestReplaced = latestPreserved || sortedBundle[sortedBundle.length - 1];
                     if (latestReplaced) {
                         updateSidebarLastMessage(convId, formatMessagePreview(latestReplaced), getMessageId(latestReplaced), false, false, true);
                     }
@@ -464,7 +544,7 @@ export function createSignalRClient({
                 }
             }
 
-            // Prune rendered rows missing from the authoritative server window (>= oldestBundle) without touching older paginated history
+            // Prune rendered rows that existed before the request and are missing from the authoritative server window (>= oldestBundle)
             const bundleIds = new Set(sortedBundle.map(getMessageId).filter(Boolean));
             const oldestIdBig = parseBigIntSafe(oldestBundleId);
             let prunedAny = false;
@@ -473,7 +553,7 @@ export function createSignalRClient({
                 : [];
             for (const row of renderedRows) {
                 const rowIdStr = row && typeof row.getAttribute === 'function' ? row.getAttribute('data-message-id') : null;
-                if (!rowIdStr || bundleIds.has(rowIdStr)) continue;
+                if (!rowIdStr || bundleIds.has(rowIdStr) || !preRequestRowIds.has(String(rowIdStr))) continue;
 
                 let withinServerWindow = false;
                 if (Number.isFinite(oldestBundleTime)) {
@@ -576,8 +656,10 @@ export function createSignalRClient({
                 if (prunedAny && sortedBundle.length > 0) {
                     const latestSurviving = sortedBundle[sortedBundle.length - 1];
                     const latestSurvivingId = getMessageId(latestSurviving);
-                    if (latestSurvivingId) {
-                        updateSidebarLastMessage(convId, formatMessagePreview(latestSurviving), latestSurvivingId, true);
+                    if (latestSurvivingId && isLatestRenderedMessage(containerEl, latestSurvivingId)) {
+                        const latestDeleted = Boolean(latestSurviving.isDeletedForEveryone ?? latestSurviving.IsDeletedForEveryone);
+                        const latestPreview = latestDeleted ? 'This message was deleted' : formatMessagePreview(latestSurviving);
+                        updateSidebarLastMessage(convId, latestPreview, latestSurvivingId, false, false, false);
                     }
                 }
                 return;
@@ -608,6 +690,13 @@ export function createSignalRClient({
                 triggerSessionExpired();
             } else if (err?.code !== 'UNAUTHORIZED') {
                 console.warn('[SignalR] State reconciliation error:', err?.status || err);
+            }
+        } finally {
+            if (activeReconcile === myReconcile) {
+                activeReconcile = null;
+                if (!isTerminated && expectedEpoch === state.switchEpoch && sameId(state.activeConversationId, convId) && myReconcile.events.length > 0) {
+                    replayBufferedEvents(convId, myReconcile.events);
+                }
             }
         }
     }
@@ -660,7 +749,8 @@ export function createSignalRClient({
             onIncomingMessage(eventConvId, message);
         }
 
-        if (!isReplay && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message })) {
+        if (!isReplay && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessage', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessage', payload: message }))) {
             const foundDuringSwitch = updateSidebarLastMessage(eventConvId, previewText, msgId, false, false, true);
             if (!foundDuringSwitch) {
                 syncSidebarConversations(() => state.activeConversationId);
@@ -731,7 +821,8 @@ export function createSignalRClient({
             ? String(rawPreview)
             : newContent;
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageEdited', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageEdited', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageEdited', payload: message }))) {
             updateSidebarLastMessage(eventConvId, effectivePreview, msgId, true);
             return;
         }
@@ -771,7 +862,8 @@ export function createSignalRClient({
 
         const eventConvId = normalizeId(message.conversationId !== undefined ? message.conversationId : message.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageDeletedForEveryone', payload: message }))) {
             updateSidebarLastMessage(eventConvId, 'This message was deleted', msgId, true);
             return;
         }
@@ -815,7 +907,8 @@ export function createSignalRClient({
         const newLastId = message.newLastMessageId !== undefined ? message.newLastMessageId : message.NewLastMessageId;
         const newLastPreview = message.newLastMessagePreview !== undefined ? message.newLastMessagePreview : message.NewLastMessagePreview;
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveMessageDeletedForMe', payload: message }))) {
             applyMessageDeletedForMe(msgId, eventConvId, newLastId, newLastPreview, false);
             return;
         }
@@ -846,7 +939,8 @@ export function createSignalRClient({
 
         const eventConvId = normalizeId(reaction.conversationId !== undefined ? reaction.conversationId : reaction.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveReactionUpdated', payload: reaction }))) {
             return;
         }
 
@@ -878,7 +972,8 @@ export function createSignalRClient({
         if (!receipt || isTerminated) return;
         const eventConvId = normalizeId(receipt.conversationId !== undefined ? receipt.conversationId : receipt.ConversationId);
 
-        if (!isReplay && eventConvId && state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt })) {
+        if (!isReplay && eventConvId && (state.bufferRealtimeEvent(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt }) ||
+            bufferIfReconciling(eventConvId, { type: 'ReceiveReceiptUpdated', payload: receipt }))) {
             return;
         }
 
@@ -949,6 +1044,7 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        activeReconcile = null;
         requestedConversationId = null;
         joinedConversationId = null;
         setStatus('connected');
@@ -1128,6 +1224,7 @@ export function createSignalRClient({
         clearRetryTimer();
         retryAttempt = 0;
         needsReconcileOnStart = false;
+        activeReconcile = null;
         requestedConversationId = null;
         joinedConversationId = null;
         seenIncomingIds.clear();

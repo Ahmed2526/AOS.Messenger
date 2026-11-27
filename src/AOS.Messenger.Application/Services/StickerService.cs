@@ -539,7 +539,8 @@ public sealed class StickerService : IStickerService
             stagingKey,
             "Upload cancelled by user.",
             verifiedSizeBytes: measuredBytes,
-            ct);
+            ct,
+            cleanStagingImmediately: measuredBytes is not null);
         if (readyConflictDto is not null)
         {
             throw new ConflictException($"Sticker upload cannot be cancelled from state '{StickerState.Ready}'.");
@@ -778,7 +779,8 @@ public sealed class StickerService : IStickerService
         string stagingKey,
         string failureReason,
         long? verifiedSizeBytes,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool cleanStagingImmediately = true)
     {
         var nowUtc = _timeProvider.GetUtcNow();
         sticker.MarkFailed(failureReason, nowUtc, verifiedSizeBytes);
@@ -804,7 +806,7 @@ public sealed class StickerService : IStickerService
             return (null, ex);
         }
 
-        if (await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None))
+        if (cleanStagingImmediately && await BestEffortDeleteStorageAsync(stagingKey, CancellationToken.None))
         {
             sticker.MarkPurged(_timeProvider.GetUtcNow());
             try

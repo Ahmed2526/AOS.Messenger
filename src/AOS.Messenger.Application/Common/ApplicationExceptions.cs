@@ -45,3 +45,14 @@ public sealed class MediaStorageException : Exception
 
     public MediaStorageException(string message, Exception innerException) : base(message, innerException) { }
 }
+
+/// <summary>
+/// Thrown when server-side image processing capacity is temporarily saturated or timed out
+/// while the staged upload itself remains valid and retryable.
+/// </summary>
+public sealed class MediaProcessingBusyException : Exception
+{
+    public MediaProcessingBusyException(string message) : base(message) { }
+
+    public MediaProcessingBusyException(string message, Exception innerException) : base(message, innerException) { }
+}

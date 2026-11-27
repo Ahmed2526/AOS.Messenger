@@ -1542,6 +1542,32 @@ public sealed class Phase8MessageInteractionsTests : IClassFixture<SqlTestDataba
         Assert.DoesNotContain(list, c => c.Id == conv.Id);
     }
 
+    [Fact]
+    public async Task SendMessage_IdempotentReplyReplay_AfterDeleteForMeOnParent_OmitsInvisibleParent()
+    {
+        var (service, db, time) = CreateService();
+        var userA = await SeedUserAsync(db, "alice_repvis", "Alice");
+        var userB = await SeedUserAsync(db, "bob_repvis", "Bob");
+        var idA = new UserId(userA.Id);
+        var idB = new UserId(userB.Id);
+        var conv = await SeedConversationAsync(db, idA, idB);
+
+        var parent = await service.SendMessageAsync(idB, conv.Id, new SendMessageRequestDto("Secret Parent", Guid.NewGuid().ToString("N")));
+        time.Advance(TimeSpan.FromSeconds(5));
+        var replyKey = Guid.NewGuid().ToString("N");
+        var initialReply = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("Reply Body", replyKey, parent.Id));
+        Assert.NotNull(initialReply.ReplyTo);
+        Assert.Equal(parent.Id.Value, initialReply.ReplyTo!.MessageId);
+
+        // Hide the parent message via DeleteForMe for Alice
+        await service.DeleteForMeAsync(idA, conv.Id, parent.Id);
+
+        // Replaying the idempotent reply returns the existing reply without leaking the hidden parent preview
+        var replayed = await service.SendMessageAsync(idA, conv.Id, new SendMessageRequestDto("Reply Body", replyKey, parent.Id));
+        Assert.Equal(initialReply.Id, replayed.Id);
+        Assert.Null(replayed.ReplyTo);
+    }
+
     private static MessageService CreateScopedMessageService(IServiceProvider provider)
     {
         return new MessageService(

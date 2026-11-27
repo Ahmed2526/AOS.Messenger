@@ -232,7 +232,7 @@ internal static class ImageFrameCounter
             long payloadSize = BinaryPrimitives.ReadUInt32LittleEndian(chunkHeader[4..8]);
             long paddedSize = payloadSize + (payloadSize & 1L);
 
-            if (payloadSize > riffEnd - payloadStart)
+            if (paddedSize > riffEnd - payloadStart)
             {
                 throw new DomainException("Truncated or oversized WebP chunk payload.");
             }

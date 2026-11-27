@@ -60,9 +60,14 @@ public sealed class ChatBottomScrollAnchorTests
             let now = 1000;
             let resizeCallback = null;
             let resizeDisconnected = 0;
+            let deliverInitialObservationOnObserve = false;
             globalThis.ResizeObserver = class {
                 constructor(cb) { resizeCallback = cb; }
-                observe() {}
+                observe(target) {
+                    if (deliverInitialObservationOnObserve && resizeCallback) {
+                        resizeCallback([{ target, contentRect: { height: Number(streamEl?.scrollHeight || 0) } }]);
+                    }
+                }
                 disconnect() { resizeDisconnected++; }
             };
 
@@ -154,7 +159,8 @@ public sealed class ChatBottomScrollAnchorTests
             containerEl.dispatch('load', { target: { tagName: 'IMG' } }, true);
             assert.equal(pinner.isActive(), false);
 
-            // 9b. Smooth scroll advancing downward must NOT snap or disarm prematurely, and upward scroll during smooth still disarms
+            // 9b. Smooth scroll advancing downward must NOT snap or disarm prematurely (even on initial ResizeObserver observation),
+            //     actual layout growth still pins, and upward scroll during smooth still disarms
             blocked = false;
             let smoothScrollCalls = 0;
             streamEl.scrollTo = ({ top, behavior }) => {
@@ -163,9 +169,12 @@ public sealed class ChatBottomScrollAnchorTests
             streamEl.scrollTop = 1000;
             streamEl.scrollHeight = 2000;
             streamEl.clientHeight = 600;
+            deliverInitialObservationOnObserve = true;
             pinner.pin({ smooth: true, settleMs: 2000, maxWindowMs: 4000 });
+            deliverInitialObservationOnObserve = false;
             assert.equal(smoothScrollCalls, 1);
             assert.equal(pinner.isActive(), true);
+            assert.equal(streamEl.scrollTop, 1000, 'Initial unchanged ResizeObserver observation must not interrupt smooth scroll');
             // Mid-animation frames advancing downward (1000 -> 1060 -> 1200 -> 1400)
             now += 16;
             streamEl.scrollTop = 1060;
@@ -181,7 +190,20 @@ public sealed class ChatBottomScrollAnchorTests
             streamEl.dispatch('scroll');
             assert.equal(pinner.isActive(), false, 'Upward scroll during smooth animation must disarm');
 
+            // Genuine layout growth after unchanged initial ResizeObserver observation still re-pins to new bottom
+            deliverInitialObservationOnObserve = true;
+            streamEl.scrollTop = 1000;
+            streamEl.scrollHeight = 2000;
+            pinner.pin({ smooth: true, settleMs: 2000, maxWindowMs: 4000 });
+            deliverInitialObservationOnObserve = false;
+            assert.equal(streamEl.scrollTop, 1000, 'Second pin must also ignore unchanged initial ResizeObserver');
+            streamEl.scrollHeight = 2150;
+            resizeCallback([{ target: containerEl, contentRect: { height: 2150 } }]);
+            assert.equal(streamEl.scrollTop, 2150, 'Actual layout growth after initial observation must re-pin');
+            pinner.disarm();
+
             // 9c. pointercancel clears pointerDownOnStream cleanly
+            streamEl.scrollHeight = 2000;
             streamEl.scrollTop = 1400;
             pinner.pin();
             streamEl.dispatch('pointerdown');

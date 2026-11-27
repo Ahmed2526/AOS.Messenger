@@ -373,6 +373,7 @@ export function createStickerPicker(options = {}) {
     let searchQuery = '';
     const favoriteIds = new Set();
     const favoriteInFlightIds = new Set();
+    const favoriteInFlightPromises = new Map();
 
     // Mounted picker DOM refs
     let hostEl = null;
@@ -528,12 +529,21 @@ export function createStickerPicker(options = {}) {
     }
 
     function setStarButtonsDisabled(stickerId, disabled) {
-        if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function' || !stickerId) return;
-        const buttons = document.querySelectorAll('[data-sticker-star]');
-        for (let i = 0; i < buttons.length; i++) {
-            const btn = buttons[i];
-            if (btn.getAttribute('data-sticker-star') === stickerId) {
-                btn.disabled = Boolean(disabled);
+        if (typeof document === 'undefined' || !stickerId) return;
+        const isDisabled = Boolean(disabled);
+        if (typeof document.querySelectorAll === 'function') {
+            const buttons = document.querySelectorAll('[data-sticker-star]');
+            for (let i = 0; i < buttons.length; i++) {
+                const btn = buttons[i];
+                if (btn.getAttribute('data-sticker-star') === stickerId) {
+                    btn.disabled = isDisabled;
+                }
+            }
+        }
+        if (activeInfoSticker && activeInfoSticker.id === stickerId && typeof document.getElementById === 'function') {
+            const infoFavBtn = document.getElementById('sticker-info-fav-btn');
+            if (infoFavBtn) {
+                infoFavBtn.disabled = isDisabled;
             }
         }
     }
@@ -553,8 +563,8 @@ export function createStickerPicker(options = {}) {
     async function toggleFavorite(sticker, { sourceConversationId = null, sourceMessageId = null } = {}) {
         const normalized = normalizeSticker(sticker);
         if (!normalized || !normalized.id) return false;
-        if (favoriteInFlightIds.has(normalized.id)) {
-            return favoriteIds.has(normalized.id);
+        if (favoriteInFlightPromises.has(normalized.id)) {
+            return await favoriteInFlightPromises.get(normalized.id);
         }
 
         const reqUserId = normalizeId(getCurrentUserId());
@@ -562,49 +572,68 @@ export function createStickerPicker(options = {}) {
         favoriteInFlightIds.add(normalized.id);
         setStarButtonsDisabled(normalized.id, true);
 
-        try {
-            if (currentlyFav) {
-                await removeFavoriteFn(normalized.id);
-                if (normalizeId(getCurrentUserId()) !== reqUserId) return false;
-                favoriteIds.delete(normalized.id);
-                if (catalog) {
-                    catalog.favorites = catalog.favorites.filter((s) => s.id !== normalized.id);
-                    rebuildFavoriteSet();
+        const promise = (async () => {
+            try {
+                if (currentlyFav) {
+                    await removeFavoriteFn(normalized.id);
+                    if (normalizeId(getCurrentUserId()) !== reqUserId) return false;
+                    favoriteIds.delete(normalized.id);
+                    if (catalog) {
+                        catalog.favorites = catalog.favorites.filter((s) => s.id !== normalized.id);
+                        rebuildFavoriteSet();
+                    }
+                    syncMessageRowFavoriteAttributes(normalized.id, false);
+                    if (activeInfoSticker && activeInfoSticker.id === normalized.id) {
+                        activeInfoSticker.isFavorited = false;
+                        syncInfoModalStarButton(false);
+                    }
+                    render();
+                    return false;
+                } else {
+                    const payload = { stickerId: normalized.id };
+                    if (sourceConversationId && sourceMessageId) {
+                        payload.sourceConversationId = sourceConversationId;
+                        payload.sourceMessageId = Number(sourceMessageId);
+                    }
+                    const saved = await addFavoriteFn(payload);
+                    if (normalizeId(getCurrentUserId()) !== reqUserId) return false;
+                    const savedNorm = normalizeSticker(saved) || { ...normalized, isFavorited: true };
+                    savedNorm.isFavorited = true;
+                    favoriteIds.add(savedNorm.id);
+                    if (catalog) {
+                        catalog.favorites = [
+                            savedNorm,
+                            ...catalog.favorites.filter((s) => s.id !== savedNorm.id)
+                        ];
+                        rebuildFavoriteSet();
+                    }
+                    syncMessageRowFavoriteAttributes(savedNorm.id, true);
+                    if (activeInfoSticker && activeInfoSticker.id === savedNorm.id) {
+                        activeInfoSticker.isFavorited = true;
+                        syncInfoModalStarButton(true);
+                    }
+                    render();
+                    return true;
                 }
-                syncMessageRowFavoriteAttributes(normalized.id, false);
-                render();
-                return false;
-            } else {
-                const payload = { stickerId: normalized.id };
-                if (sourceConversationId && sourceMessageId) {
-                    payload.sourceConversationId = sourceConversationId;
-                    payload.sourceMessageId = Number(sourceMessageId);
+            } catch (err) {
+                if (normalizeId(getCurrentUserId()) === reqUserId && onNotice) {
+                    onNotice(err?.message || 'Could not update favorite sticker.');
                 }
-                const saved = await addFavoriteFn(payload);
-                if (normalizeId(getCurrentUserId()) !== reqUserId) return false;
-                const savedNorm = normalizeSticker(saved) || { ...normalized, isFavorited: true };
-                savedNorm.isFavorited = true;
-                favoriteIds.add(savedNorm.id);
-                if (catalog) {
-                    catalog.favorites = [
-                        savedNorm,
-                        ...catalog.favorites.filter((s) => s.id !== savedNorm.id)
-                    ];
-                    rebuildFavoriteSet();
+                const currentFav = favoriteIds.has(normalized.id);
+                if (activeInfoSticker && activeInfoSticker.id === normalized.id) {
+                    activeInfoSticker.isFavorited = currentFav;
+                    syncInfoModalStarButton(currentFav);
                 }
-                syncMessageRowFavoriteAttributes(savedNorm.id, true);
-                render();
-                return true;
+                return currentFav;
+            } finally {
+                favoriteInFlightIds.delete(normalized.id);
+                favoriteInFlightPromises.delete(normalized.id);
+                setStarButtonsDisabled(normalized.id, false);
             }
-        } catch (err) {
-            if (normalizeId(getCurrentUserId()) === reqUserId && onNotice) {
-                onNotice(err?.message || 'Could not update favorite sticker.');
-            }
-            return favoriteIds.has(normalized.id);
-        } finally {
-            favoriteInFlightIds.delete(normalized.id);
-            setStarButtonsDisabled(normalized.id, false);
-        }
+        })();
+
+        favoriteInFlightPromises.set(normalized.id, promise);
+        return await promise;
     }
 
     function getConfirmModalEls() {
@@ -1440,7 +1469,7 @@ export function createStickerPicker(options = {}) {
 
         syncInfoModalStarButton(isFav);
         const favBtn = document.getElementById('sticker-info-fav-btn');
-        if (favBtn) favBtn.disabled = false;
+        if (favBtn) favBtn.disabled = favoriteInFlightIds.has(normalized.id);
         modal.classList.remove('hidden');
     }
 
@@ -1499,23 +1528,21 @@ export function createStickerPicker(options = {}) {
         const favBtn = e.target.closest('#sticker-info-fav-btn');
         if (favBtn && activeInfoSticker) {
             e.preventDefault();
+            if (favBtn.disabled || favoriteInFlightIds.has(activeInfoSticker.id)) {
+                return;
+            }
             const targetSticker = activeInfoSticker;
             const targetContext = activeInfoContext;
-            const expectedGen = infoImageGeneration;
             favBtn.disabled = true;
-            try {
-                const nowFav = await toggleFavorite(targetSticker, {
-                    sourceConversationId: targetContext?.conversationId || null,
-                    sourceMessageId: targetContext?.messageId || null
-                });
-                targetSticker.isFavorited = nowFav;
-                if (activeInfoSticker === targetSticker && infoImageGeneration === expectedGen) {
-                    syncInfoModalStarButton(nowFav);
-                }
-            } finally {
-                if (infoImageGeneration === expectedGen) {
-                    favBtn.disabled = false;
-                }
+            const nowFav = await toggleFavorite(targetSticker, {
+                sourceConversationId: targetContext?.conversationId || null,
+                sourceMessageId: targetContext?.messageId || null
+            });
+            targetSticker.isFavorited = nowFav;
+            if (activeInfoSticker && activeInfoSticker.id === targetSticker.id) {
+                activeInfoSticker.isFavorited = nowFav;
+                syncInfoModalStarButton(nowFav);
+                favBtn.disabled = favoriteInFlightIds.has(targetSticker.id);
             }
             return;
         }
@@ -1560,6 +1587,7 @@ export function createStickerPicker(options = {}) {
         searchQuery = '';
         favoriteIds.clear();
         favoriteInFlightIds.clear();
+        favoriteInFlightPromises.clear();
         clearStickerUrlCache();
         closeStickerInfoModal();
         closeConfirmModal({ restoreFocus: false });

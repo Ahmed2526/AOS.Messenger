@@ -346,6 +346,19 @@ public sealed class MessageService : IMessageService
                 ? parentMessage
                 : await _messagePersistence.GetByIdAsync(conversationId, persisted.ParentMessageId, ct);
 
+            if (parent is not null && parentMessage is null)
+            {
+                var cutoff = await GetEffectiveCutoffUtcAsync(conversationId, senderId, ct);
+                if (cutoff.HasValue && parent.CreatedAtUtc < cutoff.Value)
+                {
+                    parent = null;
+                }
+                else if (await _messagePersistence.IsMessageDeletedForUserAsync(conversationId, parent.Id, senderId, ct))
+                {
+                    parent = null;
+                }
+            }
+
             if (parent is not null)
             {
                 var parentSenderProfile = await _userReader.GetByIdAsync(parent.SenderId, ct);

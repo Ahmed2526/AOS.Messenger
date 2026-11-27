@@ -88,8 +88,15 @@ export function computeNextLastSeenRefreshDelayMs(lastSeenAtUtc, now = new Date(
         return Math.max(250, Math.min(65 * 1000, msUntilMinute + 250));
     }
 
-    // Past-year timestamps format as "Last seen MMM D, YYYY" and never change again
-    if (d.getFullYear() < refNow.getFullYear()) {
+    const yesterday = new Date(refNow);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isYesterday = d.getFullYear() === yesterday.getFullYear() &&
+                        d.getMonth() === yesterday.getMonth() &&
+                        d.getDate() === yesterday.getDate();
+
+    // Past-year timestamps format as "Last seen MMM D, YYYY" and never change again,
+    // except Dec 31 -> Jan 1 while it still displays "Last seen yesterday".
+    if (!isYesterday && d.getFullYear() < refNow.getFullYear()) {
         return null;
     }
 

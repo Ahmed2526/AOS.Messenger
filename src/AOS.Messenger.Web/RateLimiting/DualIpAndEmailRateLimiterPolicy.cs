@@ -136,7 +136,7 @@ public sealed class DualIpAndEmailRateLimiterPolicy : IRateLimiterPolicy<string>
             httpContext.Items[ChargedEmailItemKey] = email;
         }
 
-        var partitionKey = string.IsNullOrEmpty(email) ? ip : $"{ip}:{email}";
+        var partitionKey = string.IsNullOrEmpty(email) ? ip : $"{ip}|{email}";
 
         return RateLimitPartition.Get(
             partitionKey,

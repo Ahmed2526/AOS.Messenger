@@ -121,8 +121,9 @@ public sealed class PresenceLastSeenAutoRefreshTests
             // Another timer should be scheduled for the next midnight boundary
             assert.equal(scheduled.size, 1);
 
-            // 3. Advance clock to the next day and simulate returning to the tab (visibilitychange)
-            currentMs = baseMs + 25 * 60 * 60 * 1000;
+            // 3. Advance clock to the next local calendar day and simulate returning to the tab (visibilitychange)
+            const baseLocal = new Date(baseMs);
+            currentMs = new Date(baseLocal.getFullYear(), baseLocal.getMonth(), baseLocal.getDate() + 1, 12, 0, 0).getTime();
             document.visibilityState = 'visible';
             document.dispatchEvent({ type: 'visibilitychange' });
             assert.ok(text.textContent.startsWith('Last seen yesterday at '), `Expected 'Last seen yesterday at ...', got '${text.textContent}'`);
@@ -134,13 +135,19 @@ public sealed class PresenceLastSeenAutoRefreshTests
             assert.equal(text.getAttribute('data-last-seen-at'), '');
             assert.equal(scheduled.size, 0);
 
-            // 5. Delay helper sanity checks (including past-year timestamps needing no further timer)
+            // 5. Delay helper sanity checks (including past-year timestamps & Dec 31 -> Jan 1 "yesterday" rollover)
             assert.equal(computeNextLastSeenRefreshDelayMs(null), null);
             assert.equal(computeNextLastSeenRefreshDelayMs('not-a-date'), null);
             assert.equal(
                 computeNextLastSeenRefreshDelayMs('2025-05-01T10:00:00Z', new Date(Date.UTC(2026, 10, 27, 14, 0, 0))),
                 null
             );
+            const dec31Local = new Date(2026, 11, 31, 20, 0, 0);
+            const jan1Local = new Date(2027, 0, 1, 10, 0, 0);
+            const jan2Local = new Date(2027, 0, 2, 0, 1, 0);
+            const dec31ToJan1Delay = computeNextLastSeenRefreshDelayMs(dec31Local, jan1Local);
+            assert.ok(typeof dec31ToJan1Delay === 'number' && dec31ToJan1Delay > 0, 'Dec 31 -> Jan 1 displaying yesterday must keep scheduling midnight refresh');
+            assert.equal(computeNextLastSeenRefreshDelayMs(dec31Local, jan2Local), null);
 
             // 6. destroy() clears timers and document visibilitychange listener
             presence.handlePresenceChanged({ userId: 'peer-1', isOnline: false, lastSeenAtUtc: logoffIso });

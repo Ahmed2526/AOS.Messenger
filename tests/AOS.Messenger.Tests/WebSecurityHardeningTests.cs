@@ -231,6 +231,24 @@ public sealed class WebSecurityHardeningTests
         Assert.False(exhaustedLease.IsAcquired);
 
         // An overflow email identity hitting its shard cap is still throttled after 5 permits.
+        // Use a dedicated policy with only its exact maps filled so no prior churn occupies overflow shards.
+        using var overflowPolicy = new DualIpAndEmailRateLimiterPolicy(maxCacheEntries: 4, clock);
+        for (int i = 0; i < 4; i++)
+        {
+            var seedCtx = new DefaultHttpContext();
+            seedCtx.Connection.RemoteIpAddress = IPAddress.Parse($"10.60.0.{i + 1}");
+            seedCtx.Request.ContentType = "application/x-www-form-urlencoded";
+            seedCtx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["Email"] = $"exact{i}@example.com"
+            });
+
+            var seedPart = overflowPolicy.GetPartition(seedCtx);
+            using var seedLimiter = seedPart.Factory(seedPart.PartitionKey);
+            using var seedLease = seedLimiter.AttemptAcquire(1);
+            Assert.True(seedLease.IsAcquired);
+        }
+
         var overflowSpamCtx = new DefaultHttpContext();
         overflowSpamCtx.Connection.RemoteIpAddress = IPAddress.Parse("10.50.2.1");
         overflowSpamCtx.Request.ContentType = "application/x-www-form-urlencoded";
@@ -238,7 +256,7 @@ public sealed class WebSecurityHardeningTests
         {
             ["Email"] = "overflow-target@example.com"
         });
-        var overflowPartition = policy.GetPartition(overflowSpamCtx);
+        var overflowPartition = overflowPolicy.GetPartition(overflowSpamCtx);
         using var overflowLimiter = overflowPartition.Factory(overflowPartition.PartitionKey);
         for (int i = 0; i < DualIpAndEmailRateLimiterPolicy.EmailPermitLimitPerMinute; i++)
         {
@@ -473,7 +491,7 @@ public sealed class WebSecurityHardeningTests
             });
 
             var part = policy.GetPartition(recCtx);
-            Assert.EndsWith(":victim@example.com", part.PartitionKey, StringComparison.Ordinal);
+            Assert.EndsWith("|victim@example.com", part.PartitionKey, StringComparison.Ordinal);
             using var limiter = part.Factory(part.PartitionKey);
             using var lease = limiter.AttemptAcquire(1);
             Assert.True(lease.IsAcquired);
@@ -607,5 +625,62 @@ public sealed class WebSecurityHardeningTests
 
         var ex = await Assert.ThrowsAsync<BadHttpRequestException>(() => middleware.InvokeAsync(httpContext));
         Assert.Equal(StatusCodes.Status413PayloadTooLarge, ex.StatusCode);
+    }
+
+    [Fact]
+    public void DualIpAndEmailRateLimiterPolicy_Ipv6PartitionKey_NeverCollidesWithEmailLessIpv6()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 27, 10, 0, 0, TimeSpan.Zero));
+        using var policy = new DualIpAndEmailRateLimiterPolicy(maxCacheEntries: 100, clock);
+
+        // Email-less request from 2001:db8::1:abcd
+        var emailLessCtx = new DefaultHttpContext();
+        emailLessCtx.Connection.RemoteIpAddress = IPAddress.Parse("2001:db8::1:abcd");
+        var emailLessPart = policy.GetPartition(emailLessCtx);
+        Assert.Equal("2001:db8::1:abcd", emailLessPart.PartitionKey);
+        using (var l = emailLessPart.Factory(emailLessPart.PartitionKey))
+        using (var lease = l.AttemptAcquire(1))
+        {
+            Assert.True(lease.IsAcquired);
+        }
+
+        // Request from 2001:db8::1 with UsernameOrEmail=abcd must get a distinct partition key and enforce email quota
+        for (int i = 0; i < DualIpAndEmailRateLimiterPolicy.EmailPermitLimitPerMinute; i++)
+        {
+            var idCtx = new DefaultHttpContext();
+            idCtx.Connection.RemoteIpAddress = IPAddress.Parse("2001:db8::1");
+            idCtx.SetEndpoint(new Endpoint(_ => Task.CompletedTask,
+                new EndpointMetadataCollection(new EnableRateLimitingAttribute("recover-account-limiter")),
+                "RecoverAccount"));
+            idCtx.Request.ContentType = "application/x-www-form-urlencoded";
+            idCtx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+            {
+                ["UsernameOrEmail"] = "abcd"
+            });
+
+            var part = policy.GetPartition(idCtx);
+            Assert.Equal("2001:db8::1|abcd", part.PartitionKey);
+            Assert.NotEqual(emailLessPart.PartitionKey, part.PartitionKey);
+            using var limiter = part.Factory(part.PartitionKey);
+            using var lease = limiter.AttemptAcquire(1);
+            Assert.True(lease.IsAcquired);
+        }
+
+        var blockedCtx = new DefaultHttpContext();
+        blockedCtx.Connection.RemoteIpAddress = IPAddress.Parse("2001:db8::2");
+        blockedCtx.SetEndpoint(new Endpoint(_ => Task.CompletedTask,
+            new EndpointMetadataCollection(new EnableRateLimitingAttribute("recover-account-limiter")),
+            "RecoverAccount"));
+        blockedCtx.Request.ContentType = "application/x-www-form-urlencoded";
+        blockedCtx.Request.Form = new FormCollection(new Dictionary<string, StringValues>
+        {
+            ["UsernameOrEmail"] = "abcd"
+        });
+        var blockedPart = policy.GetPartition(blockedCtx);
+        using (var blockedLimiter = blockedPart.Factory(blockedPart.PartitionKey))
+        using (var rejected = blockedLimiter.AttemptAcquire(1))
+        {
+            Assert.False(rejected.IsAcquired);
+        }
     }
 }

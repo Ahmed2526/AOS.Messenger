@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AOS.Messenger.Application.Common;
 using AOS.Messenger.Application.Common.Interfaces;
 using AOS.Messenger.Domain.Constants;
@@ -34,6 +35,7 @@ public sealed class MediaCleanupService : BackgroundService
     private readonly MediaOptions _options;
     private readonly TimeProvider _timeProvider;
     private readonly ILogger<MediaCleanupService> _logger;
+    private readonly ConcurrentDictionary<string, string?> _orphanSweepResumeKeys = new(StringComparer.Ordinal);
     private DateTimeOffset? _lastPermanentOrphanSweepUtc;
 
     public MediaCleanupService(
@@ -145,21 +147,9 @@ public sealed class MediaCleanupService : BackgroundService
                 ct);
 
         // Step 2b: Atomically retire unreferenced Ready stickers belonging to soft-deleted custom packs
-        // BEFORE deleting any R2 objects, so concurrent RepeatableRead message sends or favorite
-        // additions can never attach to a sticker whose binary is being deleted.
-        await db.Stickers
-            .Where(s => s.UploaderId != null
-                        && s.State == StickerState.Ready
-                        && s.PurgedAtUtc == null
-                        && db.StickerPacks.Any(p => p.Id == s.PackId && !p.IsSystemPack && p.IsDeleted)
-                        && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone)
-                        && !db.UserFavoriteStickers.Any(f => f.StickerId == s.Id)
-                        && !db.UserRecentStickers.Any(r => r.StickerId == s.Id && r.UserId != s.UploaderId))
-            .ExecuteUpdateAsync(
-                s => s
-                    .SetProperty(st => st.State, StickerState.Archived)
-                    .SetProperty(st => st.DeletedAtUtc, st => st.DeletedAtUtc ?? nowUtc),
-                ct);
+        // BEFORE deleting any R2 objects, acquiring an exclusive row lock on the sticker before evaluating
+        // favorite/recent/message absence predicates so concurrent RepeatableRead favorite additions serialize cleanly.
+        await RetireUnreferencedDeletedPackStickersAsync(db, nowUtc, ct);
 
         // Step 3: Delete storage objects for unpurged Failed/Deleted/Archived rows, then stamp PurgedAtUtc.
         var storagePurgedCount = await PurgeDeletedOrFailedStorageObjectsAsync(db, ct);
@@ -453,10 +443,66 @@ public sealed class MediaCleanupService : BackgroundService
         return totalPurged;
     }
 
+    private async Task RetireUnreferencedDeletedPackStickersAsync(
+        ApplicationDbContext db,
+        DateTimeOffset nowUtc,
+        CancellationToken ct)
+    {
+        var candidateIds = await db.Stickers
+            .AsNoTracking()
+            .Where(s => s.UploaderId != null
+                        && s.State == StickerState.Ready
+                        && s.PurgedAtUtc == null
+                        && db.StickerPacks.Any(p => p.Id == s.PackId && !p.IsSystemPack && p.IsDeleted))
+            .OrderBy(s => s.Id)
+            .Select(s => s.Id)
+            .ToListAsync(ct);
+
+        if (candidateIds.Count == 0)
+        {
+            return;
+        }
+
+        var strategy = db.Database.CreateExecutionStrategy();
+        foreach (var stickerId in candidateIds)
+        {
+            await strategy.ExecuteAsync(async () =>
+            {
+                await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+                var lockedId = await db.Database
+                    .SqlQuery<Guid>($"SELECT Id AS Value FROM Stickers WITH (XLOCK, ROWLOCK) WHERE Id = {stickerId.Value} AND State = {(int)StickerState.Ready} AND PurgedAtUtc IS NULL")
+                    .FirstOrDefaultAsync(ct);
+
+                if (lockedId != Guid.Empty)
+                {
+                    await db.Stickers
+                        .Where(s => s.Id == stickerId
+                                    && s.UploaderId != null
+                                    && s.State == StickerState.Ready
+                                    && s.PurgedAtUtc == null
+                                    && db.StickerPacks.Any(p => p.Id == s.PackId && !p.IsSystemPack && p.IsDeleted)
+                                    && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone)
+                                    && !db.UserFavoriteStickers.Any(f => f.StickerId == s.Id)
+                                    && !db.UserRecentStickers.Any(r => r.StickerId == s.Id && r.UserId != s.UploaderId))
+                        .ExecuteUpdateAsync(
+                            s => s
+                                .SetProperty(st => st.State, StickerState.Archived)
+                                .SetProperty(st => st.DeletedAtUtc, st => st.DeletedAtUtc ?? nowUtc),
+                            ct);
+                }
+
+                await tx.CommitAsync(ct);
+            });
+        }
+    }
+
     private async Task<int> PurgeFailedAndUnreferencedArchivedStickersAsync(ApplicationDbContext db, CancellationToken ct)
     {
         var totalPurged = 0;
         var failedIds = new HashSet<StickerId>();
+        var pendingPrefix = MediaConstraints.PendingKeyPrefix;
+        var uploadWindowCutoff = _timeProvider.GetUtcNow().AddMinutes(-Math.Max(1, _options.PresignedPutTtlMinutes));
 
         while (!ct.IsCancellationRequested && failedIds.Count < MaxFailedDeletesPerPass)
         {
@@ -466,7 +512,10 @@ public sealed class MediaCleanupService : BackgroundService
                             && s.ObjectKey != null
                             && s.PurgedAtUtc == null
                             && !failedIds.Contains(s.Id)
-                            && (s.State == StickerState.Failed
+                            && ((s.State == StickerState.Failed
+                                 && (s.VerifiedSizeBytes != null
+                                     || !s.ObjectKey.StartsWith(pendingPrefix)
+                                     || s.CreatedAtUtc < uploadWindowCutoff))
                                 || (s.State == StickerState.Archived
                                     && !db.Messages.Any(m => m.StickerId == s.Id && !m.IsDeletedForEveryone)
                                     && !db.UserFavoriteStickers.Any(f => f.StickerId == s.Id))))
@@ -579,18 +628,24 @@ public sealed class MediaCleanupService : BackgroundService
         var scannedCount = 0;
         var maxScanPerPrefix = Math.Max(1, _options.MaxOrphanSweepObjectsPerPrefixPerPass);
         var chunk = new List<StoredObjectInfo>(BatchSize);
+        _orphanSweepResumeKeys.TryGetValue(prefix, out var startAfterKey);
+        string? lastScannedKey = null;
+        var hitScanCap = false;
 
-        await foreach (var item in _mediaStorage.ListObjectsAsync(prefix, ct))
+        await foreach (var item in _mediaStorage.ListObjectsAsync(prefix, startAfterKey, ct))
         {
-            scannedCount++;
-            if (scannedCount > maxScanPerPrefix)
+            if (scannedCount >= maxScanPerPrefix)
             {
+                hitScanCap = true;
                 _logger.LogInformation(
                     "Reached per-pass orphan scan cap ({MaxObjects}) for prefix {Prefix}; remaining objects deferred to next sweep.",
                     maxScanPerPrefix,
                     prefix);
                 break;
             }
+
+            scannedCount++;
+            lastScannedKey = item.ObjectKey;
 
             if (item.LastModifiedUtc >= orphanCutoff)
             {
@@ -608,6 +663,15 @@ public sealed class MediaCleanupService : BackgroundService
         if (chunk.Count > 0)
         {
             deletedCount += await DeleteUnreferencedChunkAsync(db, prefix, chunk, ct);
+        }
+
+        if (hitScanCap && !string.IsNullOrEmpty(lastScannedKey))
+        {
+            _orphanSweepResumeKeys[prefix] = lastScannedKey;
+        }
+        else
+        {
+            _orphanSweepResumeKeys.TryRemove(prefix, out _);
         }
 
         return deletedCount;

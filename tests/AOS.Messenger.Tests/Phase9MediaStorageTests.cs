@@ -695,4 +695,80 @@ public sealed class Phase9MediaStorageTests : IClassFixture<SqlTestDatabaseFixtu
             localStorage.PromoteByCopyAsync(stagingKey, permKey, "image/png", null, "\"wrong-etag\""));
         Assert.False(File.Exists(Path.Combine(_tempRoot, "media", objId)));
     }
+
+    [Fact]
+    public async Task CloudflareR2MediaStorage_ListObjectsAsync_StartAfterResumesAndOnlyAppliesOnFirstPage()
+    {
+        var id1 = new string('1', 32);
+        var id2 = new string('2', 32);
+        var id3 = new string('3', 32);
+        var seenRequests = new List<(string? StartAfter, string? ContinuationToken)>();
+        var callIndex = 0;
+
+        var (s3Proxy, _) = RecordingAmazonS3Proxy.Create((methodName, req) =>
+        {
+            if (methodName != nameof(IAmazonS3.ListObjectsV2Async))
+            {
+                throw new NotSupportedException();
+            }
+
+            var listReq = Assert.IsType<ListObjectsV2Request>(req);
+            seenRequests.Add((listReq.StartAfter, listReq.ContinuationToken));
+            callIndex++;
+            return callIndex == 1
+                ? Task.FromResult(new ListObjectsV2Response
+                {
+                    IsTruncated = true,
+                    NextContinuationToken = "tok-page-2",
+                    S3Objects = [new S3Object { Key = $"media/{id2}", Size = 10, LastModified = DateTime.UtcNow }]
+                })
+                : Task.FromResult(new ListObjectsV2Response
+                {
+                    IsTruncated = false,
+                    S3Objects = [new S3Object { Key = $"media/{id3}", Size = 20, LastModified = DateTime.UtcNow }]
+                });
+        });
+
+        using var storage = new CloudflareR2MediaStorage(
+            s3Proxy,
+            new R2StorageOptions { BucketName = "aos-media" },
+            NullLogger<CloudflareR2MediaStorage>.Instance);
+
+        var items = new List<StoredObjectInfo>();
+        await foreach (var item in storage.ListObjectsAsync("media/", $"media/{id1}"))
+        {
+            items.Add(item);
+        }
+
+        Assert.Equal([$"media/{id2}", $"media/{id3}"], items.Select(i => i.ObjectKey).ToArray());
+        Assert.Equal(2, seenRequests.Count);
+        Assert.Equal(($"media/{id1}", null), seenRequests[0]);
+        Assert.Equal((null, "tok-page-2"), seenRequests[1]);
+    }
+
+    [Fact]
+    public async Task LocalDiskMediaStorage_ListObjectsAsync_StartAfterResumesDeterministically()
+    {
+        var signing = new LocalMediaSigningService(
+            DataProtectionProvider.Create("LocalDiskStartAfterTest"));
+        var localStorage = new LocalDiskMediaStorage(signing, _tempRoot);
+
+        var idA = new string('a', 32);
+        var idB = new string('b', 32);
+        var idC = new string('c', 32);
+        foreach (var id in new[] { idC, idA, idB })
+        {
+            var path = Path.Combine(_tempRoot, "media", id);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllBytesAsync(path, "x"u8.ToArray());
+        }
+
+        var resumed = new List<string>();
+        await foreach (var item in localStorage.ListObjectsAsync("media/", $"media/{idA}"))
+        {
+            resumed.Add(item.ObjectKey);
+        }
+
+        Assert.Equal([$"media/{idB}", $"media/{idC}"], resumed);
+    }
 }

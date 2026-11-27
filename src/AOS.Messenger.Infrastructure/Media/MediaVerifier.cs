@@ -171,7 +171,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         var acquired = await _imageSemaphore.WaitAsync(timeout, ct);
         if (!acquired)
         {
-            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
+            throw new MediaProcessingBusyException("Image processing capacity is currently busy. Please try again.");
         }
 
         FileStream? outputStream = null;
@@ -222,7 +222,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
         catch (OperationCanceledException) when (!ct.IsCancellationRequested && jobCts.IsCancellationRequested)
         {
             _logger.LogWarning("Image processing timed out for media {MediaId}.", media.Id);
-            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
+            throw new MediaProcessingBusyException("Image processing capacity is currently busy. Please try again.");
         }
         catch (MagickException ex)
         {
@@ -311,7 +311,7 @@ public sealed class MediaVerifier : IMediaVerifier, IDisposable
             _logger.LogWarning(
                 "Transient ImageMagick resource limit hit while processing valid-header image: {ErrorType}",
                 ex.GetType().Name);
-            throw new ConflictException("Image processing capacity is currently busy. Please try again.");
+            throw new MediaProcessingBusyException("Image processing capacity is currently busy. Please try again.");
         }
     }
 

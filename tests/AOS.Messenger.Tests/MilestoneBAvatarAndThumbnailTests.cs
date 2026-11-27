@@ -1528,46 +1528,68 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             const destroyStatusSignals = [];
             let resolveDestroyInit;
             let rejectDestroyCompletion;
-            const destroyCropper = createAvatarCropper({
-                onUploaded: () => { destroyUploaded++; },
-                onError: (msg) => { destroyErrors.push(msg); },
-                api: {
-                    initiateAvatarUpload: () => new Promise((res) => { resolveDestroyInit = res; }),
-                    completeAvatarUpload: (_id, { signal } = {}) => {
-                        destroyCompleteSignals.push(signal);
-                        return new Promise((_res, rej) => { rejectDestroyCompletion = rej; });
+            const origSetTimeout = globalThis.setTimeout;
+            const origClearTimeout = globalThis.clearTimeout;
+            const capturedRetryTimers = [];
+            const clearedTimerIds = new Set();
+            globalThis.setTimeout = (fn, delay, ...args) => {
+                const id = origSetTimeout(fn, delay, ...args);
+                if (delay >= 500) {
+                    capturedRetryTimers.push({ id, delay });
+                }
+                return id;
+            };
+            globalThis.clearTimeout = (id) => {
+                clearedTimerIds.add(id);
+                return origClearTimeout(id);
+            };
+            try {
+                const destroyCropper = createAvatarCropper({
+                    onUploaded: () => { destroyUploaded++; },
+                    onError: (msg) => { destroyErrors.push(msg); },
+                    api: {
+                        initiateAvatarUpload: () => new Promise((res) => { resolveDestroyInit = res; }),
+                        completeAvatarUpload: (_id, { signal } = {}) => {
+                            destroyCompleteSignals.push(signal);
+                            return new Promise((_res, rej) => { rejectDestroyCompletion = rej; });
+                        },
+                        getAvatarUploadStatus: async (_id, { signal } = {}) => {
+                            destroyStatusSignals.push(signal);
+                            throw Object.assign(new Error('Service Unavailable'), { status: 503 });
+                        }
                     },
-                    getAvatarUploadStatus: async (_id, { signal } = {}) => {
-                        destroyStatusSignals.push(signal);
-                        throw Object.assign(new Error('Service Unavailable'), { status: 503 });
-                    }
-                },
-                createXhr: () => ({ upload: {}, status: 200, open() {}, setRequestHeader() {}, send() { this.onload(); }, abort() {} })
-            });
+                    createXhr: () => ({ upload: {}, status: 200, open() {}, setRequestHeader() {}, send() { this.onload(); }, abort() {} })
+                });
 
-            assert.equal(await destroyCropper.open(validFile), true);
-            document.getElementById('avatar-cropper-save-btn').dispatchEvent({ type: 'click', preventDefault() {} });
-            await new Promise(r => setTimeout(r, 10));
-            resolveDestroyInit({ uploadId: 'up-destroy', uploadUrl: 'https://r2.example.com/up-destroy' });
-            await new Promise(r => setTimeout(r, 10));
-            assert.equal(destroyCompleteSignals.length, 1);
-            assert.equal(destroyCompleteSignals[0].aborted, false);
+                assert.equal(await destroyCropper.open(validFile), true);
+                document.getElementById('avatar-cropper-save-btn').dispatchEvent({ type: 'click', preventDefault() {} });
+                await new Promise(r => setTimeout(r, 10));
+                resolveDestroyInit({ uploadId: 'up-destroy', uploadUrl: 'https://r2.example.com/up-destroy' });
+                await new Promise(r => setTimeout(r, 10));
+                assert.equal(destroyCompleteSignals.length, 1);
+                assert.equal(destroyCompleteSignals[0].aborted, false);
 
-            // Trigger 503 during first poll so completeAndReconcile enters 500ms backoff sleep
-            rejectDestroyCompletion(new TypeError('Connection dropped'));
-            await new Promise(r => setTimeout(r, 15));
-            assert.equal(destroyStatusSignals.length, 1);
+                // Trigger 503 during first poll so completeAndReconcile enters 500ms backoff sleep
+                rejectDestroyCompletion(new TypeError('Connection dropped'));
+                await new Promise(r => setTimeout(r, 15));
+                assert.equal(destroyStatusSignals.length, 1);
+                assert.equal(capturedRetryTimers.length, 1, 'Expected 500ms backoff retry timer to be scheduled');
+                assert.equal(clearedTimerIds.has(capturedRetryTimers[0].id), false);
 
-            destroyCropper.destroy();
-            await new Promise(r => setTimeout(r, 20));
-            assert.equal(destroyCompleteSignals[0].aborted, true, '[W5] destroy() must abort completion signal');
-            assert.equal(destroyStatusSignals[0].aborted, true, '[W5] destroy() must abort polling status signal');
-            assert.equal(destroyStatusSignals.length, 1, '[W5] destroy() must stop queued polling timers cleanly');
-            assert.equal(destroyCropper.isOpen(), false);
-            assert.equal(document.getElementById('avatar-cropper-modal').classList.contains('hidden'), true);
-            assert.equal(destroyUploaded, 0);
-            assert.deepEqual(destroyErrors, []);
-            assert.equal(docListeners.get('keydown')?.size || 0, initialKeydownCount);
+                destroyCropper.destroy();
+                assert.equal(clearedTimerIds.has(capturedRetryTimers[0].id), true, '[W5] destroy() must explicitly clear the scheduled 500ms retry timer');
+                assert.equal(destroyCompleteSignals[0].aborted, true, '[W5] destroy() must abort completion signal');
+                assert.equal(destroyStatusSignals[0].aborted, true, '[W5] destroy() must abort polling status signal');
+                assert.equal(destroyStatusSignals.length, 1, '[W5] destroy() must stop queued polling timers cleanly');
+                assert.equal(destroyCropper.isOpen(), false);
+                assert.equal(document.getElementById('avatar-cropper-modal').classList.contains('hidden'), true);
+                assert.equal(destroyUploaded, 0);
+                assert.deepEqual(destroyErrors, []);
+                assert.equal(docListeners.get('keydown')?.size || 0, initialKeydownCount);
+            } finally {
+                globalThis.setTimeout = origSetTimeout;
+                globalThis.clearTimeout = origClearTimeout;
+            }
 
             document.createElement = origCreateElement;
             globalThis.createImageBitmap = origCreateImageBitmap;
@@ -2009,6 +2031,43 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
         await Assert.ThrowsAsync<ConflictException>(() => preCommitSvc.CompleteUploadAsync(callerId, init2.UploadId));
         Assert.DoesNotContain($"Delete:{row2.ObjectKey}", events);
         Assert.Equal(2, events.Count(e => e.StartsWith("Delete:", StringComparison.Ordinal)));
+
+        // 3. Post-commit conflict when GetUserAvatarMetadataAsync lookup fails:
+        //    must retain promoted full+thumb objects (never delete potentially live objects on lookup failure).
+        events.Clear();
+        timeProvider.Advance(TimeSpan.FromSeconds(5));
+        var failingLookupPersistence = new InterceptingAvatarPersistence(
+            realPersistence,
+            events,
+            async (upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct) =>
+            {
+                await realPersistence.CommitUserAvatarAsync(
+                    upload, fullKey, thumbKey, contentType, fullSize, thumbSize, version, utc, ct);
+                throw new ConflictException("Simulated post-commit transient failure.");
+            },
+            onGetMetadata: (_, _) => throw new InvalidOperationException("Simulated transient metadata lookup failure."));
+
+        var lookupFailSvc = new AvatarService(
+            failingLookupPersistence,
+            storage,
+            new StubRaceAvatarProcessor(),
+            userReader,
+            blockPersistence,
+            realtimeNotifier,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AvatarService>.Instance,
+            timeProvider: timeProvider);
+
+        var init3 = await lookupFailSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateAvatarUploadRequestDto("lookupfail.png", "image/png", 128));
+        var row3 = await db.PendingAvatarUploads.AsNoTracking().SingleAsync(p => p.Id == init3.UploadId);
+
+        var result3 = await lookupFailSvc.CompleteUploadAsync(callerId, init3.UploadId);
+        var userAfterLookupFail = await db.Users.AsNoTracking().SingleAsync(u => u.Id == user.Id);
+        Assert.Equal(userAfterLookupFail.AvatarVersion, result3.AvatarVersion);
+        Assert.DoesNotContain($"Delete:{userAfterLookupFail.AvatarObjectKey}", events);
+        Assert.DoesNotContain($"Delete:{userAfterLookupFail.AvatarThumbnailObjectKey}", events);
+        Assert.Contains($"Delete:{row3.ObjectKey}", events);
     }
 
     [Fact]
@@ -2253,15 +2312,18 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
         private readonly IAvatarPersistence _inner;
         private readonly List<string> _events;
         private readonly Func<PendingAvatarUpload, string, string, string, long, long, string, DateTimeOffset, CancellationToken, Task<AvatarCommitResult>> _onCommit;
+        private readonly Func<UserId, CancellationToken, Task<UserAvatarMetadata?>>? _onGetMetadata;
 
         public InterceptingAvatarPersistence(
             IAvatarPersistence inner,
             List<string> events,
-            Func<PendingAvatarUpload, string, string, string, long, long, string, DateTimeOffset, CancellationToken, Task<AvatarCommitResult>> onCommit)
+            Func<PendingAvatarUpload, string, string, string, long, long, string, DateTimeOffset, CancellationToken, Task<AvatarCommitResult>> onCommit,
+            Func<UserId, CancellationToken, Task<UserAvatarMetadata?>>? onGetMetadata = null)
         {
             _inner = inner;
             _events = events;
             _onCommit = onCommit;
+            _onGetMetadata = onGetMetadata;
         }
 
         public Task<PendingAvatarUpload> TryCreatePendingWithQuotaCheckAsync(
@@ -2288,6 +2350,8 @@ public sealed class MilestoneBAvatarAndThumbnailTests : IClassFixture<SqlTestDat
             _inner.RemoveUserAvatarAsync(userId, nowUtc, ct);
 
         public Task<UserAvatarMetadata?> GetUserAvatarMetadataAsync(UserId targetUserId, CancellationToken ct = default) =>
-            _inner.GetUserAvatarMetadataAsync(targetUserId, ct);
+            _onGetMetadata is not null
+                ? _onGetMetadata(targetUserId, ct)
+                : _inner.GetUserAvatarMetadataAsync(targetUserId, ct);
     }
 }

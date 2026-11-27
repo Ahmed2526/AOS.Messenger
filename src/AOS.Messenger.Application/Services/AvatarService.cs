@@ -305,24 +305,37 @@ public sealed class AvatarService : IAvatarService
         {
             PendingAvatarUpload? persistedUpload = null;
             UserAvatarMetadata? liveMetadata = null;
+            var liveMetadataLookupSucceeded = false;
             try
             {
                 persistedUpload = await _avatarPersistence.GetPendingByIdNoTrackingAsync(uploadId, CancellationToken.None);
+            }
+            catch (Exception lookupEx) when (lookupEx is not OperationCanceledException)
+            {
+                _logger.LogWarning(lookupEx, "Failed to inspect pending avatar upload state during conflict cleanup for upload {UploadId}.", uploadId.Value);
+            }
+
+            try
+            {
                 liveMetadata = await _avatarPersistence.GetUserAvatarMetadataAsync(callerId, CancellationToken.None);
+                liveMetadataLookupSucceeded = true;
             }
             catch (Exception lookupEx) when (lookupEx is not OperationCanceledException)
             {
                 _logger.LogWarning(lookupEx, "Failed to inspect live avatar state during conflict cleanup for upload {UploadId}.", uploadId.Value);
             }
 
-            if (liveMetadata is null || !string.Equals(liveMetadata.FullObjectKey, fullKey, StringComparison.Ordinal))
+            if (liveMetadataLookupSucceeded)
             {
-                await BestEffortDeleteStorageAsync(fullKey, CancellationToken.None);
-            }
+                if (liveMetadata is null || !string.Equals(liveMetadata.FullObjectKey, fullKey, StringComparison.Ordinal))
+                {
+                    await BestEffortDeleteStorageAsync(fullKey, CancellationToken.None);
+                }
 
-            if (liveMetadata is null || !string.Equals(liveMetadata.ThumbObjectKey, thumbKey, StringComparison.Ordinal))
-            {
-                await BestEffortDeleteStorageAsync(thumbKey, CancellationToken.None);
+                if (liveMetadata is null || !string.Equals(liveMetadata.ThumbObjectKey, thumbKey, StringComparison.Ordinal))
+                {
+                    await BestEffortDeleteStorageAsync(thumbKey, CancellationToken.None);
+                }
             }
 
             if (persistedUpload is not null && persistedUpload.State != MediaState.Pending)

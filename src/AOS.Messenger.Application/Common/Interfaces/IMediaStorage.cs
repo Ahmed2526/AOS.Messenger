@@ -82,4 +82,25 @@ public interface IMediaStorage
     IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
         string prefix,
         CancellationToken ct = default);
+
+    IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
+        string prefix,
+        string? startAfterKey,
+        CancellationToken ct = default) =>
+        FilterObjectsAfterKeyAsync(ListObjectsAsync(prefix, ct), startAfterKey, ct);
+
+    private static async IAsyncEnumerable<StoredObjectInfo> FilterObjectsAfterKeyAsync(
+        IAsyncEnumerable<StoredObjectInfo> source,
+        string? startAfterKey,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct = default)
+    {
+        await foreach (var item in source.WithCancellation(ct))
+        {
+            if (string.IsNullOrEmpty(startAfterKey)
+                || string.CompareOrdinal(item.ObjectKey, startAfterKey) > 0)
+            {
+                yield return item;
+            }
+        }
+    }
 }

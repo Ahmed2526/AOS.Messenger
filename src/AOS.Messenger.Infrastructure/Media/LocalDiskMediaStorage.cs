@@ -338,11 +338,23 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
         return Task.CompletedTask;
     }
 
+    public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
+        string prefix,
+        CancellationToken ct = default) =>
+        ListObjectsAsync(prefix, startAfterKey: null, ct);
+
     public async IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(
         string prefix,
+        string? startAfterKey,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         MediaStorageKeyValidator.ValidatePrefix(prefix);
+        if (!string.IsNullOrEmpty(startAfterKey)
+            && !startAfterKey.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            throw new DomainException("Storage listing resume key must match the requested prefix.");
+        }
+
         await Task.Yield();
 
         var folderName = prefix.TrimEnd('/');
@@ -352,6 +364,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             yield break;
         }
 
+        var entries = new List<(string ObjectKey, string FilePath)>();
         foreach (var filePath in Directory.EnumerateFiles(dirPath, "*", SearchOption.TopDirectoryOnly))
         {
             ct.ThrowIfCancellationRequested();
@@ -366,6 +379,22 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             {
                 continue;
             }
+
+            var objectKey = $"{folderName}/{fileName}";
+            if (!string.IsNullOrEmpty(startAfterKey)
+                && string.CompareOrdinal(objectKey, startAfterKey) <= 0)
+            {
+                continue;
+            }
+
+            entries.Add((objectKey, filePath));
+        }
+
+        entries.Sort((a, b) => string.CompareOrdinal(a.ObjectKey, b.ObjectKey));
+
+        foreach (var (objectKey, filePath) in entries)
+        {
+            ct.ThrowIfCancellationRequested();
 
             FileInfo info;
             try
@@ -382,7 +411,7 @@ public sealed class LocalDiskMediaStorage : IMediaStorage
             }
 
             yield return new StoredObjectInfo(
-                $"{folderName}/{fileName}",
+                objectKey,
                 new DateTimeOffset(DateTime.SpecifyKind(info.LastWriteTimeUtc, DateTimeKind.Utc)),
                 info.Length);
         }

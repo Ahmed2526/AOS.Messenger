@@ -60,6 +60,11 @@ public sealed class ExceptionHandlingMiddleware
             _logger.LogWarning(ex, "Domain rule violation: {Message}", ex.Message);
             await HandleExceptionAsync(context, HttpStatusCode.BadRequest, "Bad Request", ex.Message);
         }
+        catch (MediaProcessingBusyException ex)
+        {
+            _logger.LogWarning(ex, "Image processing capacity busy or timed out.");
+            await HandleExceptionAsync(context, HttpStatusCode.ServiceUnavailable, "Service Unavailable", ex.Message);
+        }
         catch (MediaStorageException ex)
         {
             _logger.LogError(ex, "Media storage operation failed.");

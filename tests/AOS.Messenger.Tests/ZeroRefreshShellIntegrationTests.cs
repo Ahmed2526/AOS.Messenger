@@ -83,6 +83,7 @@ public sealed class ZeroRefreshShellIntegrationTests
         function createMockDom() {
             const docListeners = new Map();
             const winListeners = new Map();
+            let activeElement = null;
 
             class MockNode {
                 constructor(nodeType, tagName = '') {
@@ -212,7 +213,7 @@ public sealed class ZeroRefreshShellIntegrationTests
                     evt.target = evt.target || this;
                     for (const fn of this._listeners.get(evt.type) || []) fn(evt);
                 }
-                focus() {}
+                focus() { activeElement = this; }
                 scrollIntoView() {}
                 scrollTo() {}
                 getBoundingClientRect() { return { left: 100, top: 100, width: 40, height: 30, bottom: 130, right: 140 }; }
@@ -221,6 +222,8 @@ public sealed class ZeroRefreshShellIntegrationTests
             const body = new MockNode(1, 'BODY');
             const document = {
                 body,
+                get activeElement() { return activeElement; },
+                set activeElement(v) { activeElement = v; },
                 readyState: 'complete',
                 documentElement: { clientWidth: 1024, clientHeight: 768 },
                 title: 'A♡S Messenger - Desktop App',
@@ -1105,9 +1108,29 @@ public sealed class ZeroRefreshShellIntegrationTests
             assert.equal(chatConfirmModal.classList.contains('hidden'), true);
             assert.equal(submittedCount, 0);
 
+            // Tab / Shift+Tab wraps keyboard focus inside confirmation dialog
+            dom.document.dispatchEvent({ type: 'submit', target: clearForm, preventDefault() {} });
+            const chatConfirmCancel = dom.document.getElementById('chat-confirm-cancel-btn');
+            const chatConfirmAccept = dom.document.getElementById('chat-confirm-accept-btn');
+            assert.equal(dom.document.activeElement, chatConfirmCancel);
+            let shiftTabPrevented = false;
+            dom.document.dispatchEvent({ type: 'keydown', key: 'Tab', shiftKey: true, preventDefault() { shiftTabPrevented = true; } });
+            assert.equal(shiftTabPrevented, true);
+            assert.equal(dom.document.activeElement, chatConfirmAccept);
+            let forwardTabPrevented = false;
+            dom.document.dispatchEvent({ type: 'keydown', key: 'Tab', shiftKey: false, preventDefault() { forwardTabPrevented = true; } });
+            assert.equal(forwardTabPrevented, true);
+            assert.equal(dom.document.activeElement, chatConfirmCancel);
+
+            // Switching conversations closes open confirm modal and prevents submitting against the wrong target
+            await shell.router.switchConversation(convA);
+            assert.equal(chatConfirmModal.classList.contains('hidden'), true);
+            dom.document.dispatchEvent({ type: 'click', target: chatConfirmAccept, preventDefault() {} });
+            assert.equal(submittedCount, 0);
+            await shell.router.switchConversation(convB);
+
             // Confirming triggers form submission without invoking window.confirm
             dom.document.dispatchEvent({ type: 'submit', target: clearForm, preventDefault() {} });
-            const chatConfirmAccept = dom.document.getElementById('chat-confirm-accept-btn');
             dom.document.dispatchEvent({ type: 'click', target: chatConfirmAccept, preventDefault() {} });
             assert.equal(chatConfirmModal.classList.contains('hidden'), true);
             assert.equal(submittedCount, 1);

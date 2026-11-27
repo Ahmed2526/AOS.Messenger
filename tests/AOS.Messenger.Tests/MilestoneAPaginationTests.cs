@@ -638,21 +638,48 @@ public sealed class MilestoneAPaginationTests
             const dom = createMockDom();
             const els = mountPaginationDom(dom, 'conv-1');
 
+            const conversationListEl = dom.document.createElement('div');
+            conversationListEl.id = 'conversationList';
+            const sidebarItemEl = dom.document.createElement('a');
+            sidebarItemEl.className = 'conversation-item';
+            sidebarItemEl.setAttribute('data-conversation-id', 'conv-1');
+            sidebarItemEl.setAttribute('data-last-message-id', '11');
+            const sidebarPreviewEl = dom.document.createElement('p');
+            sidebarPreviewEl.className = 'conversation-last-message';
+            sidebarPreviewEl.textContent = 'Old 11';
+            sidebarItemEl.appendChild(sidebarPreviewEl);
+            conversationListEl.appendChild(sidebarItemEl);
+            dom.document.body.appendChild(conversationListEl);
+
             const { createChatState } = await import('{{JsUrl("chat-state.js")}}');
             const { configureApiClient } = await import('{{JsUrl("api-client.js")}}');
-            const { renderMessages, syncPaginationAttributes } = await import('{{JsUrl("message-renderer.js")}}');
+            const { renderMessages, insertMessageOrdered, syncPaginationAttributes } = await import('{{JsUrl("message-renderer.js")}}');
             const { createSignalRClient } = await import('{{JsUrl("signalr-client.js")}}');
 
             let nextBundle = null;
+            let pendingBundleGate = null;
+            let failSidebarSync = false;
             configureApiClient({
                 fetchImpl: async (url) => {
                     if (url.includes('/bundle')) {
+                        if (pendingBundleGate) {
+                            await pendingBundleGate();
+                        }
                         return {
                             status: 200,
                             ok: true,
                             redirected: false,
                             headers: { get: () => 'application/json' },
                             text: async () => JSON.stringify(nextBundle)
+                        };
+                    }
+                    if (failSidebarSync && url.includes('/conversations')) {
+                        return {
+                            status: 500,
+                            ok: false,
+                            redirected: false,
+                            headers: { get: () => 'application/json' },
+                            text: async () => JSON.stringify({ detail: 'Sidebar sync skipped for reconcile test' })
                         };
                     }
                     return {
@@ -670,6 +697,7 @@ public sealed class MilestoneAPaginationTests
             let onClosedCb = null;
             let startCalls = 0;
             const onlineHandlers = [];
+            const hubHandlers = new Map();
             const origWinAdd = dom.window.addEventListener;
             dom.window.addEventListener = (t, fn) => {
                 if (t === 'online') onlineHandlers.push(fn);
@@ -677,8 +705,8 @@ public sealed class MilestoneAPaginationTests
             };
             const fakeConnection = {
                 state: 'Disconnected',
-                on: () => {},
-                off: () => {},
+                on: (name, fn) => { hubHandlers.set(name, fn); },
+                off: (name) => { hubHandlers.delete(name); },
                 onclose: (cb) => { onClosedCb = cb; },
                 onreconnecting: (cb) => { onReconnectingCb = cb; },
                 onreconnected: (cb) => { onReconnectedCb = cb; },
@@ -809,6 +837,89 @@ public sealed class MilestoneAPaginationTests
             assert.equal(els.container.children.length, 0);
             assert.equal(state.messagesById.size, 0);
             assert.equal(emptyPlaceholderEl.classList.contains('hidden'), false);
+
+            // Case 5 (Thread #13): Concurrent live ReceiveMessage + post-request HTTP insert during reconcile are preserved and never pruned
+            emptyPlaceholderEl.classList.add('hidden');
+            const receiveMessageHandler = hubHandlers.get('ReceiveMessage');
+            assert.equal(typeof receiveMessageHandler, 'function');
+            const seedPreRequest = [
+                { id: 40, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 40', createdAtUtc: '2026-11-23T12:40:00Z' },
+                { id: 41, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Pre-request deleted 41', createdAtUtc: '2026-11-23T12:41:00Z' },
+                { id: 42, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 42', createdAtUtc: '2026-11-23T12:42:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, seedPreRequest, 'cursor-39', true);
+            renderMessages(els.container, seedPreRequest, 'u1', state.activeMeta);
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [
+                    { id: 40, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 40', createdAtUtc: '2026-11-23T12:40:00Z' },
+                    { id: 42, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Keep 42', createdAtUtc: '2026-11-23T12:42:00Z' }
+                ],
+                nextCursor: 'cursor-39',
+                hasMore: true
+            };
+            let releaseGate = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseGate = resolve; });
+            const reconcilePromise1 = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            // Simulate both a live SignalR ReceiveMessage (buffered during activeReconcile) and an HTTP-committed post-request DOM insert
+            receiveMessageHandler({ id: 45, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Buffered 45', createdAtUtc: '2026-11-23T12:45:00Z' });
+            const postRequestHttpMsg = { id: 46, conversationId: 'conv-1', senderId: 'u1', senderName: 'Alice', content: 'Post-request HTTP 46', createdAtUtc: '2026-11-23T12:46:00Z', isOutgoing: true };
+            insertMessageOrdered(els.container, postRequestHttpMsg, 'u1', state.activeMeta);
+            state.messagesById.set('46', postRequestHttpMsg);
+            pendingBundleGate = null;
+            releaseGate();
+            await reconcilePromise1;
+            assert.equal(state.messagesById.has('41'), false, 'Pre-request deleted row 41 within server window must be pruned');
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['40', '42', '45', '46']);
+
+            // Case 5b (Thread #13): Empty server bundle during active reconcile clears pre-request stale rows without wiping concurrent live events
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [],
+                nextCursor: null,
+                hasMore: false
+            };
+            let releaseEmptyGate = null;
+            pendingBundleGate = () => new Promise(resolve => { releaseEmptyGate = resolve; });
+            const reconcileEmptyPromise = onReconnectedCb();
+            await new Promise(resolve => setTimeout(resolve, 10));
+            receiveMessageHandler({ id: 50, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Concurrent live 50', createdAtUtc: '2026-11-23T12:50:00Z' });
+            pendingBundleGate = null;
+            releaseEmptyGate();
+            await reconcileEmptyPromise;
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['50']);
+            assert.equal(emptyPlaceholderEl.classList.contains('hidden'), true);
+
+            // Case 6 (Thread #14): Pruning latest message 10 replaces sidebar data-last-message-id and preview with surviving id 9
+            if (sidebarItemEl.parentNode !== conversationListEl) {
+                conversationListEl.appendChild(sidebarItemEl);
+            }
+            failSidebarSync = true;
+            const sidebarSeed = [
+                { id: 9, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 9', createdAtUtc: '2026-11-23T11:09:00Z' },
+                { id: 10, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 10', createdAtUtc: '2026-11-23T11:10:00Z' }
+            ];
+            state.commitActiveConversation('conv-1', { id: 'conv-1', canSend: true }, sidebarSeed, 'cursor-8', true);
+            renderMessages(els.container, sidebarSeed, 'u1', state.activeMeta);
+            sidebarItemEl.setAttribute('data-last-message-id', '10');
+            sidebarPreviewEl.textContent = 'Msg 10';
+            nextBundle = {
+                viewerUserId: 'u1',
+                conversation: { id: 'conv-1', canSend: true },
+                messages: [
+                    { id: 9, conversationId: 'conv-1', senderId: 'u2', senderName: 'Bob', content: 'Msg 9', createdAtUtc: '2026-11-23T11:09:00Z' }
+                ],
+                nextCursor: 'cursor-8',
+                hasMore: true
+            };
+            await onReconnectedCb();
+            failSidebarSync = false;
+            assert.deepEqual(els.container.children.map(n => n.getAttribute('data-message-id')), ['9']);
+            assert.equal(sidebarItemEl.getAttribute('data-last-message-id'), '9');
+            assert.equal(sidebarPreviewEl.textContent, 'Msg 9');
 
             client.destroy();
             console.log('OK');

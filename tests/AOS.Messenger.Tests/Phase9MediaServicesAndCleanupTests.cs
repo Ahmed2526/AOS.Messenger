@@ -1738,7 +1738,11 @@ public sealed class Phase9MediaServicesAndCleanupTests : IClassFixture<SqlTestDa
             await _onDelete(objectKey);
             await _inner.DeleteObjectAsync(objectKey, ct);
         }
+
         public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, CancellationToken ct = default) =>
             _inner.ListObjectsAsync(prefix, ct);
+
+        public IAsyncEnumerable<StoredObjectInfo> ListObjectsAsync(string prefix, string? startAfterKey, CancellationToken ct = default) =>
+            _inner.ListObjectsAsync(prefix, startAfterKey, ct);
     }
 }

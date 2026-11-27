@@ -435,6 +435,30 @@ export function initChatShell(overrides = {}) {
         }
     }
 
+    let pendingConfirmForm = null;
+    let lastConfirmFocusedEl = null;
+    let createdFallbackConfirmModal = null;
+
+    function isChatConfirmModalOpen() {
+        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('chat-confirm-modal')
+            : null;
+        return !!(modal && modal.classList && !modal.classList.contains('hidden'));
+    }
+
+    function closeChatConfirmModal({ restoreFocus = true } = {}) {
+        pendingConfirmForm = null;
+        const restoreEl = restoreFocus ? lastConfirmFocusedEl : null;
+        lastConfirmFocusedEl = null;
+        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
+            ? document.getElementById('chat-confirm-modal')
+            : null;
+        if (modal && modal.classList) modal.classList.add('hidden');
+        if (restoreEl && typeof restoreEl.focus === 'function' && restoreEl.isConnected !== false) {
+            restoreEl.focus();
+        }
+    }
+
     router = createChatRouter({
         state,
         api: { getConversationBundle, getMessagesPage },
@@ -442,6 +466,7 @@ export function initChatShell(overrides = {}) {
         hooks: {
             getDraftText: () => composer.getText(),
             onBeforeSwitch: (_prevId, nextId) => {
+                closeChatConfirmModal({ restoreFocus: false });
                 bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 typingEmitter.resetForSwitch();
@@ -504,6 +529,7 @@ export function initChatShell(overrides = {}) {
                 signalrClient.leaveActiveConversation(prevId);
             },
             onSwitchError: () => {
+                closeChatConfirmModal({ restoreFocus: false });
                 bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 setActiveRow(null);
@@ -596,10 +622,6 @@ export function initChatShell(overrides = {}) {
         }
     };
 
-    let pendingConfirmForm = null;
-    let lastConfirmFocusedEl = null;
-    let createdFallbackConfirmModal = null;
-
     function ensureChatConfirmModal() {
         if (typeof document === 'undefined' || typeof document.getElementById !== 'function') return null;
         const existing = document.getElementById('chat-confirm-modal');
@@ -646,26 +668,6 @@ export function initChatShell(overrides = {}) {
         document.body.appendChild(modal);
         createdFallbackConfirmModal = modal;
         return modal;
-    }
-
-    function isChatConfirmModalOpen() {
-        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
-            ? document.getElementById('chat-confirm-modal')
-            : null;
-        return !!(modal && modal.classList && !modal.classList.contains('hidden'));
-    }
-
-    function closeChatConfirmModal({ restoreFocus = true } = {}) {
-        pendingConfirmForm = null;
-        const restoreEl = restoreFocus ? lastConfirmFocusedEl : null;
-        lastConfirmFocusedEl = null;
-        const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
-            ? document.getElementById('chat-confirm-modal')
-            : null;
-        if (modal && modal.classList) modal.classList.add('hidden');
-        if (restoreEl && typeof restoreEl.focus === 'function' && restoreEl.isConnected !== false) {
-            restoreEl.focus();
-        }
     }
 
     function openChatConfirmModal(form, message) {
@@ -737,6 +739,26 @@ export function initChatShell(overrides = {}) {
         if (e.key === 'Escape') {
             if (typeof e.preventDefault === 'function') e.preventDefault();
             closeChatConfirmModal({ restoreFocus: true });
+            return;
+        }
+        if (e.key === 'Tab' && typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+            const cancelBtn = document.getElementById('chat-confirm-cancel-btn');
+            const acceptBtn = document.getElementById('chat-confirm-accept-btn');
+            const focusables = [cancelBtn, acceptBtn].filter(btn => btn && !btn.disabled);
+            if (focusables.length === 0) return;
+
+            const currentIndex = focusables.indexOf(document.activeElement);
+            if (e.shiftKey) {
+                if (currentIndex <= 0) {
+                    if (typeof e.preventDefault === 'function') e.preventDefault();
+                    const targetBtn = focusables[focusables.length - 1];
+                    if (typeof targetBtn.focus === 'function') targetBtn.focus();
+                }
+            } else if (currentIndex < 0 || currentIndex === focusables.length - 1) {
+                if (typeof e.preventDefault === 'function') e.preventDefault();
+                const targetBtn = focusables[0];
+                if (typeof targetBtn.focus === 'function') targetBtn.focus();
+            }
         }
     };
 

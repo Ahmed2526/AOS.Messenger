@@ -44,6 +44,7 @@ export function createBottomScrollPinner({
     let lastObservedScrollTop = null;
     let isSmoothAnimating = false;
     let lastPinnedAtMs = 0;
+    let lastPinnedScrollHeight = 0;
     let settleTimer = null;
     let rafId = null;
     let resizeObserver = null;
@@ -92,6 +93,7 @@ export function createBottomScrollPinner({
         }
 
         const targetTop = Number(streamEl.scrollHeight || 0);
+        lastPinnedScrollHeight = targetTop;
         if (smooth && typeof streamEl.scrollTo === 'function') {
             isSmoothAnimating = true;
             lastObservedScrollTop = Number(streamEl.scrollTop || 0);
@@ -137,8 +139,32 @@ export function createBottomScrollPinner({
     function attachResizeObserver() {
         disconnectResizeObserver();
         if (!containerEl || typeof ResizeObserver !== 'function') return;
+        let sawInitialObservation = false;
+        let lastObservedRectHeight = null;
         try {
-            resizeObserver = new ResizeObserver(() => {
+            resizeObserver = new ResizeObserver((entries) => {
+                const currentScrollHeight = Number(streamEl?.scrollHeight || 0);
+                const lastEntry = Array.isArray(entries) && entries.length > 0 ? entries[entries.length - 1] : null;
+                const rectHeight = typeof lastEntry?.contentRect?.height === 'number'
+                    ? lastEntry.contentRect.height
+                    : null;
+
+                if (!sawInitialObservation) {
+                    sawInitialObservation = true;
+                    lastObservedRectHeight = rectHeight;
+                    if (currentScrollHeight === lastPinnedScrollHeight) {
+                        return;
+                    }
+                } else if (
+                    currentScrollHeight === lastPinnedScrollHeight &&
+                    (rectHeight === null || rectHeight === lastObservedRectHeight)
+                ) {
+                    return;
+                }
+
+                if (rectHeight !== null) {
+                    lastObservedRectHeight = rectHeight;
+                }
                 onMediaOrLayoutGrowth();
             });
             resizeObserver.observe(containerEl);

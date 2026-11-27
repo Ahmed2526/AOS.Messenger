@@ -353,7 +353,10 @@ public sealed class MediaDragGuardFrontendTests
             assert.equal(avatarImg.draggable, false);
             assert.equal(avatarImg.getAttribute('draggable'), 'false');
 
-            await avatarLoader.openAvatarLightbox(peerId, 'v1', 'Alice', { getAvatarUrlFn: mockAvatarUrlFn });
+            await avatarLoader.openAvatarLightbox(peerId, 'v1', 'Alice', {
+                getAvatarUrlFn: mockAvatarUrlFn,
+                fetchFn: async () => { throw new TypeError('Network disabled in test'); }
+            });
             const avatarLightboxImg = document.getElementById('avatar-lightbox-img');
             assert.ok(avatarLightboxImg);
             assert.equal(avatarLightboxImg.draggable, false);

@@ -1627,6 +1627,72 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             await new Promise(r => setTimeout(r, 10));
             assert.equal(starSticker.id && starPicker.isFavorited(starSticker.id), true);
 
+            // Reopening the same sticker info modal while a favorite toggle is in flight disables the modal button,
+            // synchronizes its button label when the in-flight request completes, and does not leak onto a different sticker.
+            const infoModal = createEl('div'); infoModal.id = 'sticker-info-modal'; infoModal.classList.add('hidden');
+            const infoImg = createEl('img'); infoImg.id = 'sticker-info-img';
+            const infoPackName = createEl('div'); infoPackName.id = 'sticker-info-pack-name';
+            const infoAuthor = createEl('div'); infoAuthor.id = 'sticker-info-pack-author';
+            const infoAnimBadge = createEl('span'); infoAnimBadge.id = 'sticker-info-anim-badge';
+            const infoFavBtn = createEl('button'); infoFavBtn.id = 'sticker-info-fav-btn';
+            const infoFavIcon = createEl('span'); infoFavIcon.id = 'sticker-info-fav-icon';
+            const infoFavLabel = createEl('span'); infoFavLabel.id = 'sticker-info-fav-label';
+            infoFavBtn.appendChild(infoFavIcon);
+            infoFavBtn.appendChild(infoFavLabel);
+            for (const kid of [infoImg, infoPackName, infoAuthor, infoAnimBadge, infoFavBtn]) infoModal.appendChild(kid);
+            body.appendChild(infoModal);
+
+            let resolveInfoFav;
+            let infoFavCalls = 0;
+            const infoStickerS = { ...customSticker, id: '88888888-8888-8888-8888-888888888889', isFavorited: false };
+            const infoStickerT = { ...customSticker, id: '88888888-8888-8888-8888-888888888890', isFavorited: false };
+            const infoPicker = createStickerPicker({
+                getCurrentUserId: () => activeUserId,
+                getCatalogFn: async () => ({ recents: [infoStickerS, infoStickerT], favorites: [], systemPacks: [], customPacks: [] }),
+                addFavoriteFn: () => {
+                    infoFavCalls++;
+                    return new Promise((res) => { resolveInfoFav = res; });
+                }
+            });
+            await infoPicker.ensureLoaded({ force: true });
+            infoPicker.openStickerInfoModal(infoStickerS);
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(infoFavCalls, 1);
+            assert.equal(infoFavBtn.disabled, true);
+
+            // Close and reopen the SAME sticker S while request is still in flight
+            infoPicker.closeStickerInfoModal();
+            infoPicker.openStickerInfoModal(infoStickerS);
+            assert.equal(infoFavBtn.disabled, true, 'Reopening same sticker while favorite is in flight must keep button disabled');
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(infoFavCalls, 1, 'Duplicate click after reopen must not start a second toggle');
+
+            resolveInfoFav({ ...infoStickerS, isFavorited: true });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(infoFavLabel.textContent, 'Remove from Favorites', 'Reopened modal must reflect completed favorite status');
+            assert.equal(infoFavBtn.disabled, false);
+            infoPicker.destroy();
+
+            // Opening a DIFFERENT sticker T while S's toggle is in flight must not inherit S's completion state
+            let resolveInfoFavS2;
+            const infoPicker2 = createStickerPicker({
+                getCurrentUserId: () => activeUserId,
+                getCatalogFn: async () => ({ recents: [infoStickerS, infoStickerT], favorites: [], systemPacks: [], customPacks: [] }),
+                addFavoriteFn: () => new Promise((res) => { resolveInfoFavS2 = res; })
+            });
+            await infoPicker2.ensureLoaded({ force: true });
+            infoPicker2.openStickerInfoModal(infoStickerS);
+            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
+            infoPicker2.closeStickerInfoModal();
+            infoPicker2.openStickerInfoModal(infoStickerT);
+            assert.equal(infoFavBtn.disabled, false);
+            assert.equal(infoFavLabel.textContent, 'Add to Favorites');
+            resolveInfoFavS2({ ...infoStickerS, isFavorited: true });
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(infoFavLabel.textContent, 'Add to Favorites', 'Completion for sticker S must not overwrite modal showing sticker T');
+            infoPicker2.destroy();
+            infoModal.remove();
+
             // Switching user mid-fetch must not leave sticker picker stuck in isLoading=true
             let resolveSwitchCat;
             const switchPicker = createStickerPicker({
@@ -1829,34 +1895,34 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
                 assert.equal(sImg.src, 'https://r2.test/fresh-sticker');
             }
 
-            const infoModal = createEl('div'); infoModal.id = 'sticker-info-modal';
-            const infoImage = createEl('img'); infoImage.id = 'sticker-info-img';
-            const infoFavBtn = createEl('button'); infoFavBtn.id = 'sticker-info-fav-btn';
-            const infoFavIcon = createEl('span'); infoFavIcon.id = 'sticker-info-fav-icon';
-            const infoFavLabel = createEl('span'); infoFavLabel.id = 'sticker-info-fav-label';
-            infoFavBtn.appendChild(infoFavIcon);
-            infoFavBtn.appendChild(infoFavLabel);
-            infoModal.appendChild(infoImage);
-            infoModal.appendChild(infoFavBtn);
-            body.appendChild(infoModal);
+            const staleInfoModal = createEl('div'); staleInfoModal.id = 'sticker-info-modal';
+            const staleInfoImage = createEl('img'); staleInfoImage.id = 'sticker-info-img';
+            const staleInfoFavBtn = createEl('button'); staleInfoFavBtn.id = 'sticker-info-fav-btn';
+            const staleInfoFavIcon = createEl('span'); staleInfoFavIcon.id = 'sticker-info-fav-icon';
+            const staleInfoFavLabel = createEl('span'); staleInfoFavLabel.id = 'sticker-info-fav-label';
+            staleInfoFavBtn.appendChild(staleInfoFavIcon);
+            staleInfoFavBtn.appendChild(staleInfoFavLabel);
+            staleInfoModal.appendChild(staleInfoImage);
+            staleInfoModal.appendChild(staleInfoFavBtn);
+            body.appendChild(staleInfoModal);
             const infoLookups = new Map();
             let resolveInfoFavA;
-            const infoPicker = createStickerPicker({
+            const staleInfoPicker = createStickerPicker({
                 getCurrentUserId: () => userId,
                 getUrlFn: (id) => new Promise(resolve => infoLookups.set(id, resolve)),
                 addFavoriteFn: () => new Promise(resolve => { resolveInfoFavA = resolve; })
             });
             const infoA = { id: '11111111-2222-3333-4444-555555555555', packName: 'Old', isFavorited: false };
             const infoB = { id: '22222222-3333-4444-5555-666666666666', packName: 'Current', isFavorited: false };
-            infoPicker.openStickerInfoModal(infoA);
-            const oldLoad = infoImage.onload;
+            staleInfoPicker.openStickerInfoModal(infoA);
+            const oldLoad = staleInfoImage.onload;
             await Promise.resolve();
 
             // [W4] Click favorite on infoA, then switch modal to infoB BEFORE infoA resolves -> infoB stays unstarred & enabled!
-            document.dispatchEvent({ type: 'click', target: infoFavBtn, preventDefault() {}, stopPropagation() {} });
-            assert.equal(infoFavBtn.disabled, true);
-            infoPicker.openStickerInfoModal(infoB);
-            assert.equal(infoFavBtn.disabled, false, '[W4] Switching modal sticker must re-enable favorite button immediately');
+            document.dispatchEvent({ type: 'click', target: staleInfoFavBtn, preventDefault() {}, stopPropagation() {} });
+            assert.equal(staleInfoFavBtn.disabled, true);
+            staleInfoPicker.openStickerInfoModal(infoB);
+            assert.equal(staleInfoFavBtn.disabled, false, '[W4] Switching modal sticker must re-enable favorite button immediately');
             await Promise.resolve();
             infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b' });
             await new Promise(resolve => setTimeout(resolve, 0));
@@ -1864,21 +1930,22 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             oldLoad();
             resolveInfoFavA({ id: infoA.id, packName: 'Old' });
             await new Promise(resolve => setTimeout(resolve, 10));
-            assert.equal(infoImage.alt, 'Current');
-            assert.equal(infoImage.src, 'https://r2.test/info-b');
-            assert.equal(infoPicker.isFavorited(infoA.id), true);
-            assert.equal(infoPicker.isFavorited(infoB.id), false, '[W4] Late favorite resolution from closed modal sticker must not mutate newly opened sticker');
-            assert.equal(infoFavLabel.textContent, 'Add to Favorites');
-            assert.equal(infoFavBtn.getAttribute('aria-pressed'), 'false');
-            assert.equal(infoFavBtn.disabled, false);
+            assert.equal(staleInfoImage.alt, 'Current');
+            assert.equal(staleInfoImage.src, 'https://r2.test/info-b');
+            assert.equal(staleInfoPicker.isFavorited(infoA.id), true);
+            assert.equal(staleInfoPicker.isFavorited(infoB.id), false, '[W4] Late favorite resolution from closed modal sticker must not mutate newly opened sticker');
+            assert.equal(staleInfoFavLabel.textContent, 'Add to Favorites');
+            assert.equal(staleInfoFavBtn.getAttribute('aria-pressed'), 'false');
+            assert.equal(staleInfoFavBtn.disabled, false);
 
-            const pendingRetry = infoImage.onerror();
+            const pendingRetry = staleInfoImage.onerror();
             await Promise.resolve();
-            infoPicker.closeStickerInfoModal();
+            staleInfoPicker.closeStickerInfoModal();
             infoLookups.get(infoB.id)({ url: 'https://r2.test/info-b-retried' });
             await pendingRetry;
-            assert.equal(infoImage.src, '');
-            infoPicker.destroy();
+            assert.equal(staleInfoImage.src, '');
+            staleInfoPicker.destroy();
+            staleInfoModal.remove();
 
             // [S3] Proactive coalesced /url resolution for cold custom stickers (no eager /image 302 src)
             const coldStickerId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
@@ -3105,6 +3172,56 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
         Assert.Equal(2048L, cancelledRow.VerifiedSizeBytes);
         Assert.NotNull(cancelledRow.PurgedAtUtc);
 
+        // 1b. Cancelling when staging object is not found leaves PurgedAtUtc null so cleanup can measure any late PUT
+        var cancelClock = new AdjustableStickerTimeProvider(now);
+        var lateCancelSvc = new AOS.Messenger.Application.Services.StickerService(
+            realPersistence,
+            storage,
+            processor,
+            userReader,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<AOS.Messenger.Application.Services.StickerService>.Instance,
+            timeProvider: cancelClock);
+        var initLate = await lateCancelSvc.InitiateUploadAsync(
+            callerId,
+            new InitiateStickerUploadRequestDto(pack.Id, "late-put.webp", "image/webp", 4096, "🌙"));
+        await lateCancelSvc.CancelUploadAsync(callerId, initLate.StickerId);
+        var cancelledUnmeasured = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+        Assert.Equal(StickerState.Failed, cancelledUnmeasured.State);
+        Assert.Null(cancelledUnmeasured.VerifiedSizeBytes);
+        Assert.Null(cancelledUnmeasured.PurgedAtUtc);
+
+        // Simulate late PUT arriving after CancelUploadAsync returned
+        var latePath = Path.Combine(_mediaTempRoot, cancelledUnmeasured.ObjectKey!.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(Path.GetDirectoryName(latePath)!);
+        await File.WriteAllBytesAsync(latePath, new byte[1536]);
+
+        var cleanupServices = _fixture.CreateServiceCollection();
+        cleanupServices.AddSingleton<TimeProvider>(cancelClock);
+        cleanupServices.AddSingleton<IMediaStorage>(storage);
+        await using (var cleanupProvider = cleanupServices.BuildServiceProvider())
+        {
+            var cleanupSvc = new MediaCleanupService(
+                cleanupProvider.GetRequiredService<IServiceScopeFactory>(),
+                storage,
+                Options.Create(new MediaOptions { PresignedPutTtlMinutes = 5 }),
+                cancelClock,
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<MediaCleanupService>.Instance);
+
+            // Before upload window closes, unmeasured cancelled row is preserved
+            await cleanupSvc.RunCleanupPassAsync(includePermanentOrphanSweep: false);
+            var stillPendingWindow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+            Assert.Null(stillPendingWindow.PurgedAtUtc);
+            Assert.True(File.Exists(latePath));
+
+            // After upload window closes, cleanup measures the late PUT bytes before deleting staging
+            cancelClock.Advance(TimeSpan.FromMinutes(6));
+            await cleanupSvc.RunCleanupPassAsync(includePermanentOrphanSweep: false);
+            var purgedLateRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initLate.StickerId);
+            Assert.NotNull(purgedLateRow.PurgedAtUtc);
+            Assert.Equal(1536L, purgedLateRow.VerifiedSizeBytes);
+            Assert.False(File.Exists(latePath));
+        }
+
         // 2. Cancelling a sticker already committed to Ready throws ConflictException
         var initReady = await stickerService.InitiateUploadAsync(
             callerId,
@@ -3119,24 +3236,29 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
         }
         await Assert.ThrowsAsync<ConflictException>(() => stickerService.CancelUploadAsync(callerId, initReady.StickerId));
 
-        // 3. Deleted pack before final commit rejects completion cleanly & leaves zero Ready stickers in deleted pack
+        // 3. Deleted pack before final commit rejects completion cleanly in CommitReadyStickerIfPackActiveAsync & marks sticker Failed
         var initDel = await stickerService.InitiateUploadAsync(
             callerId,
             new InitiateStickerUploadRequestDto(pack.Id, "s3.webp", "image/webp", 128, "🌊"));
         var rowDel = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initDel.StickerId);
-        await File.WriteAllBytesAsync(Path.Combine(_mediaTempRoot, rowDel.ObjectKey!.Replace('/', Path.DirectorySeparatorChar)), new byte[128]);
+        Assert.Equal(StickerState.Pending, rowDel.State);
 
-        await realPersistence.SoftDeletePackAndArchiveStickersAsync(pack.Id, callerId, now.AddMinutes(1));
+        // Soft-delete only the pack row in SQL while leaving the sticker Pending so execution reaches CommitReadyStickerIfPackActiveAsync
+        await db.StickerPacks
+            .Where(p => p.Id == pack.Id)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(p => p.IsDeleted, true)
+                .SetProperty(p => p.UpdatedAtUtc, now.AddMinutes(1)));
+
+        var readyCandidate = await realPersistence.GetStickerByIdNoTrackingAsync(initDel.StickerId);
+        Assert.NotNull(readyCandidate);
+        var permDelId = MediaConstraints.GenerateStorageObjectId();
+        readyCandidate!.MarkReady(permDelId, $"{MediaConstraints.StickerKeyPrefix}{permDelId}", 64, 512, 512, false, now.AddMinutes(1));
         await Assert.ThrowsAsync<DomainException>(() =>
-            new AOS.Messenger.Application.Services.StickerService(
-                realPersistence,
-                storage,
-                new StubStickerRaceProcessor(),
-                userReader,
-                Microsoft.Extensions.Logging.Abstractions.NullLogger<AOS.Messenger.Application.Services.StickerService>.Instance)
-            .CompleteUploadAsync(callerId, initDel.StickerId));
+            realPersistence.CommitReadyStickerIfPackActiveAsync(readyCandidate, now.AddMinutes(1)));
+
         var staleDelRow = await db.Stickers.AsNoTracking().SingleAsync(s => s.Id == initDel.StickerId);
-        Assert.NotEqual(StickerState.Ready, staleDelRow.State);
+        Assert.Equal(StickerState.Failed, staleDelRow.State);
 
         // 4. POST /api/stickers/favorites rejects non-integer & overflow sourceMessageId with 400 (never 500)
         using var factory = CreateFactory();
@@ -3353,5 +3475,13 @@ public sealed class MilestoneCStickersTests : IClassFixture<SqlTestDatabaseFixtu
             _inner.CanUserAccessStickerAsync(callerId, record, forSending, ct);
         public Task<bool> IsStickerVisibleInMessageAsync(UserId callerId, ConversationId conversationId, MessageId messageId, StickerId stickerId, CancellationToken ct = default) =>
             _inner.IsStickerVisibleInMessageAsync(callerId, conversationId, messageId, stickerId, ct);
+    }
+
+    private sealed class AdjustableStickerTimeProvider : TimeProvider
+    {
+        private DateTimeOffset _utcNow;
+        public AdjustableStickerTimeProvider(DateTimeOffset utcNow) => _utcNow = utcNow;
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+        public void Advance(TimeSpan delta) => _utcNow = _utcNow.Add(delta);
     }
 }

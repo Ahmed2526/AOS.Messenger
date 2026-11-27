@@ -844,7 +844,7 @@ export function createMediaUploader({
 
             removeJobAndRevokeBlobs(job);
             if (typeof onMessageSent === 'function') {
-                onMessageSent(job.conversationId, sentMessage);
+                onMessageSent(job.conversationId, sentMessage, { isVoice: Boolean(job.isVoice) });
             }
         } catch (err) {
             if (job.cancelled || isTerminated || err?.name === 'AbortError') {
@@ -1213,11 +1213,19 @@ export function createMediaUploader({
     };
 
     const onDragOver = (e) => {
-        if (locked || isTerminated || isVoiceLocked() || !hasDraggedFiles(e.dataTransfer)) return;
+        if (!hasDraggedFiles(e.dataTransfer)) return;
         if (isBlockingModalOpen(e.target)) {
             hideDropzone();
             return;
         }
+        if (isVoiceLocked()) {
+            e.preventDefault();
+            if (e.dataTransfer) {
+                e.dataTransfer.dropEffect = 'none';
+            }
+            return;
+        }
+        if (locked || isTerminated) return;
         e.preventDefault();
     };
 
@@ -1241,7 +1249,10 @@ export function createMediaUploader({
         }
         e.preventDefault();
         hideDropzone();
-        if (!locked && !isTerminated && !isVoiceLocked() && e.dataTransfer?.files?.length) {
+        if (isVoiceLocked()) {
+            return;
+        }
+        if (!locked && !isTerminated && e.dataTransfer?.files?.length) {
             addFiles(e.dataTransfer.files);
         }
     };

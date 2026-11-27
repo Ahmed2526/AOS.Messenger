@@ -136,7 +136,7 @@ export function createVoiceRecorder({
     createAudioContextFn = null,
     createObjectUrlFn = null,
     revokeObjectUrlFn = null,
-    nowFn = () => Date.now(),
+    nowFn = () => (typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()),
     minDurationMs = MIN_VOICE_DURATION_MS,
     maxDurationMs = MAX_VOICE_DURATION_MS,
     warnDurationMs = WARN_VOICE_DURATION_MS,
@@ -144,12 +144,14 @@ export function createVoiceRecorder({
     autoStopBytes = AUTO_STOP_VOICE_BYTES,
     targetPeakCount = TARGET_WAVEFORM_PEAKS
 } = {}) {
-    let mode = 'idle'; // 'idle' | 'recording' | 'paused' | 'preview'
+    let mode = 'idle'; // 'idle' | 'recording' | 'paused' | 'stopping' | 'preview'
     let opToken = 0;
+    let isStarting = false;
     let activeConvId = null;
     let mediaStream = null;
     let mediaRecorder = null;
     let audioContext = null;
+    let pendingAudioContext = null;
     let analyserNode = null;
     let sourceNode = null;
     let analyserBuffer = null;
@@ -164,7 +166,7 @@ export function createVoiceRecorder({
     let liveBars = [];
 
     let accumulatedActiveMs = 0;
-    let activeSegmentStartMs = 0;
+    let activeSegmentStartMs = null;
     let pollTimerId = null;
     let lastIndicatorSentAtMs = 0;
     let activeIndicatorConvId = null;
@@ -230,7 +232,7 @@ export function createVoiceRecorder({
     }
 
     function getCurrentElapsedMs() {
-        if (mode === 'recording' && activeSegmentStartMs > 0) {
+        if (mode === 'recording' && activeSegmentStartMs !== null) {
             return Math.max(0, accumulatedActiveMs + Math.max(0, nowFn() - activeSegmentStartMs));
         }
         return Math.max(0, accumulatedActiveMs);
@@ -243,8 +245,20 @@ export function createVoiceRecorder({
         }
     }
 
+    function closePendingAudioContext() {
+        if (pendingAudioContext && typeof pendingAudioContext.close === 'function') {
+            try {
+                if (pendingAudioContext.state !== 'closed') {
+                    Promise.resolve(pendingAudioContext.close()).catch(() => {});
+                }
+            } catch {}
+        }
+        pendingAudioContext = null;
+    }
+
     function stopMediaHardware() {
         clearPollTimer();
+        closePendingAudioContext();
 
         if (sourceNode && typeof sourceNode.disconnect === 'function') {
             try { sourceNode.disconnect(); } catch {}
@@ -561,6 +575,7 @@ export function createVoiceRecorder({
 
     function resetInternalState() {
         ++opToken;
+        isStarting = false;
         clearPollTimer();
         sendIndicatorFalseIfActive();
         stopMediaHardware();
@@ -577,7 +592,7 @@ export function createVoiceRecorder({
         sampleBucketMax = 0;
         liveBars = [];
         accumulatedActiveMs = 0;
-        activeSegmentStartMs = 0;
+        activeSegmentStartMs = null;
         previewBlob = null;
         previewDurationMs = 0;
         previewPeaks = [];
@@ -616,9 +631,9 @@ export function createVoiceRecorder({
             return;
         }
 
-        if (mode === 'recording' && activeSegmentStartMs > 0) {
+        if (mode === 'recording' && activeSegmentStartMs !== null) {
             accumulatedActiveMs += Math.max(0, nowFn() - activeSegmentStartMs);
-            activeSegmentStartMs = 0;
+            activeSegmentStartMs = null;
         }
 
         mode = 'stopping';
@@ -644,7 +659,6 @@ export function createVoiceRecorder({
         const expectedToken = opToken;
         rec.onstop = () => {
             if (expectedToken !== opToken) {
-                stopMediaHardware();
                 return;
             }
             const action = pendingStopMode || 'preview';
@@ -667,7 +681,7 @@ export function createVoiceRecorder({
     }
 
     async function startRecording() {
-        if (mode === 'recording' || mode === 'paused' || mode === 'stopping') return false;
+        if (isStarting || mode === 'recording' || mode === 'paused' || mode === 'stopping') return false;
         const convId = getActiveConversationId();
         if (!convId || !canRecordNow()) return false;
 
@@ -690,29 +704,33 @@ export function createVoiceRecorder({
             return false;
         }
 
-        // Discard any leftover preview cleanly
-        if (mode === 'preview') {
-            resetInternalState();
+        const startedFromPreview = mode === 'preview';
+        if (startedFromPreview) {
+            pausePreview();
         }
 
+        isStarting = true;
         const myToken = ++opToken;
-        activeConvId = convId;
+        if (!startedFromPreview) {
+            activeConvId = convId;
+        }
 
         // Create AudioContext synchronously within the user click gesture (Safari/iOS rule)
-        let pendingAudioCtx = null;
+        let createdAudioCtx = null;
         try {
             if (typeof createAudioContextFn === 'function') {
-                pendingAudioCtx = createAudioContextFn();
+                createdAudioCtx = createAudioContextFn();
             } else if (typeof window !== 'undefined' && (window.AudioContext || window.webkitAudioContext)) {
                 const Ctor = window.AudioContext || window.webkitAudioContext;
-                pendingAudioCtx = new Ctor();
+                createdAudioCtx = new Ctor();
             }
-            if (pendingAudioCtx && typeof pendingAudioCtx.resume === 'function' && pendingAudioCtx.state === 'suspended') {
-                Promise.resolve(pendingAudioCtx.resume()).catch(() => {});
+            if (createdAudioCtx && typeof createdAudioCtx.resume === 'function' && createdAudioCtx.state === 'suspended') {
+                Promise.resolve(createdAudioCtx.resume()).catch(() => {});
             }
         } catch {
-            pendingAudioCtx = null;
+            createdAudioCtx = null;
         }
+        pendingAudioContext = createdAudioCtx;
 
         let stream;
         try {
@@ -724,19 +742,29 @@ export function createVoiceRecorder({
                 }
             });
         } catch (err) {
-            if (pendingAudioCtx && typeof pendingAudioCtx.close === 'function') {
-                try { Promise.resolve(pendingAudioCtx.close()).catch(() => {}); } catch {}
+            if (pendingAudioContext === createdAudioCtx) {
+                closePendingAudioContext();
+            } else if (createdAudioCtx && typeof createdAudioCtx.close === 'function') {
+                try { Promise.resolve(createdAudioCtx.close()).catch(() => {}); } catch {}
             }
             if (myToken !== opToken) return false;
-            resetInternalState();
-            showDockState('idle');
+            isStarting = false;
+            if (!startedFromPreview) {
+                resetInternalState();
+                showDockState('idle');
+            }
             reportError(formatMicrophoneError(err));
             return false;
         }
 
         if (myToken !== opToken || !canRecordNow() || String(getActiveConversationId() || '') !== String(convId)) {
-            if (pendingAudioCtx && typeof pendingAudioCtx.close === 'function') {
-                try { Promise.resolve(pendingAudioCtx.close()).catch(() => {}); } catch {}
+            if (pendingAudioContext === createdAudioCtx) {
+                closePendingAudioContext();
+            } else if (createdAudioCtx && typeof createdAudioCtx.close === 'function') {
+                try { Promise.resolve(createdAudioCtx.close()).catch(() => {}); } catch {}
+            }
+            if (myToken === opToken) {
+                isStarting = false;
             }
             if (stream && typeof stream.getTracks === 'function') {
                 for (const t of stream.getTracks()) {
@@ -746,8 +774,22 @@ export function createVoiceRecorder({
             return false;
         }
 
+        isStarting = false;
+        if (startedFromPreview) {
+            clearPreviewAudioElement();
+            revokePreviewObjectUrl();
+            previewBlob = null;
+            previewDurationMs = 0;
+            previewPeaks = [];
+            previewBars = [];
+        }
+
+        activeConvId = convId;
         mediaStream = stream;
-        audioContext = pendingAudioCtx;
+        audioContext = createdAudioCtx;
+        if (pendingAudioContext === createdAudioCtx) {
+            pendingAudioContext = null;
+        }
         recordedChunks = [];
         cumulativeBytes = 0;
         collectedSamples = [];
@@ -876,9 +918,9 @@ export function createVoiceRecorder({
                 reportError('Could not pause voice recording.');
                 return;
             }
-            if (activeSegmentStartMs > 0) {
+            if (activeSegmentStartMs !== null) {
                 accumulatedActiveMs += Math.max(0, nowFn() - activeSegmentStartMs);
-                activeSegmentStartMs = 0;
+                activeSegmentStartMs = null;
             }
             mode = 'paused';
             sendIndicatorFalseIfActive();
@@ -909,11 +951,12 @@ export function createVoiceRecorder({
 
     function discard() {
         ++opToken;
-        if (mode === 'recording' || mode === 'paused') {
+        isStarting = false;
+        if (mediaRecorder) {
             pendingStopMode = 'abort';
             try {
-                if (mediaRecorder && mediaRecorder.state !== 'inactive' && typeof mediaRecorder.stop === 'function') {
-                    mediaRecorder.onstop = null;
+                mediaRecorder.onstop = null;
+                if (mediaRecorder.state !== 'inactive' && typeof mediaRecorder.stop === 'function') {
                     mediaRecorder.stop();
                 }
             } catch {}
@@ -955,6 +998,7 @@ export function createVoiceRecorder({
 
     function forceAbortAndWipe() {
         ++opToken;
+        isStarting = false;
         if (mediaRecorder) {
             try {
                 mediaRecorder.onstop = null;

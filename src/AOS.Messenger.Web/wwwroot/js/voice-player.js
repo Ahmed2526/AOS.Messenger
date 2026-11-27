@@ -458,7 +458,18 @@ export function createVoicePlayer({
         } catch {}
     }
 
-    async function loadAudioSource(card, state, bypassCache = false) {
+    function isCurrentAttempt(card, state, attemptId) {
+        return Boolean(
+            card &&
+            state &&
+            card.isConnected !== false &&
+            activeCard === card &&
+            attemptId === playSequence &&
+            state.activeAttemptId === attemptId
+        );
+    }
+
+    async function loadAudioSource(card, state, bypassCache = false, isStillCurrent = null) {
         const convId = card.getAttribute('data-conversation-id') || '';
         const msgId = card.getAttribute('data-message-id') || '';
         const mediaId = card.getAttribute('data-media-id') || '';
@@ -474,6 +485,7 @@ export function createVoicePlayer({
                     nowFn
                 });
             if (card.isConnected === false) return false;
+            if (typeof isStillCurrent === 'function' && !isStillCurrent()) return false;
             if (url) {
                 state.audio.src = url;
                 return true;
@@ -492,6 +504,8 @@ export function createVoicePlayer({
         stopAllPlayback(card);
         clearError(state);
         state.retried = false;
+        state.activeAttemptId = attemptId;
+        state.refreshingAttemptId = 0;
         activeCard = card;
         state.audio.playbackRate = getCurrentSpeed();
 
@@ -501,16 +515,18 @@ export function createVoicePlayer({
 
         const hasSrc = Boolean(state.audio.getAttribute('src') || state.audio.src);
         if (!hasSrc) {
-            const ok = await loadAudioSource(card, state, false);
-            if (attemptId !== playSequence || activeCard !== card || card.isConnected === false) {
-                if (activeCard === card) activeCard = null;
-                setPlayingUi(card, state, false);
+            const ok = await loadAudioSource(card, state, false, () => isCurrentAttempt(card, state, attemptId));
+            if (!isCurrentAttempt(card, state, attemptId)) {
+                if (card.isConnected === false && activeCard === card && attemptId === playSequence) {
+                    activeCard = null;
+                    setPlayingUi(card, state, false);
+                }
                 return;
             }
             if (!ok) {
                 showError(state, 'Audio unavailable');
                 setPlayingUi(card, state, false);
-                if (activeCard === card) activeCard = null;
+                activeCard = null;
                 return;
             }
         }
@@ -519,13 +535,22 @@ export function createVoicePlayer({
 
         try {
             await state.audio.play();
-            if (attemptId !== playSequence || activeCard !== card || card.isConnected === false) {
-                try { state.audio.pause(); } catch {}
-                setPlayingUi(card, state, false);
+            if (!isCurrentAttempt(card, state, attemptId)) {
+                if (state.activeAttemptId === attemptId) {
+                    try { state.audio.pause(); } catch {}
+                    setPlayingUi(card, state, false);
+                }
+                if (card.isConnected === false && activeCard === card && attemptId === playSequence) {
+                    activeCard = null;
+                    setPlayingUi(card, state, false);
+                }
                 return;
             }
         } catch (err) {
-            if (attemptId !== playSequence || activeCard !== card || card.isConnected === false) {
+            if (!isCurrentAttempt(card, state, attemptId)) {
+                return;
+            }
+            if (state.refreshingAttemptId === attemptId) {
                 return;
             }
             if (err && err.name === 'NotSupportedError') {
@@ -534,7 +559,7 @@ export function createVoicePlayer({
                 showError(state, 'Audio unavailable');
             }
             setPlayingUi(card, state, false);
-            if (activeCard === card) activeCard = null;
+            activeCard = null;
         }
     }
 
@@ -589,6 +614,8 @@ export function createVoicePlayer({
             isOutgoing: card.getAttribute('data-is-outgoing') === 'true',
             knownDurationMs: Number(card.getAttribute('data-duration-ms') || '0') || 0,
             retried: false,
+            activeAttemptId: 0,
+            refreshingAttemptId: 0,
             pendingSeekSec: null,
             playedSent: Boolean(card.getAttribute('data-played-at'))
         };
@@ -613,9 +640,12 @@ export function createVoicePlayer({
                 if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
                 if (!audio) return;
                 if (!audio.paused && !audio.ended) {
+                    if (activeCard === card) {
+                        playSequence++;
+                        activeCard = null;
+                    }
                     audio.pause();
                     setPlayingUi(card, state, false);
-                    if (activeCard === card) activeCard = null;
                 } else {
                     ensureAudioAndPlay(card, state);
                 }
@@ -633,7 +663,13 @@ export function createVoicePlayer({
                     return;
                 }
                 if (audio) {
-                    try { audio.currentTime = targetSec; } catch {}
+                    const hasMetadata = typeof audio.readyState !== 'number' || audio.readyState >= 1;
+                    if (!hasMetadata) {
+                        state.pendingSeekSec = targetSec;
+                    } else {
+                        state.pendingSeekSec = null;
+                        try { audio.currentTime = targetSec; } catch {}
+                    }
                 }
                 updateProgressUi(card, state, targetSec);
             };
@@ -677,6 +713,7 @@ export function createVoicePlayer({
             waveformEl.addEventListener('pointercancel', () => {
                 scrubbing = false;
                 lastPointerUpAt = null;
+                updateProgressUi(card, state);
             });
 
             waveformEl.addEventListener('click', (e) => {
@@ -716,9 +753,16 @@ export function createVoicePlayer({
 
         if (audio) {
             audio.addEventListener('playing', () => {
+                if (audio.paused || activeCard !== card || state.activeAttemptId !== playSequence || card.isConnected === false) {
+                    if (!audio.paused) {
+                        try { audio.pause(); } catch {}
+                    }
+                    return;
+                }
                 stopAllPlayback(card);
                 activeCard = card;
                 state.retried = false;
+                state.refreshingAttemptId = 0;
                 audio.playbackRate = getCurrentSpeed();
                 clearError(state);
                 setPlayingUi(card, state, true);
@@ -728,7 +772,9 @@ export function createVoicePlayer({
 
             audio.addEventListener('pause', () => {
                 setPlayingUi(card, state, false);
-                if (activeCard === card) activeCard = null;
+                if (activeCard === card && state.refreshingAttemptId !== state.activeAttemptId) {
+                    activeCard = null;
+                }
             });
 
             audio.addEventListener('timeupdate', () => {
@@ -768,62 +814,84 @@ export function createVoicePlayer({
                 const hasSrc = Boolean(audio.getAttribute('src') || audio.src);
                 if (!hasSrc) return;
 
+                if (activeCard !== card || state.activeAttemptId !== playSequence || card.isConnected === false) {
+                    return;
+                }
+
                 const mediaErrorCode = audio.error?.code || 0;
                 if (state.retried) {
+                    if (state.refreshingAttemptId === state.activeAttemptId) {
+                        state.refreshingAttemptId = 0;
+                    }
                     showError(
                         state,
                         mediaErrorCode === 4
                             ? 'Audio format not supported by this browser'
                             : 'Audio unavailable');
                     setPlayingUi(card, state, false);
-                    if (activeCard === card) activeCard = null;
-                    return;
-                }
-
-                if (activeCard && activeCard !== card) {
+                    activeCard = null;
                     return;
                 }
 
                 const capturedSeq = playSequence;
                 state.retried = true;
-                activeCard = card;
+                state.refreshingAttemptId = capturedSeq;
                 const savedTime = Number(audio.currentTime) || 0;
-                const ok = await loadAudioSource(card, state, true);
-                if (card.isConnected === false || activeCard !== card || capturedSeq !== playSequence) {
-                    if (activeCard === card) activeCard = null;
-                    setPlayingUi(card, state, false);
-                    return;
-                }
-                if (!ok) {
-                    showError(
-                        state,
-                        mediaErrorCode === 4
-                            ? 'Audio format not supported by this browser'
-                            : 'Audio unavailable');
-                    setPlayingUi(card, state, false);
-                    if (activeCard === card) activeCard = null;
-                    return;
-                }
-
-                if (savedTime > 0) {
-                    state.pendingSeekSec = savedTime;
-                    applyPendingSeekIfReady(state);
-                }
                 try {
-                    await audio.play();
-                } catch (err) {
-                    if (capturedSeq !== playSequence || activeCard !== card || card.isConnected === false) {
+                    const ok = await loadAudioSource(card, state, true, () => isCurrentAttempt(card, state, capturedSeq));
+                    if (!isCurrentAttempt(card, state, capturedSeq)) {
+                        if (card.isConnected === false && activeCard === card && capturedSeq === playSequence) {
+                            activeCard = null;
+                            setPlayingUi(card, state, false);
+                        }
                         return;
                     }
-                    if (err && err.name !== 'AbortError') {
+                    if (!ok) {
                         showError(
                             state,
-                            (err.name === 'NotSupportedError' || mediaErrorCode === 4)
+                            mediaErrorCode === 4
                                 ? 'Audio format not supported by this browser'
                                 : 'Audio unavailable');
+                        setPlayingUi(card, state, false);
+                        activeCard = null;
+                        return;
                     }
-                    setPlayingUi(card, state, false);
-                    if (activeCard === card) activeCard = null;
+
+                    if (savedTime > 0) {
+                        state.pendingSeekSec = savedTime;
+                        applyPendingSeekIfReady(state);
+                    }
+                    try {
+                        await audio.play();
+                        if (!isCurrentAttempt(card, state, capturedSeq)) {
+                            if (state.activeAttemptId === capturedSeq) {
+                                try { audio.pause(); } catch {}
+                                setPlayingUi(card, state, false);
+                            }
+                            if (card.isConnected === false && activeCard === card && capturedSeq === playSequence) {
+                                activeCard = null;
+                                setPlayingUi(card, state, false);
+                            }
+                            return;
+                        }
+                    } catch (err) {
+                        if (!isCurrentAttempt(card, state, capturedSeq)) {
+                            return;
+                        }
+                        if (err && err.name !== 'AbortError') {
+                            showError(
+                                state,
+                                (err.name === 'NotSupportedError' || mediaErrorCode === 4)
+                                    ? 'Audio format not supported by this browser'
+                                    : 'Audio unavailable');
+                        }
+                        setPlayingUi(card, state, false);
+                        activeCard = null;
+                    }
+                } finally {
+                    if (state.refreshingAttemptId === capturedSeq) {
+                        state.refreshingAttemptId = 0;
+                    }
                 }
             });
         }
@@ -838,6 +906,9 @@ export function createVoicePlayer({
         const cards = rootEl.querySelectorAll('[data-voice-player="true"]');
         for (const card of cards) {
             bindVoiceCard(card);
+            if (card && card.isConnected !== false) {
+                allBoundCards.add(card);
+            }
         }
 
         const videos = rootEl.querySelectorAll('video[data-media-video="true"]');

@@ -403,7 +403,8 @@ public sealed class Phase10VoiceFrontendTests
 
             // 5. Sequential auto-play when v1 ends advances into consecutive v2
             v2.audio.pause();
-            await v1.audio.play();
+            v1.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
             v1.audio.ended = true;
             v1.audio.dispatchEvent({ type: 'ended' });
             await new Promise(r => setTimeout(r, 15));
@@ -468,16 +469,20 @@ public sealed class Phase10VoiceFrontendTests
                 };
             }
 
-            // 1. Expired presigned GET URL emitting error code 4 triggers bypassCache retry and recovers
+            // 1. Expired presigned GET URL emitting error code 4 + rejecting first play() with NotSupportedError
+            // keeps ownership while bypassCache refresh is pending, then recovers cleanly
             const c1 = makeCard(201, 'media-retry', 10000);
             const c1Calls = [];
             let c1ShouldFailOnce = true;
+            let resolveC1Refresh = null;
             c1.audio.play = async () => {
                 if (c1ShouldFailOnce) {
                     c1ShouldFailOnce = false;
                     c1.audio.error = { code: 4 };
                     c1.audio.dispatchEvent({ type: 'error' });
-                    return;
+                    const err = new Error('NotSupportedError');
+                    err.name = 'NotSupportedError';
+                    throw err;
                 }
                 c1.audio.paused = false;
                 c1.audio.ended = false;
@@ -493,7 +498,10 @@ public sealed class Phase10VoiceFrontendTests
                 resolveUrlFn: async (convId, msgId, mediaId, opts) => {
                     if (mediaId === 'media-retry') {
                         c1Calls.push(Boolean(opts?.bypassCache));
-                        return opts?.bypassCache ? 'https://r2.invalid/fresh.m4a' : 'https://r2.invalid/expired.m4a';
+                        if (opts?.bypassCache) {
+                            return await new Promise(r => { resolveC1Refresh = r; });
+                        }
+                        return 'https://r2.invalid/expired.m4a';
                     }
                     if (mediaId === 'media-slow') {
                         slowRequests.push(mediaId);
@@ -514,11 +522,16 @@ public sealed class Phase10VoiceFrontendTests
 
             c1.playBtn.click();
             await new Promise(r => setTimeout(r, 25));
+            // Refresh is still pending after play() rejection catch has run: no error shown, card still owns playback
             assert.deepEqual(c1Calls, [false, true]);
+            assert.ok(c1.errEl.classList.contains('hidden'));
+            assert.equal(player.getActiveCard(), c1.card);
+            resolveC1Refresh('https://r2.invalid/fresh.m4a');
+            await new Promise(r => setTimeout(r, 25));
             assert.equal(c1.audio.paused, false);
             assert.ok(c1.errEl.classList.contains('hidden'));
 
-            // If retried URL also fails with code 4 -> surfaces format error cleanly without loop
+            // If retried URL also fails with code 4 + NotSupportedError -> surfaces format error cleanly without loop
             const failCard = makeCard(204, 'media-fail', 8000);
             let failResolveCount = 0;
             const failPlayer = createVoicePlayer({
@@ -528,6 +541,9 @@ public sealed class Phase10VoiceFrontendTests
             failCard.audio.play = async () => {
                 failCard.audio.error = { code: 4 };
                 failCard.audio.dispatchEvent({ type: 'error' });
+                const err = new Error('NotSupportedError');
+                err.name = 'NotSupportedError';
+                throw err;
             };
             failCard.playBtn.click();
             await new Promise(r => setTimeout(r, 25));
@@ -827,6 +843,520 @@ public sealed class Phase10VoiceFrontendTests
     }
 
     [Fact]
+    public async Task VoicePlayerModule_HandlesOwnershipRaces_ScrubCancel_PendingSeek_And_Rehydration()
+    {
+        var playerUrl = JsUrl("voice-player.js");
+        var script = $$"""
+            import assert from 'node:assert/strict';
+            {{MockDomPrelude}}
+
+            const { createVoiceBubbleElement, createVoicePlayer } = await import('{{playerUrl}}');
+            const container = createEl('div', 'messages-container');
+            rootBody.appendChild(container);
+
+            function makeCard(msgId, mediaId, durationMs) {
+                const row = createEl('div', `msg-${msgId}`);
+                row.className = 'message-bubble-row';
+                const card = createVoiceBubbleElement({
+                    conversationId: 'conv-1',
+                    messageId: msgId,
+                    mediaId,
+                    durationMs,
+                    waveformPeaks: [20, 40, 60, 80],
+                    playedAtUtc: null,
+                    isOutgoing: false
+                });
+                const audio = card.querySelector('audio');
+                audio.readyState = 0;
+                row.appendChild(card);
+                container.appendChild(row);
+                return {
+                    row,
+                    card,
+                    audio,
+                    playBtn: card.querySelector('[data-voice-play-btn]'),
+                    speedBtn: card.querySelector('[data-voice-speed-btn]'),
+                    wf: card.querySelector('[data-voice-waveform]'),
+                    timeEl: card.querySelector('[data-voice-time]'),
+                    errEl: card.querySelector('[data-voice-error]')
+                };
+            }
+
+            let resolveSlowFirst = null;
+            let resolveSlowSecond = null;
+            let resolveStaleSrc = null;
+            let staleCallCount = 0;
+            let stoppedCardRefreshes = 0;
+
+            const player = createVoicePlayer({
+                resolveUrlFn: async (convId, msgId, mediaId, opts) => {
+                    if (mediaId === 'm-double') {
+                        staleCallCount++;
+                        if (staleCallCount === 1) return await new Promise(r => { resolveSlowFirst = r; });
+                        return await new Promise(r => { resolveSlowSecond = r; });
+                    }
+                    if (mediaId === 'm-stale-src') {
+                        staleCallCount++;
+                        if (staleCallCount === 3) return await new Promise(r => { resolveStaleSrc = r; });
+                        return 'https://r2.invalid/fast-second.m4a';
+                    }
+                    if (mediaId === 'm-stopped-err' && opts?.bypassCache) {
+                        stoppedCardRefreshes++;
+                    }
+                    return `https://r2.invalid/${mediaId}.m4a`;
+                }
+            });
+            player.hydrateRoot(container);
+
+            // 1. Rapid double-click on same card while URL lookup is pending: first attempt must NOT clear second attempt
+            const dbl = makeCard(301, 'm-double', 10000);
+            player.hydrateRoot(container);
+            dbl.playBtn.click();
+            dbl.playBtn.click();
+            resolveSlowSecond('https://r2.invalid/dbl-second.m4a');
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(player.getActiveCard(), dbl.card);
+            assert.equal(dbl.audio.paused, false);
+            resolveSlowFirst('https://r2.invalid/dbl-first.m4a');
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(player.getActiveCard(), dbl.card);
+            assert.equal(dbl.audio.src, 'https://r2.invalid/dbl-second.m4a');
+            assert.equal(dbl.audio.paused, false);
+            player.stopAllPlayback();
+
+            // 2. Late error on stopped/idle card must NOT refresh URL or restart playback
+            const stoppedCard = makeCard(302, 'm-stopped-err', 10000);
+            player.hydrateRoot(container);
+            stoppedCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            player.stopAllPlayback();
+            assert.equal(player.getActiveCard(), null);
+            stoppedCard.audio.error = { code: 4 };
+            stoppedCard.audio.dispatchEvent({ type: 'error' });
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(stoppedCardRefreshes, 0);
+            assert.equal(player.getActiveCard(), null);
+            assert.equal(stoppedCard.audio.paused, true);
+
+            // 3. Stale playing event on paused card A while card B is active must NOT pause card B
+            const cardA = makeCard(303, 'm-card-a', 10000);
+            const cardB = makeCard(304, 'm-card-b', 10000);
+            player.hydrateRoot(container);
+            cardA.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            cardB.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(player.getActiveCard(), cardB.card);
+            assert.equal(cardB.audio.paused, false);
+            // Simulate queued 'playing' task firing on cardA even though cardA is paused
+            cardA.audio.dispatchEvent({ type: 'playing' });
+            assert.equal(player.getActiveCard(), cardB.card);
+            assert.equal(cardB.audio.paused, false);
+            player.stopAllPlayback();
+
+            // 4. Stale resolveUrlFn must NOT overwrite audio.src once another card/request took ownership
+            const staleSrcCard = makeCard(305, 'm-stale-src', 10000);
+            player.hydrateRoot(container);
+            staleSrcCard.playBtn.click(); // call #3 (slow)
+            cardB.playBtn.click(); // switches ownership to cardB
+            await new Promise(r => setTimeout(r, 15));
+            resolveStaleSrc('https://r2.invalid/should-not-assign.m4a');
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(staleSrcCard.audio.src, '');
+            assert.equal(player.getActiveCard(), cardB.card);
+            player.stopAllPlayback();
+
+            // 5. pointercancel on waveform restores visual progress to actual audio.currentTime
+            const scrubCard = makeCard(306, 'm-scrub-cancel', 20000);
+            player.hydrateRoot(container);
+            scrubCard.audio.src = 'https://r2.invalid/m-scrub-cancel.m4a';
+            scrubCard.audio.readyState = 1;
+            scrubCard.audio.duration = 20;
+            scrubCard.audio.currentTime = 2;
+            scrubCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 100 }); // 50% -> 10s
+            assert.equal(scrubCard.wf.getAttribute('aria-valuenow'), '10000');
+            scrubCard.wf.dispatchEvent({ type: 'pointercancel' });
+            assert.equal(scrubCard.wf.getAttribute('aria-valuenow'), '2000');
+
+            // 6. Second seek while src is set and readyState < 1 updates pendingSeekSec to latest target
+            const preMetaCard = makeCard(307, 'm-pre-meta', 20000);
+            player.hydrateRoot(container);
+            preMetaCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 100 }); // 10s
+            preMetaCard.wf.dispatchEvent({ type: 'pointerup', clientX: 100 });
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(preMetaCard.audio.readyState, 0);
+            preMetaCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 150 }); // 15s
+            preMetaCard.wf.dispatchEvent({ type: 'pointerup', clientX: 150 });
+            preMetaCard.audio.readyState = 1;
+            preMetaCard.audio.duration = 20;
+            preMetaCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(preMetaCard.audio.currentTime, 15);
+            player.stopAllPlayback();
+
+            // 7. Detached-then-attached re-hydration re-registers card in allBoundCards
+            const detachedCard = makeCard(308, 'm-rehydrate', 10000);
+            detachedCard.card.isConnected = false;
+            player.hydrateRoot(detachedCard.row); // bound while detached
+            const otherRoot = createEl('div', 'other-root');
+            player.hydrateRoot(otherRoot); // prunes detachedCard from allBoundCards
+            detachedCard.card.isConnected = true;
+            player.hydrateRoot(detachedCard.row); // re-registers already-bound attached card
+            cardB.speedBtn.click(); // cycles 1x -> 1.5x
+            assert.equal(detachedCard.speedBtn.textContent, '1.5x');
+
+            player.destroy();
+            """;
+
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node failed ({exitCode}): {stderr}\n{stdout}");
+    }
+
+    [Fact]
+    public async Task VoiceRecorderModule_HandlesStaleOnStop_PendingAudioContextCancel_ReRecordPreviewPreservation_And_MonotonicZeroClock()
+    {
+        var recUrl = JsUrl("voice-recorder.js");
+        var script = $$"""
+            import assert from 'node:assert/strict';
+            {{MockDomPrelude}}
+
+            for (const id of ['composer-input-row', 'composer-voice-dock', 'voice-dock-recording', 'voice-dock-preview',
+                'voice-rec-dot', 'voice-rec-status', 'voice-rec-timer', 'voice-rec-limit-hint', 'voice-live-waveform',
+                'voice-pause-btn', 'voice-pause-icon', 'voice-preview-waveform', 'voice-preview-timer', 'voice-preview-audio',
+                'voice-preview-play-icon', 'message-content-input']) {
+                rootBody.appendChild(createEl(id.includes('audio') ? 'audio' : 'div', id));
+            }
+
+            const { createVoiceRecorder } = await import('{{recUrl}}');
+
+            // 1. Stale MediaRecorder.onstop after discard + restart must NOT shut down new recording
+            let recInstances = [];
+            let track1Stopped = 0;
+            let track2Stopped = 0;
+            let ctx1Closed = 0;
+            let ctx2Closed = 0;
+            let recIndex = 0;
+            let nowMs = 0; // Also tests timestamp === 0 (#16)!
+
+            class QueuedStopRecorder {
+                constructor(stream) {
+                    this.stream = stream;
+                    this.state = 'inactive';
+                    this.mimeType = 'audio/webm';
+                    this.idx = ++recIndex;
+                    recInstances.push(this);
+                }
+                start() { this.state = 'recording'; }
+                stop() { this.state = 'inactive'; } // leaves onstop to be invoked asynchronously later
+            }
+
+            let micCall = 0;
+            const rec1 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => QueuedStopRecorder,
+                getUserMediaFn: async () => {
+                    micCall++;
+                    const idx = micCall;
+                    return {
+                        getTracks: () => [{ stop: () => { if (idx === 1) track1Stopped++; else track2Stopped++; } }],
+                        getAudioTracks: () => []
+                    };
+                },
+                createAudioContextFn: () => {
+                    const idx = micCall + 1;
+                    return {
+                        state: 'running',
+                        close: async () => { if (idx === 1) ctx1Closed++; else ctx2Closed++; }
+                    };
+                },
+                createObjectUrlFn: () => 'blob:preview-1',
+                nowFn: () => nowMs
+            });
+            rec1.init();
+
+            assert.equal(await rec1.startRecording(), true); // activeSegmentStartMs === 0!
+            nowMs = 1500;
+            rec1.stopToPreview();
+            const firstRecorder = recInstances[0];
+            const staleStopFn = firstRecorder.onstop;
+            rec1.discard();
+            assert.equal(await rec1.startRecording(), true);
+            assert.equal(rec1.getMode(), 'recording');
+            // Now fire the stale onstop callback captured from the first recording:
+            if (typeof staleStopFn === 'function') staleStopFn();
+            assert.equal(rec1.getMode(), 'recording');
+            assert.equal(track2Stopped, 0);
+            assert.equal(ctx2Closed, 0);
+            rec1.destroy();
+
+            // 2. Pending AudioContext is closed immediately when start is canceled while getUserMedia is unanswered
+            let resolvePendingMic = null;
+            let pendingMicTracksStopped = 0;
+            let pendingCtxClosed = 0;
+            const rec2 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => QueuedStopRecorder,
+                getUserMediaFn: () => new Promise(r => { resolvePendingMic = r; }),
+                createAudioContextFn: () => ({
+                    state: 'running',
+                    close: async () => { pendingCtxClosed++; }
+                })
+            });
+            rec2.init();
+            const startPromise = rec2.startRecording();
+            rec2.forceAbortAndWipe();
+            assert.equal(pendingCtxClosed, 1);
+            resolvePendingMic({
+                getTracks: () => [{ stop: () => { pendingMicTracksStopped++; } }],
+                getAudioTracks: () => []
+            });
+            assert.equal(await startPromise, false);
+            assert.equal(pendingMicTracksStopped, 1);
+            rec2.destroy();
+
+            // 3. Re-record from preview keeps preview usable while permission is pending & on denial,
+            // and replaces preview only once the replacement recording actually starts
+            let reRecordReject = false;
+            let reRecordFirst = true;
+            let resolveSecondMic = null;
+            const sentVoices = [];
+            class SyncPreviewRec {
+                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+                start() { this.state = 'recording'; }
+                stop() {
+                    this.state = 'inactive';
+                    if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }) });
+                    if (this.onstop) this.onstop();
+                }
+            }
+            nowMs = 0;
+            const rec3 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => SyncPreviewRec,
+                getUserMediaFn: () => {
+                    if (reRecordFirst) {
+                        reRecordFirst = false;
+                        return Promise.resolve({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+                    }
+                    if (reRecordReject) {
+                        const err = new Error('Denied');
+                        err.name = 'NotAllowedError';
+                        return Promise.reject(err);
+                    }
+                    return new Promise(r => { resolveSecondMic = r; });
+                },
+                createObjectUrlFn: () => 'blob:preview-keep',
+                onStartSendVoice: (p) => { sentVoices.push(p); return p; },
+                nowFn: () => nowMs
+            });
+            rec3.init();
+            assert.equal(await rec3.startRecording(), true);
+            nowMs = 1200; // started at 0 -> duration 1200ms!
+            rec3.stopToPreview();
+            assert.equal(rec3.getMode(), 'preview');
+
+            // Re-record rejected -> preview stays intact and sendable
+            reRecordReject = true;
+            assert.equal(await rec3.startRecording(), false);
+            assert.equal(rec3.getMode(), 'preview');
+
+            // Re-record pending -> preview still intact while awaiting mic; then resolves into recording
+            reRecordReject = false;
+            const reRecPromise = rec3.startRecording();
+            assert.equal(rec3.getMode(), 'preview');
+            resolveSecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+            assert.equal(await reRecPromise, true);
+            assert.equal(rec3.getMode(), 'recording');
+            nowMs = 2400;
+            rec3.sendNow();
+            assert.equal(sentVoices.length, 1);
+            assert.equal(sentVoices[0].durationMs, 1200);
+            rec3.destroy();
+            """;
+
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node failed ({exitCode}): {stderr}\n{stdout}");
+    }
+
+    [Fact]
+    public async Task VoiceIntegration_PreservesTextDraft_CancelsDropWhenVoiceLocked_And_IgnoresWaveformContextMenu()
+    {
+        var uploaderUrl = JsUrl("media-uploader.js");
+        var stateUrl = JsUrl("chat-state.js");
+        var actionsUrl = JsUrl("message-actions.js");
+        var shellCode = File.ReadAllText(Path.Combine(FindSolutionRoot(), "src", "AOS.Messenger.Web", "wwwroot", "js", "chat-shell.js"));
+
+        var script = $$"""
+            import assert from 'node:assert/strict';
+            {{MockDomPrelude}}
+
+            const { createMediaUploader } = await import('{{uploaderUrl}}');
+            const { createChatState } = await import('{{stateUrl}}');
+            const { setupMessageActions } = await import('{{actionsUrl}}');
+
+            globalThis.XMLHttpRequest = class MockXhr {
+                constructor() { this.upload = {}; this.status = 200; }
+                open() {}
+                setRequestHeader() {}
+                send() { queueMicrotask(() => { if (this.onload) this.onload(); }); }
+                abort() {}
+            };
+
+            // 1. Voice upload job passes { isVoice: true } while image upload passes { isVoice: false }
+            const state = createChatState();
+            state.activeConversationId = 'conv-a';
+            state.setDraft('conv-a', 'Keep my unsent text draft');
+
+            let sentMetas = [];
+            const uploader = createMediaUploader({
+                state,
+                isVoiceDockActive: () => true,
+                onMessageSent: (convId, msg, meta) => {
+                    sentMetas.push({ convId, meta });
+                    if (!meta?.isVoice) {
+                        state.deleteDraft(convId);
+                    }
+                },
+                api: {
+                    initiateMediaUpload: async () => ({ mediaId: 'm-v1', uploadUrl: 'https://r2.invalid/put', requiredContentType: 'audio/webm', requiredSizeBytes: 8 }),
+                    completeMediaUpload: async () => ({ id: 'm-v1', kind: 'voice', fileName: 'v.webm', sizeBytes: 8 }),
+                    cancelMediaUpload: async () => {},
+                    sendMessage: async () => ({ id: 1001, senderId: 'u1', content: null, attachments: [] })
+                }
+            });
+
+            // Simulate switching to conv-b before voice upload completes
+            const voiceJob = uploader.startVoiceUploadJob({
+                conversationId: 'conv-a',
+                blob: new Blob([new Uint8Array([1, 2, 3, 4])], { type: 'audio/webm' }),
+                fileName: 'voice-message.webm',
+                contentType: 'audio/webm',
+                durationMs: 2500,
+                waveformPeaks: [10, 40, 80, 30]
+            });
+            state.activeConversationId = 'conv-b';
+            await voiceJob.promise;
+            assert.equal(sentMetas.length, 1);
+            assert.equal(sentMetas[0].meta?.isVoice, true);
+            assert.equal(state.getDraft('conv-a'), 'Keep my unsent text draft');
+
+            // Normal attachment upload passes { isVoice: false } and clears draft
+            const imgUploader = createMediaUploader({
+                state,
+                isVoiceDockActive: () => false,
+                onMessageSent: (convId, msg, meta) => {
+                    sentMetas.push({ convId, meta });
+                    if (!meta?.isVoice) {
+                        state.deleteDraft(convId);
+                    }
+                },
+                api: {
+                    initiateMediaUpload: async () => ({ mediaId: 'm-i1', uploadUrl: 'https://r2.invalid/put', requiredContentType: 'image/png', requiredSizeBytes: 8 }),
+                    completeMediaUpload: async () => ({ id: 'm-i1', kind: 'image', fileName: 'p.png', sizeBytes: 8 }),
+                    cancelMediaUpload: async () => {},
+                    sendMessage: async () => ({ id: 1002, senderId: 'u1', content: null, attachments: [] })
+                }
+            });
+            state.activeConversationId = 'conv-a';
+            imgUploader.setLocked(false);
+            imgUploader.addFiles([{ name: 'p.png', type: 'image/png', size: 8 }]);
+            const imgJob = imgUploader.startUploadJob({ conversationId: 'conv-a', caption: '' });
+            await imgJob.promise;
+            assert.equal(sentMetas.length, 2);
+            assert.equal(sentMetas[1].meta?.isVoice, false);
+            assert.equal(state.getDraft('conv-a'), '');
+            imgUploader.destroy();
+
+            // 2. Dragover & drop with Files while isVoiceLocked() is true must call preventDefault() and set dropEffect='none' without adding files
+            const activePane = createEl('div', 'chat-active-pane');
+            rootBody.appendChild(activePane);
+            uploader.setLocked(false);
+            uploader.init();
+            let dragOverPrevented = false;
+            const dragDataTransfer = { types: ['Files'], dropEffect: 'copy' };
+            activePane.dispatchEvent({
+                type: 'dragover',
+                target: activePane,
+                dataTransfer: dragDataTransfer,
+                preventDefault() { dragOverPrevented = true; }
+            });
+            assert.equal(dragOverPrevented, true);
+            assert.equal(dragDataTransfer.dropEffect, 'none');
+
+            let dropPrevented = false;
+            activePane.dispatchEvent({
+                type: 'drop',
+                target: activePane,
+                dataTransfer: { types: ['Files'], files: [{ name: 'pic.png', type: 'image/png', size: 128 }] },
+                preventDefault() { dropPrevented = true; }
+            });
+            assert.equal(dropPrevented, true);
+            assert.equal(uploader.hasPendingFiles(), false);
+            uploader.destroy();
+
+            // 3. Mobile contextmenu on voice waveform/controls must NOT open mobile action sheet,
+            // while contextmenu on bubble text/padding outside voice controls DOES open it
+            const mobileSheet = createEl('div', 'mobile-message-action-sheet');
+            mobileSheet.classList.add('hidden');
+            rootBody.appendChild(mobileSheet);
+
+            const msgRow = createEl('div', 'msg-500');
+            msgRow.className = 'message-bubble-row';
+            msgRow.setAttribute('data-message-id', '500');
+            msgRow.setAttribute('data-is-outgoing', 'false');
+            msgRow.setAttribute('data-is-voice', 'true');
+            msgRow.setAttribute('data-deleted', 'false');
+            const bubble = createEl('div');
+            bubble.className = 'message-bubble';
+            const waveform = createEl('div');
+            waveform.setAttribute('data-voice-waveform', 'true');
+            const playBtn = createEl('button');
+            playBtn.className = 'voice-player-control';
+            bubble.appendChild(waveform);
+            bubble.appendChild(playBtn);
+            msgRow.appendChild(bubble);
+            rootBody.appendChild(msgRow);
+
+            globalThis.window.innerWidth = 390;
+            const actions = setupMessageActions(() => 'conv-a', () => 'user-1', {
+                isMobileViewport: () => true
+            });
+
+            let wfCtxPrevented = false;
+            document.dispatchEvent({
+                type: 'contextmenu',
+                target: waveform,
+                preventDefault() { wfCtxPrevented = true; }
+            });
+            assert.equal(wfCtxPrevented, false);
+            assert.ok(mobileSheet.classList.contains('hidden'));
+
+            let ctrlCtxPrevented = false;
+            document.dispatchEvent({
+                type: 'contextmenu',
+                target: playBtn,
+                preventDefault() { ctrlCtxPrevented = true; }
+            });
+            assert.equal(ctrlCtxPrevented, false);
+            assert.ok(mobileSheet.classList.contains('hidden'));
+
+            let bubbleCtxPrevented = false;
+            document.dispatchEvent({
+                type: 'contextmenu',
+                target: bubble,
+                preventDefault() { bubbleCtxPrevented = true; }
+            });
+            assert.equal(bubbleCtxPrevented, true);
+            assert.ok(!mobileSheet.classList.contains('hidden'));
+            actions.destroy();
+            """;
+
+        Assert.Contains("!meta?.isVoice && typeof state.deleteDraft === 'function'", shellCode, StringComparison.Ordinal);
+
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node failed ({exitCode}): {stderr}\n{stdout}");
+    }
+
+    [Fact]
     public async Task TypingRouterAndDragGuardModules_HandleRecordingIndicator_PopstateConfirmRollback_And_AudioUrls()
     {
         var typingUrl = JsUrl("typing.js");
@@ -866,7 +1396,7 @@ public sealed class Phase10VoiceFrontendTests
             const protectedUrls = collectRenderedMediaUrls(globalThis.document, 'https://localhost:7001');
             assert.ok(protectedUrls.has('https://r2.invalid/signed-voice.m4a'));
 
-            // 3. Router confirmBeforeSwitch aborts switch on cancel AND rolls back URL on popstate
+            // 3. Router confirmBeforeSwitch aborts switch on cancel AND restores history index via history.go on popstate
             const shell = createEl('div', 'chat-shell-root');
             rootBody.appendChild(shell);
             const state = createChatState();
@@ -884,6 +1414,54 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(apiCalled, 0);
             assert.equal(state.activeConversationId, 'conv-active-1');
             router.destroy();
+
+            // 4. Real popstate rollback preserves forward history stack via history.go(+1) without calling pushState
+            const stack = [
+                { s: { conversationId: 'conv-a', historyIdx: 0 }, u: '/chat/conv-a' },
+                { s: { conversationId: 'conv-b', historyIdx: 1 }, u: '/chat/conv-b' },
+                { s: { conversationId: 'conv-c', historyIdx: 2 }, u: '/chat/conv-c' }
+            ];
+            let histIdx = 1; // currently on B, with C in forward history
+            let pushCallsAfterInit = 0;
+            let goDeltas = [];
+            const popListeners = new Set();
+            globalThis.window.location = { href: 'https://localhost:7001/chat/conv-b', pathname: '/chat/conv-b', origin: 'https://localhost:7001', search: '' };
+            globalThis.window.addEventListener = (t, fn) => { if (t === 'popstate') popListeners.add(fn); };
+            globalThis.window.removeEventListener = (t, fn) => { if (t === 'popstate') popListeners.delete(fn); };
+            globalThis.history = {
+                get state() { return stack[histIdx].s; },
+                replaceState(s, t, u) { stack[histIdx] = { s, u }; },
+                pushState(s, t, u) { pushCallsAfterInit++; stack.splice(histIdx + 1); stack.push({ s, u }); histIdx = stack.length - 1; },
+                go(delta) {
+                    goDeltas.push(delta);
+                    histIdx += delta;
+                    globalThis.window.location.pathname = stack[histIdx].u;
+                    for (const fn of popListeners) fn({ state: stack[histIdx].s });
+                }
+            };
+            const popState = createChatState();
+            popState.activeConversationId = 'conv-b';
+            let confirmCount = 0;
+            const popRouter = createChatRouter({
+                state: popState,
+                api: { getConversationBundle: async () => ({}) },
+                renderer: {},
+                hooks: { confirmBeforeSwitch: async () => { confirmCount++; return false; } }
+            });
+            popRouter.init();
+            pushCallsAfterInit = 0;
+            // Simulate user clicking browser Back from B (idx 1) to A (idx 0)
+            histIdx = 0;
+            globalThis.window.location.pathname = stack[0].u;
+            for (const fn of popListeners) await fn({ state: stack[0].s });
+            assert.equal(confirmCount, 1); // restoration popstate did NOT trigger confirm a second time
+            assert.deepEqual(goDeltas, [1]);
+            assert.equal(histIdx, 1);
+            assert.equal(pushCallsAfterInit, 0);
+            assert.equal(stack.length, 3); // forward entry C preserved!
+            assert.equal(stack[2].u, '/chat/conv-c');
+            assert.equal(globalThis.window.location.pathname, '/chat/conv-b');
+            popRouter.destroy();
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
@@ -891,38 +1469,47 @@ public sealed class Phase10VoiceFrontendTests
     }
 
     [Fact]
-    public void RazorViews_HaveNoInlineStyles_NoAudioCrossOrigin_And_IdenticalComposerIds()
+    public void RazorViews_HaveNoInlineStyles_NoAudioCrossOrigin_And_SharedVoiceDockPartial()
     {
         var slnRoot = FindSolutionRoot();
         var convPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "Conversation.cshtml");
         var emptyPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "_ChatActivePaneEmpty.cshtml");
+        var dockPartialPath = Path.Combine(slnRoot, "src", "AOS.Messenger.Web", "Views", "Chat", "_ComposerVoiceDock.cshtml");
 
         var convHtml = File.ReadAllText(convPath);
         var emptyHtml = File.ReadAllText(emptyPath);
+        var dockHtml = File.ReadAllText(dockPartialPath);
 
-        foreach (var html in new[] { convHtml, emptyHtml })
+        foreach (var html in new[] { convHtml, emptyHtml, dockHtml })
         {
             Assert.DoesNotMatch(new Regex(@"\bstyle\s*=", RegexOptions.IgnoreCase), html);
             Assert.DoesNotContain("crossorigin", html, StringComparison.OrdinalIgnoreCase);
-            foreach (var id in new[]
-            {
-                "composer-input-row",
-                "composer-voice-btn",
-                "composer-voice-dock",
-                "voice-dock-recording",
-                "voice-dock-preview",
-                "voice-rec-timer",
-                "voice-discard-btn",
-                "voice-pause-btn",
-                "voice-stop-preview-btn",
-                "voice-send-now-btn",
-                "voice-preview-play-btn",
-                "voice-preview-waveform",
-                "voice-preview-send-btn"
-            })
-            {
-                Assert.Contains($"id=\"{id}\"", html, StringComparison.Ordinal);
-            }
+        }
+
+        foreach (var parentHtml in new[] { convHtml, emptyHtml })
+        {
+            Assert.Contains("@await Html.PartialAsync(\"_ComposerVoiceDock\")", parentHtml, StringComparison.Ordinal);
+            Assert.DoesNotContain("id=\"composer-voice-dock\"", parentHtml, StringComparison.Ordinal);
+            Assert.Contains("id=\"composer-input-row\"", parentHtml, StringComparison.Ordinal);
+            Assert.Contains("id=\"composer-voice-btn\"", parentHtml, StringComparison.Ordinal);
+        }
+
+        foreach (var id in new[]
+        {
+            "composer-voice-dock",
+            "voice-dock-recording",
+            "voice-dock-preview",
+            "voice-rec-timer",
+            "voice-discard-btn",
+            "voice-pause-btn",
+            "voice-stop-preview-btn",
+            "voice-send-now-btn",
+            "voice-preview-play-btn",
+            "voice-preview-waveform",
+            "voice-preview-send-btn"
+        })
+        {
+            Assert.Contains($"id=\"{id}\"", dockHtml, StringComparison.Ordinal);
         }
     }
 }

@@ -269,11 +269,11 @@ export function initChatShell(overrides = {}) {
         onUnauthorized: handleSessionExpired,
         onTrayChanged: () => composer?.syncDisabledState(),
         isVoiceDockActive: () => Boolean(voiceRecorder && voiceRecorder.isDirty()),
-        onMessageSent: (convId, sentMessage) => {
+        onMessageSent: (convId, sentMessage, meta = null) => {
             const msgId = messageRenderer.getMessageId(sentMessage);
             const previewText = messageRenderer.formatMessagePreview(sentMessage);
             updateSidebarLastMessage(convId, previewText, msgId, false, false, true);
-            if (typeof state.deleteDraft === 'function') {
+            if (!meta?.isVoice && typeof state.deleteDraft === 'function') {
                 state.deleteDraft(convId);
             }
             const isSameActive = state.activeConversationId

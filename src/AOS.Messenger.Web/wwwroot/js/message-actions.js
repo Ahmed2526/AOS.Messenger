@@ -509,13 +509,20 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
         openDeleteModal(ctx.messageId, ctx.isOutgoing, ctx.createdAt);
     };
 
+    const isExcludedMobileActionTarget = (target) => Boolean(
+        target.closest('.reaction-pill') ||
+        target.closest('video') ||
+        target.closest('.voice-player-control') ||
+        target.closest('[data-voice-waveform]')
+    );
+
     const onPointerDownForLongPress = (e) => {
         cancelLongPress();
         if (!mobileSheet || !isMobileViewport()) return;
         if (e.isPrimary === false) return;
         if (typeof e.button === 'number' && e.button !== 0) return;
         if (!e.target || typeof e.target.closest !== 'function') return;
-        if (e.target.closest('.reaction-pill') || e.target.closest('video') || e.target.closest('.voice-player-control') || e.target.closest('[data-voice-waveform]')) return;
+        if (isExcludedMobileActionTarget(e.target)) return;
 
         const bubble = e.target.closest('.message-bubble');
         if (!bubble) return;
@@ -558,6 +565,7 @@ export function setupMessageActions(convIdOrGetter, userIdOrGetter, options = {}
     const onMobileBubbleContextMenu = (e) => {
         if (!mobileSheet || !isMobileViewport()) return;
         if (!e.target || typeof e.target.closest !== 'function') return;
+        if (isExcludedMobileActionTarget(e.target)) return;
         const bubble = e.target.closest('.message-bubble');
         if (!bubble) return;
         const row = bubble.closest('.message-bubble-row');

@@ -34,6 +34,10 @@ namespace AOS.Messenger.Infrastructure.Migrations
                 table: "Media",
                 sql: "([Kind] <> 3) OR ([DurationMs] IS NOT NULL AND [DurationMs] >= 500 AND [DurationMs] <= 1200000)");
 
+            // Safe backfill for any pre-existing voice rows if this migration was previously rolled back and re-applied.
+            migrationBuilder.Sql(
+                "UPDATE [Media] SET [WaveformPeaks] = N'50' WHERE [Kind] = 3 AND ([WaveformPeaks] IS NULL OR LEN([WaveformPeaks]) = 0);");
+
             migrationBuilder.AddCheckConstraint(
                 name: "CK_Media_Voice_Waveform",
                 table: "Media",

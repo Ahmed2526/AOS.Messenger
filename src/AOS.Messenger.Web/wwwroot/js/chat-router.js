@@ -93,6 +93,8 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     let initialized = false;
     let onDocumentClick = null;
     let onPopState = null;
+    let currentHistoryIdx = 0;
+    let suppressNextPopState = false;
 
     /**
      * Switches the active chat pane to nextId with full epoch/AbortController race protection.
@@ -188,7 +190,8 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
 
             if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
-                history.pushState({ conversationId: String(nextId) }, '', `/chat/${encodeURIComponent(String(nextId))}`);
+                currentHistoryIdx++;
+                history.pushState({ conversationId: String(nextId), historyIdx: currentHistoryIdx }, '', `/chat/${encodeURIComponent(String(nextId))}`);
             }
 
             if (typeof hooks.onAfterSwitch === 'function') {
@@ -262,7 +265,8 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         toggleMobilePane('sidebar');
 
         if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
-            history.pushState({ conversationId: null }, '', '/chat');
+            currentHistoryIdx++;
+            history.pushState({ conversationId: null, historyIdx: currentHistoryIdx }, '', '/chat');
         }
 
         if (typeof hooks.onSwitchToEmpty === 'function') {
@@ -416,9 +420,15 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             state.initFromBootstrap(bootstrap);
         }
 
+        const existingIdx = (typeof history !== 'undefined' && Number.isInteger(history.state?.historyIdx))
+            ? history.state.historyIdx
+            : 0;
+        currentHistoryIdx = existingIdx;
+        suppressNextPopState = false;
+
         if (typeof history !== 'undefined' && typeof history.replaceState === 'function' && typeof window !== 'undefined') {
             history.replaceState(
-                { conversationId: state.activeConversationId ?? null },
+                { conversationId: state.activeConversationId ?? null, historyIdx: currentHistoryIdx },
                 '',
                 `${window.location.pathname}${window.location.search || ''}`
             );
@@ -448,20 +458,34 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         };
 
         onPopState = async (e) => {
-            const fromState = e.state && e.state.conversationId ? String(e.state.conversationId) : null;
+            if (suppressNextPopState) {
+                suppressNextPopState = false;
+                return;
+            }
+
+            const poppedIdx = Number.isInteger(e?.state?.historyIdx) ? e.state.historyIdx : null;
+            const fromState = e?.state && e.state.conversationId ? String(e.state.conversationId) : null;
             const fromPath = typeof window !== 'undefined' ? parseConversationIdFromPath(window.location.pathname) : null;
             const targetId = fromState || fromPath;
 
             if (typeof hooks.confirmBeforeSwitch === 'function') {
                 const allowed = await hooks.confirmBeforeSwitch(targetId);
                 if (!allowed) {
-                    if (typeof history !== 'undefined' && typeof history.pushState === 'function') {
+                    if (poppedIdx !== null && poppedIdx !== currentHistoryIdx && typeof history !== 'undefined' && typeof history.go === 'function') {
+                        suppressNextPopState = true;
+                        history.go(currentHistoryIdx - poppedIdx);
+                    } else if (typeof history !== 'undefined' && typeof history.pushState === 'function') {
                         const rollbackId = state.activeConversationId ?? null;
                         const rollbackUrl = rollbackId ? `/chat/${encodeURIComponent(String(rollbackId))}` : '/chat';
-                        history.pushState({ conversationId: rollbackId }, '', rollbackUrl);
+                        currentHistoryIdx++;
+                        history.pushState({ conversationId: rollbackId, historyIdx: currentHistoryIdx }, '', rollbackUrl);
                     }
                     return;
                 }
+            }
+
+            if (poppedIdx !== null) {
+                currentHistoryIdx = poppedIdx;
             }
 
             if (targetId) {
@@ -490,6 +514,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         }
         onDocumentClick = null;
         onPopState = null;
+        suppressNextPopState = false;
         initialized = false;
     }
 

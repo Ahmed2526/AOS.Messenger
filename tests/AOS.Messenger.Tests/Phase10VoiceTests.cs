@@ -336,7 +336,7 @@ public sealed class Phase10VoiceTests : IClassFixture<SqlTestDatabaseFixture>, I
         var aliceCsrf = await LoginAndGetCsrfAsync(aliceClient, aliceUsername);
         var bobCsrf = await LoginAndGetCsrfAsync(bobClient, bobUsername);
 
-        var oggBytes = Phase10VoiceUnitTests.BuildOggBytes(Phase10VoiceUnitTests.BuildValidOpusHead(), bos: true);
+        var oggBytes = Phase10VoiceUnitTests.BuildValidOggOpusStream();
         var initReq = CreateCsrfJsonPost(
             $"/api/conversations/{convId.Value}/media/initiate",
             aliceCsrf,
@@ -408,6 +408,127 @@ public sealed class Phase10VoiceTests : IClassFixture<SqlTestDatabaseFixture>, I
         Assert.Equal(HttpStatusCode.OK, bobPlayed2.StatusCode);
         using var playedDoc2 = JsonDocument.Parse(await bobPlayed2.Content.ReadAsStringAsync());
         Assert.Equal(playedAt1, playedDoc2.RootElement.GetProperty("playedAtUtc").GetString());
+    }
+
+    [Fact]
+    public async Task SqlPersistence_TryMarkVoicePlayed_RejectsConcurrentDeleteForMeAndBlockBetweenPrecheckAndUpdate()
+    {
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 27, 15, 0, 0, TimeSpan.Zero));
+        var notifier = new CapturingVoiceRealtimeNotifier();
+
+        UserId aliceId;
+        UserId bobId;
+        ConversationId convId;
+
+        await using (var db = _fixture.CreateDbContext())
+        {
+            var alice = await SeedUserAsync(db, "ra", "Race Alice");
+            var bob = await SeedUserAsync(db, "rb", "Race Bob");
+            aliceId = new UserId(alice.Id);
+            bobId = new UserId(bob.Id);
+            var conv = await SeedConversationAsync(db, aliceId, bobId, clock.GetUtcNow());
+            convId = conv.Id;
+        }
+
+        await using var sp = BuildLocalServices(clock, notifier);
+
+        async Task<(long MsgId, Guid MediaGuid)> UploadAndSendVoiceAsync()
+        {
+            await using var s = sp.CreateAsyncScope();
+            var mSvc = s.ServiceProvider.GetRequiredService<IMediaService>();
+            var msgSvc = s.ServiceProvider.GetRequiredService<IMessageService>();
+            var webm = Phase10VoiceUnitTests.BuildWebmBytes("webm", trackType: 2);
+            var init = await mSvc.InitiateUploadAsync(
+                aliceId,
+                convId,
+                new InitiateMediaUploadRequestDto("race.webm", "audio/webm", webm.Length, "voice", 3200, [15, 50, 75, 40]));
+            await StageLocalFileAsync(init.MediaId, webm);
+            var completed = await mSvc.CompleteUploadAsync(aliceId, convId, init.MediaId);
+            var msg = await msgSvc.SendMessageAsync(aliceId, convId, new SendMessageRequestDto(null, Guid.NewGuid().ToString(), null, [completed.Id]));
+            return (msg.Id.Value, completed.Id.Value);
+        }
+
+        // Helper to build a separate ServiceProvider whose DbContext fires an async race action right before UPDATE [Media] (PlayedAtUtc)
+        ServiceProvider BuildInterceptedServices(Func<Task> onBeforeUpdate)
+        {
+            var services = _fixture.CreateServiceCollection();
+            services.Replace(ServiceDescriptor.Singleton<TimeProvider>(clock));
+            services.Replace(ServiceDescriptor.Singleton<IRealtimeNotifier>(notifier));
+            services.Replace(ServiceDescriptor.Singleton(sp2 =>
+                new LocalDiskMediaStorage(sp2.GetRequiredService<LocalMediaSigningService>(), _mediaTempRoot)));
+            services.Replace(ServiceDescriptor.Singleton<IMediaStorage>(sp2 =>
+                sp2.GetRequiredService<LocalDiskMediaStorage>()));
+            services.RemoveAll<DbContextOptions<ApplicationDbContext>>();
+            var interceptor = new VoicePlayedUpdateRaceInterceptor(onBeforeUpdate);
+            services.AddDbContext<ApplicationDbContext>(opts =>
+                opts.UseSqlServer(_fixture.ConnectionString).AddInterceptors(interceptor));
+            return services.BuildServiceProvider();
+        }
+
+        // Case 1: Concurrent DeleteForMeAsync commits between TryMarkVoicePlayedAsync precheck and conditional UPDATE
+        var (msg1Id, media1Guid) = await UploadAndSendVoiceAsync();
+        await using (var spDeleteRace = BuildInterceptedServices(async () =>
+        {
+            await using var racerScope = sp.CreateAsyncScope();
+            var racerMsgSvc = racerScope.ServiceProvider.GetRequiredService<IMessageService>();
+            await racerMsgSvc.DeleteForMeAsync(bobId, convId, new MessageId(msg1Id));
+        }))
+        {
+            await using var scope = spDeleteRace.CreateAsyncScope();
+            var mediaSvc = scope.ServiceProvider.GetRequiredService<IMediaService>();
+            await Assert.ThrowsAsync<NotFoundException>(() =>
+                mediaSvc.MarkVoicePlayedAsync(bobId, convId, new MessageId(msg1Id), new MediaId(media1Guid)));
+        }
+
+        await using (var verifyDb1 = _fixture.CreateDbContext())
+        {
+            var persisted1 = await verifyDb1.Media.AsNoTracking().SingleAsync(m => m.Id == new MediaId(media1Guid));
+            Assert.Null(persisted1.PlayedAtUtc);
+        }
+
+        // Case 2: Concurrent BlockUserAsync commits between TryMarkVoicePlayedAsync precheck and conditional UPDATE
+        var (msg2Id, media2Guid) = await UploadAndSendVoiceAsync();
+        await using (var spBlockRace = BuildInterceptedServices(async () =>
+        {
+            await using var racerScope = sp.CreateAsyncScope();
+            var racerBlockSvc = racerScope.ServiceProvider.GetRequiredService<IBlockService>();
+            await racerBlockSvc.BlockUserAsync(aliceId, bobId);
+        }))
+        {
+            await using var scope = spBlockRace.CreateAsyncScope();
+            var mediaSvc = scope.ServiceProvider.GetRequiredService<IMediaService>();
+            await Assert.ThrowsAsync<ForbiddenException>(() =>
+                mediaSvc.MarkVoicePlayedAsync(bobId, convId, new MessageId(msg2Id), new MediaId(media2Guid)));
+        }
+
+        await using (var verifyDb2 = _fixture.CreateDbContext())
+        {
+            var persisted2 = await verifyDb2.Media.AsNoTracking().SingleAsync(m => m.Id == new MediaId(media2Guid));
+            Assert.Null(persisted2.PlayedAtUtc);
+        }
+
+        Assert.Empty(notifier.VoicePlayedEvents);
+    }
+
+    private sealed class VoicePlayedUpdateRaceInterceptor(Func<Task> onBeforeUpdate) : Microsoft.EntityFrameworkCore.Diagnostics.DbCommandInterceptor
+    {
+        private int _triggered;
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> NonQueryExecutingAsync(
+            System.Data.Common.DbCommand command,
+            Microsoft.EntityFrameworkCore.Diagnostics.CommandEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase) &&
+                command.CommandText.Contains("PlayedAtUtc", StringComparison.OrdinalIgnoreCase) &&
+                Interlocked.Exchange(ref _triggered, 1) == 0)
+            {
+                await onBeforeUpdate();
+            }
+
+            return result;
+        }
     }
 
     // =========================================================================

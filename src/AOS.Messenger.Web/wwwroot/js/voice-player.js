@@ -338,7 +338,9 @@ export function createVoicePlayer({
     function updateProgressUi(card, state, forceCurrentSec = null) {
         const audio = state.audio;
         const durationSec = getEffectiveDurationSec(audio, state);
-        const rawCur = forceCurrentSec !== null ? forceCurrentSec : (Number(audio?.currentTime) || 0);
+        const rawCur = forceCurrentSec !== null
+            ? forceCurrentSec
+            : (state.pendingSeekSec ?? (Number(audio?.currentTime) || 0));
         const clampedCur = durationSec > 0 ? Math.max(0, Math.min(durationSec, rawCur)) : Math.max(0, rawCur);
         const fraction = durationSec > 0 ? Math.max(0, Math.min(1, clampedCur / durationSec)) : 0;
 
@@ -488,6 +490,9 @@ export function createVoicePlayer({
             if (typeof isStillCurrent === 'function' && !isStillCurrent()) return false;
             if (url) {
                 state.audio.src = url;
+                if (state.audio.error) {
+                    try { state.audio.error = null; } catch {}
+                }
                 return true;
             }
         } catch {}
@@ -514,8 +519,9 @@ export function createVoicePlayer({
         }
 
         const hasSrc = Boolean(state.audio.getAttribute('src') || state.audio.src);
-        if (!hasSrc) {
-            const ok = await loadAudioSource(card, state, false, () => isCurrentAttempt(card, state, attemptId));
+        const hasMediaError = Boolean(state.audio.error);
+        if (!hasSrc || hasMediaError) {
+            const ok = await loadAudioSource(card, state, hasMediaError, () => isCurrentAttempt(card, state, attemptId));
             if (!isCurrentAttempt(card, state, attemptId)) {
                 if (card.isConnected === false && activeCard === card && attemptId === playSequence) {
                     activeCard = null;
@@ -524,7 +530,7 @@ export function createVoicePlayer({
                 return;
             }
             if (!ok) {
-                showError(state, 'Audio unavailable');
+                showError(state, hasMediaError ? 'Audio format not supported by this browser' : 'Audio unavailable');
                 setPlayingUi(card, state, false);
                 activeCard = null;
                 return;
@@ -733,7 +739,7 @@ export function createVoicePlayer({
             waveformEl.addEventListener('keydown', (e) => {
                 const durSec = getEffectiveDurationSec(audio, state);
                 if (durSec <= 0) return;
-                const cur = Number(audio?.currentTime) || 0;
+                const cur = state.pendingSeekSec ?? (Number(audio?.currentTime) || 0);
                 let next = null;
                 if (e.key === 'ArrowRight' || e.key === 'ArrowUp') {
                     next = Math.min(durSec, cur + 5);
@@ -771,6 +777,7 @@ export function createVoicePlayer({
             });
 
             audio.addEventListener('pause', () => {
+                if (!audio.paused) return;
                 setPlayingUi(card, state, false);
                 if (activeCard === card && state.refreshingAttemptId !== state.activeAttemptId) {
                     activeCard = null;

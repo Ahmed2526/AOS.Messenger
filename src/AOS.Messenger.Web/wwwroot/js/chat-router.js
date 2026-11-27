@@ -94,7 +94,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     let onDocumentClick = null;
     let onPopState = null;
     let currentHistoryIdx = 0;
-    let suppressNextPopState = false;
+    let routerLifecycleEpoch = 0;
+    let pendingPopConfirm = null;
+    let expectedRollbackIdx = null;
 
     /**
      * Switches the active chat pane to nextId with full epoch/AbortController race protection.
@@ -191,6 +193,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
             if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
                 currentHistoryIdx++;
+                expectedRollbackIdx = null;
                 history.pushState({ conversationId: String(nextId), historyIdx: currentHistoryIdx }, '', `/chat/${encodeURIComponent(String(nextId))}`);
             }
 
@@ -266,6 +269,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
         if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
             currentHistoryIdx++;
+            expectedRollbackIdx = null;
             history.pushState({ conversationId: null, historyIdx: currentHistoryIdx }, '', '/chat');
         }
 
@@ -424,7 +428,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             ? history.state.historyIdx
             : 0;
         currentHistoryIdx = existingIdx;
-        suppressNextPopState = false;
+        routerLifecycleEpoch++;
+        pendingPopConfirm = null;
+        expectedRollbackIdx = null;
 
         if (typeof history !== 'undefined' && typeof history.replaceState === 'function' && typeof window !== 'undefined') {
             history.replaceState(
@@ -458,30 +464,72 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         };
 
         onPopState = async (e) => {
-            if (suppressNextPopState) {
-                suppressNextPopState = false;
-                return;
-            }
-
             const poppedIdx = Number.isInteger(e?.state?.historyIdx) ? e.state.historyIdx : null;
             const fromState = e?.state && e.state.conversationId ? String(e.state.conversationId) : null;
             const fromPath = typeof window !== 'undefined' ? parseConversationIdFromPath(window.location.pathname) : null;
             const targetId = fromState || fromPath;
 
+            if (expectedRollbackIdx !== null) {
+                const expected = expectedRollbackIdx;
+                expectedRollbackIdx = null;
+                if (poppedIdx === expected) {
+                    return;
+                }
+            }
+
+            if (pendingPopConfirm) {
+                pendingPopConfirm.latestBrowserIdx = poppedIdx;
+                pendingPopConfirm.latestTargetId = targetId;
+                return;
+            }
+
             if (typeof hooks.confirmBeforeSwitch === 'function') {
-                const allowed = await hooks.confirmBeforeSwitch(targetId);
+                const myEpoch = routerLifecycleEpoch;
+                const pending = { latestBrowserIdx: poppedIdx, latestTargetId: targetId };
+                pendingPopConfirm = pending;
+                let allowed = false;
+                try {
+                    allowed = Boolean(await hooks.confirmBeforeSwitch(targetId));
+                } finally {
+                    if (pendingPopConfirm === pending) {
+                        pendingPopConfirm = null;
+                    }
+                }
+
+                if (myEpoch !== routerLifecycleEpoch || !initialized) {
+                    return;
+                }
+
+                const finalIdx = pending.latestBrowserIdx;
+                const finalTargetId = pending.latestTargetId;
+
                 if (!allowed) {
-                    if (poppedIdx !== null && poppedIdx !== currentHistoryIdx && typeof history !== 'undefined' && typeof history.go === 'function') {
-                        suppressNextPopState = true;
-                        history.go(currentHistoryIdx - poppedIdx);
+                    if (finalIdx !== null && finalIdx === currentHistoryIdx) {
+                        return;
+                    }
+                    if (finalIdx !== null && typeof history !== 'undefined' && typeof history.go === 'function') {
+                        expectedRollbackIdx = currentHistoryIdx;
+                        history.go(currentHistoryIdx - finalIdx);
                     } else if (typeof history !== 'undefined' && typeof history.pushState === 'function') {
                         const rollbackId = state.activeConversationId ?? null;
                         const rollbackUrl = rollbackId ? `/chat/${encodeURIComponent(String(rollbackId))}` : '/chat';
                         currentHistoryIdx++;
+                        expectedRollbackIdx = null;
                         history.pushState({ conversationId: rollbackId, historyIdx: currentHistoryIdx }, '', rollbackUrl);
                     }
                     return;
                 }
+
+                if (finalIdx !== null) {
+                    currentHistoryIdx = finalIdx;
+                }
+
+                if (finalTargetId) {
+                    switchConversation(finalTargetId, { pushUrl: false, skipConfirm: true });
+                } else {
+                    switchToEmptyState({ pushUrl: false, skipConfirm: true });
+                }
+                return;
             }
 
             if (poppedIdx !== null) {
@@ -506,6 +554,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
     function destroy() {
         if (!initialized) return;
+        routerLifecycleEpoch++;
+        pendingPopConfirm = null;
+        expectedRollbackIdx = null;
         if (typeof document !== 'undefined' && onDocumentClick) {
             document.removeEventListener('click', onDocumentClick);
         }
@@ -514,7 +565,6 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         }
         onDocumentClick = null;
         onPopState = null;
-        suppressNextPopState = false;
         initialized = false;
     }
 

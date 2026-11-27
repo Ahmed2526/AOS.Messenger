@@ -623,6 +623,39 @@ public sealed class Phase10VoiceFrontendTests
             const job = await composerRef.sendMessage();
             assert.ok(job);
             assert.equal(voiceBtn.disabled, false);
+
+            // R2-12: Entering voice lock while dropzone overlay is visible hides overlay on dragover
+            if (!document.getElementById('chat-active-pane')) {
+                rootBody.appendChild(createEl('div', 'chat-active-pane'));
+            }
+            const activePane = document.getElementById('chat-active-pane');
+            const dzOverlay = createEl('div', 'chat-dropzone-overlay');
+            dzOverlay.className = 'hidden';
+            rootBody.appendChild(dzOverlay);
+            let voiceLocked = false;
+            const dzUploader = createMediaUploader({
+                state: chatState,
+                isVoiceDockActive: () => voiceLocked
+            });
+            dzUploader.init();
+            dzUploader.setLocked(false);
+            activePane.dispatchEvent({
+                type: 'dragenter',
+                dataTransfer: { types: ['Files'] },
+                preventDefault() {},
+                stopPropagation() {}
+            });
+            assert.equal(dzOverlay.classList.contains('hidden'), false);
+            voiceLocked = true;
+            activePane.dispatchEvent({
+                type: 'dragover',
+                dataTransfer: { types: ['Files'] },
+                preventDefault() {},
+                stopPropagation() {}
+            });
+            assert.equal(dzOverlay.classList.contains('hidden'), true);
+            dzUploader.destroy();
+
             uploader.destroy();
             composerRef.destroy();
             """;
@@ -1004,6 +1037,55 @@ public sealed class Phase10VoiceFrontendTests
             cardB.speedBtn.click(); // cycles 1x -> 1.5x
             assert.equal(detachedCard.speedBtn.textContent, '1.5x');
 
+            // 8. R2-3: Interrupted media error on paused/replayed card triggers bypassCache URL refresh and clears audio.error
+            const retryErrCalls = [];
+            const retryErrPlayer = createVoicePlayer({
+                resolveUrlFn: async (convId, msgId, mediaId, opts) => {
+                    retryErrCalls.push(Boolean(opts?.bypassCache));
+                    return opts?.bypassCache ? 'https://r2.invalid/refreshed.m4a' : 'https://r2.invalid/initial.m4a';
+                }
+            });
+            const errRetryCard = makeCard(309, 'm-err-retry', 10000);
+            retryErrPlayer.hydrateRoot(container);
+            errRetryCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(errRetryCard.audio.paused, false);
+            errRetryCard.audio.pause();
+            errRetryCard.audio.error = { code: 2 };
+            errRetryCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            assert.deepEqual(retryErrCalls, [false, true]);
+            assert.equal(errRetryCard.audio.error, null);
+            assert.equal(errRetryCard.audio.src, 'https://r2.invalid/refreshed.m4a');
+            assert.equal(errRetryCard.audio.paused, false);
+            retryErrPlayer.destroy();
+
+            // 9. R2-13: Repeated ArrowRight on waveform before readyState>=1 steps from pendingSeekSec instead of resetting to 0
+            const keySeekCard = makeCard(310, 'm-key-seek', 20000);
+            player.hydrateRoot(container);
+            keySeekCard.wf.dispatchEvent({ key: 'ArrowRight', type: 'keydown', preventDefault() {} });
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(keySeekCard.audio.readyState, 0);
+            assert.equal(keySeekCard.wf.getAttribute('aria-valuenow'), '5000');
+            keySeekCard.wf.dispatchEvent({ key: 'ArrowRight', type: 'keydown', preventDefault() {} });
+            assert.equal(keySeekCard.wf.getAttribute('aria-valuenow'), '10000');
+            keySeekCard.audio.readyState = 1;
+            keySeekCard.audio.duration = 20;
+            keySeekCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(keySeekCard.audio.currentTime, 10);
+
+            // 10. R2-14: Queued 'pause' event arriving after play() resumed (!audio.paused) leaves pause icon intact
+            const pauseRaceCard = makeCard(311, 'm-pause-race', 10000);
+            player.hydrateRoot(container);
+            pauseRaceCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            assert.equal(pauseRaceCard.audio.paused, false);
+            const pauseRaceIcon = pauseRaceCard.card.querySelector('[data-voice-play-icon]');
+            assert.equal(pauseRaceIcon.textContent, 'pause');
+            pauseRaceCard.audio.dispatchEvent({ type: 'pause' }); // stale task while still playing
+            assert.equal(pauseRaceIcon.textContent, 'pause');
+            assert.equal(player.getActiveCard(), pauseRaceCard.card);
+
             player.destroy();
             """;
 
@@ -1154,23 +1236,99 @@ public sealed class Phase10VoiceFrontendTests
             rec3.stopToPreview();
             assert.equal(rec3.getMode(), 'preview');
 
-            // Re-record rejected -> preview stays intact and sendable
+            // R2-15: Re-record rejected -> original preview stays intact and is immediately sendable via sendFromPreview()
             reRecordReject = true;
             assert.equal(await rec3.startRecording(), false);
             assert.equal(rec3.getMode(), 'preview');
-
-            // Re-record pending -> preview still intact while awaiting mic; then resolves into recording
-            reRecordReject = false;
-            const reRecPromise = rec3.startRecording();
-            assert.equal(rec3.getMode(), 'preview');
-            resolveSecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
-            assert.equal(await reRecPromise, true);
-            assert.equal(rec3.getMode(), 'recording');
-            nowMs = 2400;
-            rec3.sendNow();
+            rec3.sendFromPreview();
             assert.equal(sentVoices.length, 1);
-            assert.equal(sentVoices[0].durationMs, 1200);
+            assert.equal(rec3.getMode(), 'idle');
             rec3.destroy();
+
+            // R2-15 (isolated replacement instance), R2-4 (MediaRecorder.start throw preserves preview & avoids revoking active preview URL),
+            // and R2-10 (#voice-preview-play-icon + #voice-preview-play-btn aria-label/title sync across play/pause/ended/reset)
+            if (!document.getElementById('voice-preview-play-btn')) {
+                rootBody.appendChild(createEl('button', 'voice-preview-play-btn'));
+            }
+            const previewPlayBtn = document.getElementById('voice-preview-play-btn');
+            const previewPlayIcon = document.getElementById('voice-preview-play-icon');
+            const previewAudioEl = document.getElementById('voice-preview-audio');
+
+            let rec4Phase = 0;
+            let resolveRec4SecondMic = null;
+            let rec4FailStart = false;
+            const rec4Sent = [];
+            const revokedUrls = [];
+            let blobUrlSeq = 0;
+            class Rec4Recorder {
+                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; }
+                start() {
+                    if (rec4FailStart) throw new Error('start blocked');
+                    this.state = 'recording';
+                }
+                stop() {
+                    this.state = 'inactive';
+                    if (this.ondataavailable) this.ondataavailable({ data: { size: 640 } });
+                    if (this.onstop) this.onstop();
+                }
+            }
+            const rec4 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => Rec4Recorder,
+                getUserMediaFn: async () => {
+                    rec4Phase++;
+                    if (rec4Phase === 1) return { getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] };
+                    return new Promise(r => { resolveRec4SecondMic = r; });
+                },
+                createObjectUrlFn: () => `blob:rec4-${++blobUrlSeq}`,
+                revokeObjectUrlFn: (u) => revokedUrls.push(u),
+                nowFn: () => nowMs,
+                onStartSendVoice: (payload) => rec4Sent.push(payload)
+            });
+            rec4.init();
+            nowMs = 10000;
+            assert.equal(await rec4.startRecording(), true);
+            nowMs = 11200;
+            rec4.stopToPreview();
+            assert.equal(rec4.getMode(), 'preview');
+
+            // R2-10: preview play button toggles icon + accessible labels/title on play, pause, and ended
+            assert.equal(previewPlayIcon.textContent, 'play_arrow');
+            assert.match(previewPlayBtn.getAttribute('aria-label') || '', /play/i);
+            await previewAudioEl.play();
+            assert.equal(previewAudioEl.paused, false);
+            assert.equal(previewPlayIcon.textContent, 'pause');
+            assert.match(previewPlayBtn.getAttribute('aria-label') || '', /pause/i);
+            assert.match((previewPlayBtn.getAttribute('title') || previewPlayBtn.title || ''), /pause/i);
+            rec4.pausePreview();
+            assert.equal(previewPlayIcon.textContent, 'play_arrow');
+            assert.match(previewPlayBtn.getAttribute('aria-label') || '', /play/i);
+            await previewAudioEl.play();
+            previewAudioEl.dispatchEvent({ type: 'ended' });
+            assert.equal(previewPlayIcon.textContent, 'play_arrow');
+            assert.match(previewPlayBtn.getAttribute('aria-label') || '', /play/i);
+
+            // R2-4: failed MediaRecorder.start() on re-record keeps original preview blob & UI intact
+            rec4FailStart = true;
+            const rec4FailPromise = rec4.startRecording();
+            resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+            assert.equal(await rec4FailPromise, false);
+            assert.equal(rec4.getMode(), 'preview');
+            assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            rec4FailStart = false;
+
+            // R2-15: replacement recording stays in preview while mic resolves, then transitions to recording & sends new duration
+            const rec4PendingPromise = rec4.startRecording();
+            assert.equal(rec4.getMode(), 'preview');
+            resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
+            assert.equal(await rec4PendingPromise, true);
+            assert.equal(rec4.getMode(), 'recording');
+            nowMs = 12400;
+            rec4.sendNow();
+            assert.equal(rec4Sent.length, 1);
+            assert.equal(rec4Sent[0].durationMs, 1200);
+            assert.equal(previewPlayIcon.textContent, 'play_arrow');
+            rec4.destroy();
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
@@ -1462,6 +1620,68 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(stack[2].u, '/chat/conv-c');
             assert.equal(globalThis.window.location.pathname, '/chat/conv-b');
             popRouter.destroy();
+
+            // 5. R2-2 / R2-11: Double-Back (C->B->A) while confirmation pending coalesces into active prompt and rolls back to C (+2); destroy() aborts pending rollback
+            histIdx = 2; // start on C
+            goDeltas = [];
+            let resolveFirstConfirm = null;
+            let doubleConfirmCalls = 0;
+            let switchApiCalls = 0;
+            const doubleState = createChatState();
+            doubleState.activeConversationId = 'conv-c';
+            const doubleRouter = createChatRouter({
+                state: doubleState,
+                api: { getConversationBundle: async () => { switchApiCalls++; return { messages: [] }; } },
+                renderer: {},
+                hooks: {
+                    confirmBeforeSwitch: () => {
+                        doubleConfirmCalls++;
+                        return new Promise(r => { resolveFirstConfirm = r; });
+                    }
+                }
+            });
+            doubleRouter.init();
+            // Back #1: C (2) -> B (1)
+            histIdx = 1;
+            globalThis.window.location.pathname = stack[1].u;
+            const p1 = Promise.all(Array.from(popListeners, fn => fn({ state: stack[1].s })));
+            await Promise.resolve();
+            // User presses Back #2 immediately before answering first confirm: B (1) -> A (0)
+            histIdx = 0;
+            globalThis.window.location.pathname = stack[0].u;
+            const p2 = Promise.all(Array.from(popListeners, fn => fn({ state: stack[0].s })));
+            await Promise.resolve();
+            assert.equal(doubleConfirmCalls, 1);
+            assert.deepEqual(goDeltas, []);
+            resolveFirstConfirm(false);
+            await Promise.all([p1, p2]);
+            assert.deepEqual(goDeltas, [2]);
+            assert.equal(histIdx, 2);
+            assert.equal(switchApiCalls, 0);
+
+            // R2-2 destroy(): resolving confirmBeforeSwitch AFTER destroy() must NOT mutate history or switch conversation
+            goDeltas = [];
+            let resolveAfterDestroy = null;
+            doubleConfirmCalls = 0;
+            const destroyState = createChatState();
+            destroyState.activeConversationId = 'conv-c';
+            const destroyRouter = createChatRouter({
+                state: destroyState,
+                api: { getConversationBundle: async () => { switchApiCalls++; return {}; } },
+                renderer: {},
+                hooks: { confirmBeforeSwitch: () => new Promise(r => { resolveAfterDestroy = r; }) }
+            });
+            // Reset listeners clean via doubleRouter.destroy()
+            doubleRouter.destroy();
+            destroyRouter.init();
+            histIdx = 1;
+            const pDestroy = Promise.all(Array.from(popListeners, fn => fn({ state: stack[1].s })));
+            await Promise.resolve();
+            destroyRouter.destroy();
+            resolveAfterDestroy(false);
+            await pDestroy;
+            assert.deepEqual(goDeltas, []);
+            assert.equal(switchApiCalls, 0);
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);

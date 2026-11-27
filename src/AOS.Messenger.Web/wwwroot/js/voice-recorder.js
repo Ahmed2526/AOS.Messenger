@@ -311,6 +311,17 @@ export function createVoiceRecorder({
         }
     }
 
+    function setPreviewPlayUi(isPlaying) {
+        const icon = getEl('voice-preview-play-icon');
+        if (icon) icon.textContent = isPlaying ? 'pause' : 'play_arrow';
+        const btn = getEl('voice-preview-play-btn');
+        if (btn) {
+            const label = isPlaying ? 'Pause voice preview' : 'Play voice preview';
+            btn.setAttribute('aria-label', label);
+            btn.setAttribute('title', label);
+        }
+    }
+
     function clearPreviewAudioElement() {
         const audio = getEl('voice-preview-audio');
         if (audio) {
@@ -320,8 +331,7 @@ export function createVoiceRecorder({
                 if (typeof audio.load === 'function') audio.load();
             } catch {}
         }
-        const icon = getEl('voice-preview-play-icon');
-        if (icon) icon.textContent = 'play_arrow';
+        setPreviewPlayUi(false);
     }
 
     function showDockState(nextMode) {
@@ -522,8 +532,7 @@ export function createVoiceRecorder({
             }
         }
 
-        const playIcon = getEl('voice-preview-play-icon');
-        if (playIcon) playIcon.textContent = 'play_arrow';
+        setPreviewPlayUi(false);
         updatePreviewProgressUi(0);
     }
 
@@ -775,6 +784,75 @@ export function createVoiceRecorder({
         }
 
         isStarting = false;
+        const nextFormat = selectPreferredRecordingFormat(MediaRecorderCls);
+
+        const cleanupPendingReplacement = (recToDetach = null) => {
+            if (recToDetach) {
+                try {
+                    recToDetach.ondataavailable = null;
+                    recToDetach.onerror = null;
+                    recToDetach.onstop = null;
+                } catch {}
+            }
+            if (pendingAudioContext === createdAudioCtx) {
+                closePendingAudioContext();
+            } else if (createdAudioCtx && typeof createdAudioCtx.close === 'function') {
+                try { Promise.resolve(createdAudioCtx.close()).catch(() => {}); } catch {}
+            }
+            if (stream && typeof stream.getTracks === 'function') {
+                for (const t of stream.getTracks()) {
+                    try { t.stop(); } catch {}
+                }
+            }
+        };
+
+        let nextRecorder;
+        try {
+            const opts = nextFormat.mime ? { mimeType: nextFormat.mime } : undefined;
+            nextRecorder = opts ? new MediaRecorderCls(stream, opts) : new MediaRecorderCls(stream);
+        } catch (firstErr) {
+            try {
+                nextRecorder = new MediaRecorderCls(stream);
+            } catch (fallbackErr) {
+                cleanupPendingReplacement();
+                if (!startedFromPreview) {
+                    forceAbortAndWipe();
+                }
+                reportError(formatMicrophoneError(fallbackErr || firstErr));
+                return false;
+            }
+        }
+
+        nextRecorder.ondataavailable = (evt) => {
+            if (myToken !== opToken) return;
+            const data = evt?.data;
+            if (!data || data.size <= 0) return;
+            recordedChunks.push(data);
+            cumulativeBytes += data.size;
+            if (!stopAutoTriggered && cumulativeBytes >= autoStopBytes && (mode === 'recording' || mode === 'paused')) {
+                stopAutoTriggered = true;
+                stopRecorderAndHandle('preview');
+            }
+        };
+
+        nextRecorder.onerror = () => {
+            if (myToken !== opToken) return;
+            forceAbortAndWipe();
+            reportError('Recording stopped due to an audio capture error.');
+        };
+
+        try {
+            nextRecorder.start(1000);
+        } catch (err) {
+            cleanupPendingReplacement(nextRecorder);
+            if (!startedFromPreview) {
+                forceAbortAndWipe();
+            }
+            reportError(formatMicrophoneError(err));
+            return false;
+        }
+
+        // Replacement recording is now live: safe to discard any prior preview and commit new recording state.
         if (startedFromPreview) {
             clearPreviewAudioElement();
             revokePreviewObjectUrl();
@@ -790,6 +868,8 @@ export function createVoiceRecorder({
         if (pendingAudioContext === createdAudioCtx) {
             pendingAudioContext = null;
         }
+        mediaRecorder = nextRecorder;
+        selectedFormat = nextFormat;
         recordedChunks = [];
         cumulativeBytes = 0;
         collectedSamples = [];
@@ -798,20 +878,6 @@ export function createVoiceRecorder({
         sampleBucketMax = 0;
         accumulatedActiveMs = 0;
         stopAutoTriggered = false;
-        selectedFormat = selectPreferredRecordingFormat(MediaRecorderCls);
-
-        try {
-            const opts = selectedFormat.mime ? { mimeType: selectedFormat.mime } : undefined;
-            mediaRecorder = opts ? new MediaRecorderCls(stream, opts) : new MediaRecorderCls(stream);
-        } catch (firstErr) {
-            try {
-                mediaRecorder = new MediaRecorderCls(stream);
-            } catch (fallbackErr) {
-                forceAbortAndWipe();
-                reportError(formatMicrophoneError(fallbackErr || firstErr));
-                return false;
-            }
-        }
 
         const supportsPause = Boolean(
             mediaRecorder &&
@@ -854,36 +920,10 @@ export function createVoiceRecorder({
             }
         }
 
-        mediaRecorder.ondataavailable = (evt) => {
-            if (myToken !== opToken) return;
-            const data = evt?.data;
-            if (!data || data.size <= 0) return;
-            recordedChunks.push(data);
-            cumulativeBytes += data.size;
-            if (!stopAutoTriggered && cumulativeBytes >= autoStopBytes && (mode === 'recording' || mode === 'paused')) {
-                stopAutoTriggered = true;
-                stopRecorderAndHandle('preview');
-            }
-        };
-
-        mediaRecorder.onerror = () => {
-            if (myToken !== opToken) return;
-            forceAbortAndWipe();
-            reportError('Recording stopped due to an audio capture error.');
-        };
-
         renderLiveWaveformScaffold();
         updatePausedBadgeUi(false);
         showDockState('recording');
         activeSegmentStartMs = nowFn();
-
-        try {
-            mediaRecorder.start(1000);
-        } catch (err) {
-            forceAbortAndWipe();
-            reportError(formatMicrophoneError(err));
-            return false;
-        }
 
         sendIndicatorTrueIfNeeded(convId, true);
         updateRecordingHud();
@@ -1071,8 +1111,7 @@ export function createVoiceRecorder({
                 if (typeof onBeforeStart === 'function') onBeforeStart();
                 Promise.resolve(audio.play()).catch((err) => {
                     if (err && err.name !== 'AbortError') {
-                        const icon = getEl('voice-preview-play-icon');
-                        if (icon) icon.textContent = 'play_arrow';
+                        setPreviewPlayUi(false);
                         reportError(err.name === 'NotSupportedError'
                             ? 'Audio format not supported for preview in this browser.'
                             : 'Could not play voice preview.');
@@ -1125,12 +1164,10 @@ export function createVoiceRecorder({
 
     const onPreviewAudioPlay = () => {
         if (typeof onBeforeStart === 'function') onBeforeStart();
-        const icon = getEl('voice-preview-play-icon');
-        if (icon) icon.textContent = 'pause';
+        setPreviewPlayUi(true);
     };
     const onPreviewAudioPause = () => {
-        const icon = getEl('voice-preview-play-icon');
-        if (icon) icon.textContent = 'play_arrow';
+        setPreviewPlayUi(false);
     };
     const onPreviewAudioTimeUpdate = () => {
         const audio = getEl('voice-preview-audio');
@@ -1141,16 +1178,14 @@ export function createVoiceRecorder({
         if (audio) {
             try { audio.currentTime = 0; } catch {}
         }
-        const icon = getEl('voice-preview-play-icon');
-        if (icon) icon.textContent = 'play_arrow';
+        setPreviewPlayUi(false);
         updatePreviewProgressUi(0);
     };
     const onPreviewAudioError = () => {
         const audio = getEl('voice-preview-audio');
         const hasSrc = Boolean(audio && (audio.getAttribute('src') || audio.src));
         if (!hasSrc) return;
-        const icon = getEl('voice-preview-play-icon');
-        if (icon) icon.textContent = 'play_arrow';
+        setPreviewPlayUi(false);
         reportError('Preview audio playback failed in this browser.');
     };
 

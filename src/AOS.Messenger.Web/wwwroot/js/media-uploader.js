@@ -1219,6 +1219,7 @@ export function createMediaUploader({
             return;
         }
         if (isVoiceLocked()) {
+            hideDropzone();
             e.preventDefault();
             if (e.dataTransfer) {
                 e.dataTransfer.dropEffect = 'none';

@@ -838,7 +838,7 @@ export function resolveReceiptStatus(messageId, peerWatermarks = null) {
  * @param {object|null} peerWatermarks - Optional peer watermarks
  * @returns {HTMLElement} Message bubble row element
  */
-export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null, { eagerMedia = false } = {}) {
+export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null, { eagerMedia = false, deferHydration = false } = {}) {
     if (typeof document === 'undefined') {
         return null;
     }
@@ -1347,7 +1347,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         }
     }
 
-    if (hasAttachments) {
+    if (hasAttachments && !deferHydration) {
         hydrateMediaElements(row);
     }
     if (isSticker) {
@@ -1548,7 +1548,7 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
         return null;
     }
 
-    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks, { eagerMedia: true });
+    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks, { eagerMedia: true, deferHydration: true });
     if (!el) return null;
 
     const rows = typeof containerEl.querySelectorAll === 'function'
@@ -1573,6 +1573,11 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
         containerEl.insertBefore(el, insertBeforeNode);
     } else if (typeof containerEl.appendChild === 'function') {
         containerEl.appendChild(el);
+    }
+
+    const rawAttachments = message.attachments ?? message.Attachments;
+    if (!message.isDeletedForEveryone && Array.isArray(rawAttachments) && rawAttachments.length > 0) {
+        hydrateMediaElements(el);
     }
 
     const emptyPlaceholder = document.getElementById('no-messages-placeholder');
@@ -1630,6 +1635,9 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
                 emptyPlaceholder.classList.add('flex');
             }
         }
+        if (voicePlayerCoordinator && typeof voicePlayerCoordinator.hydrateRoot === 'function') {
+            voicePlayerCoordinator.hydrateRoot(containerEl);
+        }
         return;
     }
 
@@ -1645,7 +1653,7 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     for (let i = 0; i < deduped.length; i++) {
         const msg = deduped[i];
         const eagerMedia = (deduped.length - i) <= 6;
-        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { eagerMedia });
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { eagerMedia, deferHydration: true });
         if (el) {
             frag.appendChild(el);
         }
@@ -1654,6 +1662,8 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     if (frag !== containerEl && typeof containerEl.appendChild === 'function') {
         containerEl.appendChild(frag);
     }
+
+    hydrateMediaElements(containerEl);
 
     if (scrollToEnd) {
         scrollToBottom(false);
@@ -1752,7 +1762,7 @@ export function prependOlderMessages(containerEl, streamEl, messages, currentUse
     for (const msg of sorted) {
         const msgId = getMessageId(msg);
         if (!msgId || isMessageRendered(msgId)) continue;
-        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { deferHydration: true });
         if (el && frag) {
             frag.appendChild(el);
             addedNodes.push(el);
@@ -2028,6 +2038,9 @@ export function clearPane() {
     const containerEl = document.getElementById('messages-container');
     teardownRowVideos(containerEl);
     clearElementChildren(containerEl);
+    if (containerEl && voicePlayerCoordinator && typeof voicePlayerCoordinator.hydrateRoot === 'function') {
+        voicePlayerCoordinator.hydrateRoot(containerEl);
+    }
     if (containerEl) {
         containerEl.setAttribute('data-conversation-id', '');
         containerEl.setAttribute('data-peer-user-id', '');

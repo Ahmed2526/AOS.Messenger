@@ -2085,4 +2085,377 @@ public sealed class Phase10VoiceFrontendTests
             Assert.Contains($"id=\"{id}\"", dockHtml, StringComparison.Ordinal);
         }
     }
+
+    [Fact]
+    public async Task VoicePlayerSpeedSync_UpdatesAllCardsAcrossConversationSwitchesPaginationAndDirectMounts()
+    {
+        var playerUrl = JsUrl("voice-player.js");
+        var rendererUrl = JsUrl("message-renderer.js");
+
+        var script = $$"""
+            import assert from 'node:assert/strict';
+
+            function createClassList(el) {
+                const getSet = () => new Set((el.className || '').split(/\s+/).filter(Boolean));
+                const writeSet = (set) => { el.className = [...set].join(' '); };
+                return {
+                    add(...tokens) { const s = getSet(); tokens.forEach(t => s.add(t)); writeSet(s); },
+                    remove(...tokens) { const s = getSet(); tokens.forEach(t => s.delete(t)); writeSet(s); },
+                    toggle(token, force) {
+                        const s = getSet();
+                        const shouldAdd = force !== undefined ? !!force : !s.has(token);
+                        if (shouldAdd) s.add(token); else s.delete(token);
+                        writeSet(s);
+                        return shouldAdd;
+                    },
+                    contains(token) { return getSet().has(token); }
+                };
+            }
+
+            function matchesSingle(node, part) {
+                if (!node || node.nodeType !== 1) return false;
+                if (part.startsWith('#')) return node.id === part.slice(1);
+                const attrMatch = /^([a-z0-9_.-]+)?((?:\[[^\]]+\])+)$/i.exec(part);
+                if (attrMatch) {
+                    const base = attrMatch[1] || '';
+                    if (base) {
+                        if (base.startsWith('.')) {
+                            if (!node.classList.contains(base.slice(1))) return false;
+                        } else if (node.tagName.toLowerCase() !== base.toLowerCase()) {
+                            return false;
+                        }
+                    }
+                    const attrs = [...attrMatch[2].matchAll(/\[([^=\]]+)(?:="([^"]*)")?\]/g)];
+                    return attrs.every((m) => {
+                        const val = node.getAttribute(m[1]);
+                        return m[2] === undefined ? val !== null : val === m[2];
+                    });
+                }
+                if (part.startsWith('.')) return node.classList.contains(part.slice(1));
+                return node.tagName.toLowerCase() === part.toLowerCase();
+            }
+
+            function matchesSelector(el, selector) {
+                const parts = selector.trim().split(/\s+/);
+                return matchesSingle(el, parts[parts.length - 1]);
+            }
+
+            function walk(root, predicate, acc = []) {
+                for (const child of root.children || []) {
+                    if (predicate(child)) acc.push(child);
+                    walk(child, predicate, acc);
+                }
+                return acc;
+            }
+
+            let rootBody = null;
+
+            function createEl(tag, id = '') {
+                const attrs = new Map();
+                const listeners = new Map();
+                const el = {
+                    nodeType: 1,
+                    tagName: tag.toUpperCase(),
+                    id,
+                    className: '',
+                    children: [],
+                    parentNode: null,
+                    disabled: false,
+                    value: '',
+                    _src: '',
+                    get src() { return this._src; },
+                    set src(v) { this._src = String(v ?? ''); },
+                    currentTime: 0,
+                    duration: Infinity,
+                    paused: true,
+                    ended: false,
+                    playbackRate: 1,
+                    scrollHeight: 600,
+                    scrollTop: 0,
+                    clientHeight: 400,
+                    style: {},
+                    get isConnected() {
+                        let cur = this;
+                        while (cur) {
+                            if (cur === rootBody) return true;
+                            cur = cur.parentNode;
+                        }
+                        return false;
+                    },
+                    _textContent: '',
+                    get textContent() {
+                        if (this.children.length === 0) return this._textContent;
+                        return this._textContent + this.children.map(c => c.textContent).join('');
+                    },
+                    set textContent(v) {
+                        this.children = [];
+                        this._textContent = v === null || v === undefined ? '' : String(v);
+                    },
+                    get firstChild() { return this.children[0] || null; },
+                    appendChild(child) {
+                        if (!child) return child;
+                        if (child.nodeType === 11) {
+                            const moved = [...child.children];
+                            child.children = [];
+                            for (const node of moved) {
+                                node.parentNode = this;
+                                this.children.push(node);
+                            }
+                            return child;
+                        }
+                        if (child.parentNode && typeof child.parentNode.removeChild === 'function') {
+                            child.parentNode.removeChild(child);
+                        }
+                        child.parentNode = this;
+                        this.children.push(child);
+                        return child;
+                    },
+                    insertBefore(newNode, refNode) {
+                        if (!refNode) return this.appendChild(newNode);
+                        const idx = this.children.indexOf(refNode);
+                        if (idx < 0) return this.appendChild(newNode);
+                        if (newNode.nodeType === 11) {
+                            const moved = [...newNode.children];
+                            newNode.children = [];
+                            for (let i = 0; i < moved.length; i++) {
+                                moved[i].parentNode = this;
+                                this.children.splice(idx + i, 0, moved[i]);
+                            }
+                            return newNode;
+                        }
+                        if (newNode.parentNode && typeof newNode.parentNode.removeChild === 'function') {
+                            newNode.parentNode.removeChild(newNode);
+                        }
+                        newNode.parentNode = this;
+                        this.children.splice(idx, 0, newNode);
+                        return newNode;
+                    },
+                    removeChild(child) {
+                        const idx = this.children.indexOf(child);
+                        if (idx >= 0) { this.children.splice(idx, 1); child.parentNode = null; }
+                        return child;
+                    },
+                    setAttribute(k, v) { attrs.set(k, String(v)); if (k === 'id') this.id = String(v); if (k === 'src') this.src = String(v); },
+                    getAttribute(k) { return attrs.has(k) ? attrs.get(k) : null; },
+                    removeAttribute(k) { attrs.delete(k); if (k === 'src') this.src = ''; },
+                    hasAttribute(k) { return attrs.has(k); },
+                    addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(fn); },
+                    removeEventListener(type, fn) { listeners.get(type)?.delete(fn); },
+                    dispatchEvent(evt) {
+                        evt.target = evt.target || this;
+                        evt.preventDefault = evt.preventDefault || (() => {});
+                        evt.stopPropagation = evt.stopPropagation || (() => {});
+                        for (const fn of listeners.get(evt.type) || []) fn(evt);
+                    },
+                    click() { this.dispatchEvent({ type: 'click', target: this }); },
+                    pause() { this.paused = true; },
+                    async play() { this.paused = false; this.ended = false; },
+                    load() {},
+                    closest(sel) {
+                        let cur = this;
+                        while (cur) { if (matchesSelector(cur, sel)) return cur; cur = cur.parentNode; }
+                        return null;
+                    },
+                    querySelector(sel) { return walk(this, n => matchesSelector(n, sel))[0] || null; },
+                    querySelectorAll(sel) { return walk(this, n => matchesSelector(n, sel)); }
+                };
+                el.classList = createClassList(el);
+                if (id) el.setAttribute('id', id);
+                return el;
+            }
+
+            rootBody = createEl('body');
+            globalThis.document = {
+                body: rootBody,
+                createElement: (tag) => createEl(tag),
+                createTextNode: (text) => ({ nodeType: 3, textContent: String(text ?? ''), parentNode: null }),
+                createDocumentFragment() {
+                    return {
+                        nodeType: 11,
+                        children: [],
+                        parentNode: null,
+                        isConnected: false,
+                        get firstChild() { return this.children[0] || null; },
+                        appendChild(child) {
+                            if (!child) return child;
+                            if (child.parentNode && typeof child.parentNode.removeChild === 'function') {
+                                child.parentNode.removeChild(child);
+                            }
+                            child.parentNode = this;
+                            this.children.push(child);
+                            return child;
+                        },
+                        removeChild(child) {
+                            const idx = this.children.indexOf(child);
+                            if (idx >= 0) { this.children.splice(idx, 1); child.parentNode = null; }
+                            return child;
+                        }
+                    };
+                },
+                getElementById: (id) => walk(rootBody, n => n.id === id)[0] || null,
+                querySelector: (sel) => walk(rootBody, n => matchesSelector(n, sel))[0] || null,
+                querySelectorAll: (sel) => walk(rootBody, n => matchesSelector(n, sel))
+            };
+            globalThis.window = {
+                location: { href: 'https://localhost:7001/chat', pathname: '/chat', origin: 'https://localhost:7001', search: '' },
+                addEventListener() {},
+                removeEventListener() {}
+            };
+
+            const streamEl = createEl('div', 'message-stream');
+            const containerEl = createEl('div', 'messages-container');
+            streamEl.appendChild(containerEl);
+            rootBody.appendChild(streamEl);
+
+            const { createVoicePlayer } = await import('{{playerUrl}}');
+            const renderer = await import('{{rendererUrl}}');
+
+            const player = createVoicePlayer({
+                resolveUrlFn: async (_c, _m, mediaId) => `https://r2.invalid/${mediaId}.webm`
+            });
+            renderer.setVoicePlayerCoordinator(player);
+
+            const makeVoiceMsg = (id, convId, mediaId, secOffset, isOutgoing = true) => ({
+                id,
+                conversationId: convId,
+                senderId: isOutgoing ? 'user-1' : 'user-2',
+                senderName: isOutgoing ? 'Me' : 'Peer',
+                content: '',
+                createdAtUtc: new Date(Date.UTC(2026, 10, 27, 12, 0, secOffset)).toISOString(),
+                attachments: [{
+                    id: mediaId,
+                    kind: 'voice',
+                    fileName: 'voice-message.webm',
+                    sizeBytes: 4096,
+                    durationMs: 7000,
+                    waveformPeaks: [20, 45, 70, 55]
+                }]
+            });
+
+            const makeImageMsg = (id, convId, mediaId, secOffset) => ({
+                id,
+                conversationId: convId,
+                senderId: 'user-2',
+                senderName: 'Peer',
+                content: '',
+                createdAtUtc: new Date(Date.UTC(2026, 10, 27, 12, 0, secOffset)).toISOString(),
+                attachments: [{
+                    id: mediaId,
+                    kind: 'image',
+                    fileName: 'photo.jpg',
+                    sizeBytes: 2048,
+                    width: 400,
+                    height: 300
+                }]
+            });
+
+            const getSpeedLabels = () =>
+                containerEl.querySelectorAll('[data-voice-speed-btn="true"]').map(b => b.textContent);
+            const getAudioRates = () =>
+                containerEl.querySelectorAll('audio[data-media-audio="true"]').map(a => a.playbackRate);
+
+            // 1. Switch to Conversation A containing 2 voice messages followed by an image attachment
+            // (previously the DocumentFragment hydration pruned ALL earlier voice cards!)
+            renderer.renderMessages(
+                containerEl,
+                [
+                    makeVoiceMsg(1, 'conv-a', 'm-a1', 1, true),
+                    makeVoiceMsg(2, 'conv-a', 'm-a2', 2, false),
+                    makeImageMsg(3, 'conv-a', 'm-a3', 3)
+                ],
+                'user-1',
+                { id: 'conv-a' },
+                { scrollToEnd: false }
+            );
+
+            assert.deepEqual(getSpeedLabels(), ['1x', '1x']);
+            const convABtns = containerEl.querySelectorAll('[data-voice-speed-btn="true"]');
+            convABtns[0].click();
+            assert.equal(player.getCurrentSpeed(), 1.5);
+            assert.deepEqual(getSpeedLabels(), ['1.5x', '1.5x']);
+            assert.deepEqual(getAudioRates(), [1.5, 1.5]);
+
+            convABtns[1].click();
+            assert.equal(player.getCurrentSpeed(), 2);
+            assert.deepEqual(getSpeedLabels(), ['2x', '2x']);
+            assert.deepEqual(getAudioRates(), [2, 2]);
+
+            // 2. Switch to Conversation B (3 voice messages + trailing image) while speed is 2x
+            renderer.clearPane();
+            renderer.renderMessages(
+                containerEl,
+                [
+                    makeVoiceMsg(11, 'conv-b', 'm-b1', 10, true),
+                    makeVoiceMsg(12, 'conv-b', 'm-b2', 11, false),
+                    makeVoiceMsg(13, 'conv-b', 'm-b3', 12, true),
+                    makeImageMsg(14, 'conv-b', 'm-b4', 13)
+                ],
+                'user-1',
+                { id: 'conv-b' },
+                { scrollToEnd: false }
+            );
+            assert.deepEqual(getSpeedLabels(), ['2x', '2x', '2x']);
+            assert.deepEqual(getAudioRates(), [2, 2, 2]);
+
+            const convBBtns = containerEl.querySelectorAll('[data-voice-speed-btn="true"]');
+            convBBtns[0].click(); // 2x -> 1x
+            assert.deepEqual(getSpeedLabels(), ['1x', '1x', '1x']);
+            convBBtns[0].click(); // 1x -> 1.5x
+            assert.deepEqual(getSpeedLabels(), ['1.5x', '1.5x', '1.5x']);
+
+            // 3. Prepend older voice messages via pagination while speed is 1.5x
+            renderer.prependOlderMessages(
+                containerEl,
+                streamEl,
+                [
+                    makeVoiceMsg(9, 'conv-b', 'm-b0a', 8, false),
+                    makeVoiceMsg(10, 'conv-b', 'm-b0b', 9, true)
+                ],
+                'user-1',
+                { id: 'conv-b' }
+            );
+            assert.deepEqual(getSpeedLabels(), ['1.5x', '1.5x', '1.5x', '1.5x', '1.5x']);
+            containerEl.querySelectorAll('[data-voice-speed-btn="true"]')[0].click(); // 1.5x -> 2x
+            assert.deepEqual(getSpeedLabels(), ['2x', '2x', '2x', '2x', '2x']);
+
+            // 4. Insert live voice message via insertMessageOrdered while speed is 2x
+            renderer.insertMessageOrdered(
+                containerEl,
+                makeVoiceMsg(15, 'conv-b', 'm-b5', 15, false),
+                'user-1',
+                { id: 'conv-b' }
+            );
+            assert.deepEqual(getSpeedLabels(), ['2x', '2x', '2x', '2x', '2x', '2x']);
+            containerEl.querySelectorAll('[data-voice-speed-btn="true"]')[5].click(); // 2x -> 1x
+            assert.deepEqual(getSpeedLabels(), ['1x', '1x', '1x', '1x', '1x', '1x']);
+
+            // 5. Detached-bound card whose speed changed while detached re-syncs immediately when re-hydrated directly
+            const detachedRow = renderer.createMessageBubbleElement(makeVoiceMsg(20, 'conv-b', 'm-b20', 20, true), 'user-1');
+            const detachedCard = detachedRow.querySelector('[data-voice-player="true"]');
+            assert.equal(detachedCard.isConnected, false);
+            assert.equal(detachedCard.querySelector('[data-voice-speed-btn="true"]').textContent, '1x');
+            // Change speed while detachedRow is not in DOM
+            containerEl.querySelectorAll('[data-voice-speed-btn="true"]')[0].click(); // 1x -> 1.5x
+            containerEl.appendChild(detachedRow);
+            player.hydrateRoot(detachedCard); // direct card hydration must sync already-bound card to 1.5x
+            assert.equal(detachedCard.querySelector('[data-voice-speed-btn="true"]').textContent, '1.5x');
+            assert.equal(detachedCard.querySelector('audio[data-media-audio="true"]').playbackRate, 1.5);
+
+            // 6. Direct createMessageBubbleElement callers mounting two voice rows without second hydrateRoot stay synced
+            const directRow1 = renderer.createMessageBubbleElement(makeVoiceMsg(21, 'conv-b', 'm-b21', 21, true), 'user-1');
+            const directRow2 = renderer.createMessageBubbleElement(makeVoiceMsg(22, 'conv-b', 'm-b22', 22, false), 'user-1');
+            containerEl.appendChild(directRow1);
+            containerEl.appendChild(directRow2);
+            directRow1.querySelector('[data-voice-speed-btn="true"]').click(); // 1.5x -> 2x
+            assert.equal(directRow1.querySelector('[data-voice-speed-btn="true"]').textContent, '2x');
+            assert.equal(directRow2.querySelector('[data-voice-speed-btn="true"]').textContent, '2x');
+            assert.ok(getSpeedLabels().every(l => l === '2x'));
+
+            renderer.setVoicePlayerCoordinator(null);
+            player.destroy();
+            """;
+
+        var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);
+        Assert.True(exitCode == 0, $"Node failed ({exitCode}): {stderr}\n{stdout}");
+    }
 }

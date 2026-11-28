@@ -389,9 +389,38 @@ export function createVoicePlayer({
         state.errorEl.classList.add('hidden');
     }
 
-    function syncAllSpeedButtons() {
-        const speed = getCurrentSpeed();
+    function syncCardSpeed(state, speed = getCurrentSpeed()) {
+        if (!state) return;
         const label = `${speed}x`;
+        if (state.speedBtn) {
+            state.speedBtn.textContent = label;
+            state.speedBtn.setAttribute('aria-label', `Playback speed ${label}`);
+        }
+        if (state.audio) {
+            state.audio.playbackRate = speed;
+        }
+    }
+
+    function syncAllSpeedButtons(triggerCard = null) {
+        const speed = getCurrentSpeed();
+        if (triggerCard && stateByCard.has(triggerCard)) {
+            if (triggerCard.isConnected !== false) {
+                allBoundCards.add(triggerCard);
+            } else {
+                syncCardSpeed(stateByCard.get(triggerCard), speed);
+            }
+        }
+        if (typeof document !== 'undefined' && typeof document.getElementById === 'function') {
+            const container = document.getElementById('messages-container');
+            if (container && typeof container.querySelectorAll === 'function') {
+                const liveCards = container.querySelectorAll('[data-voice-player="true"]');
+                for (const card of liveCards) {
+                    if (card && card.isConnected !== false && stateByCard.has(card)) {
+                        allBoundCards.add(card);
+                    }
+                }
+            }
+        }
         for (const card of [...allBoundCards]) {
             if (card.isConnected === false) {
                 allBoundCards.delete(card);
@@ -399,13 +428,7 @@ export function createVoicePlayer({
             }
             const st = getCardState(card);
             if (!st) continue;
-            if (st.speedBtn) {
-                st.speedBtn.textContent = label;
-                st.speedBtn.setAttribute('aria-label', `Playback speed ${label}`);
-            }
-            if (st.audio) {
-                st.audio.playbackRate = speed;
-            }
+            syncCardSpeed(st, speed);
         }
     }
 
@@ -645,16 +668,13 @@ export function createVoicePlayer({
         allBoundCards.add(card);
 
         if (speedBtn) {
-            const curSpeed = `${getCurrentSpeed()}x`;
-            speedBtn.textContent = curSpeed;
-            speedBtn.setAttribute('aria-label', `Playback speed ${curSpeed}`);
-
             speedBtn.addEventListener('click', (e) => {
                 if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
                 speedIndex = (speedIndex + 1) % VOICE_SPEEDS.length;
-                syncAllSpeedButtons();
+                syncAllSpeedButtons(card);
             });
         }
+        syncCardSpeed(state);
 
         if (playBtn) {
             playBtn.addEventListener('click', (e) => {
@@ -933,11 +953,23 @@ export function createVoicePlayer({
 
     function hydrateRoot(rootEl) {
         if (!rootEl || typeof rootEl.querySelectorAll !== 'function') return;
-        pruneDisconnectedCards();
+        if (rootEl.isConnected !== false) {
+            pruneDisconnectedCards();
+        }
 
-        const cards = rootEl.querySelectorAll('[data-voice-player="true"]');
+        const cards = [];
+        if (typeof rootEl.getAttribute === 'function' && rootEl.getAttribute('data-voice-player') === 'true') {
+            cards.push(rootEl);
+        }
+        for (const card of rootEl.querySelectorAll('[data-voice-player="true"]')) {
+            cards.push(card);
+        }
         for (const card of cards) {
             bindVoiceCard(card);
+            const st = getCardState(card);
+            if (st) {
+                syncCardSpeed(st);
+            }
             if (card && card.isConnected !== false) {
                 allBoundCards.add(card);
             }

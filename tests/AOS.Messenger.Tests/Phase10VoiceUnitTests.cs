@@ -260,8 +260,7 @@ public sealed class Phase10VoiceUnitTests
         var trailingVideoMoovMp4 = BuildTrailingVideoMoovAfterAudioMp4("M4A ");
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trailing-vide.m4a", "audio/mp4", trailingVideoMoovMp4, 1500));
 
-        // R2-5 / R3-3: stsz fixed sample_size > 0 passes when media payload backs declared sample bytes,
-        // rejects declared sampleCount*sampleSize exceeding object/mdat length, and checks variable stsz & packed stz2
+        // R2-5 / R3-3 / R4-2 / R4-3: fixed stsz, variable stsz, and compact stz2 validate declared sample bytes against payload
         var fixedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildFixedStszBox(sampleSize: 64, sampleCount: 4), mdatPayloadBytes: 256);
         Assert.Equal("audio/mp4", (await VerifyVoiceAsync("fixed-stsz.m4a", "audio/mp4", fixedStszMp4, 1500)).VerifiedContentType);
 
@@ -271,11 +270,33 @@ public sealed class Phase10VoiceUnitTests
         var paddedInsufficientMdatStszMp4 = BuildPaddedFixedStszMp4Bytes("M4A ", sampleSize: 64, sampleCount: 8, freePadBytes: 4096, mdatPayloadBytes: 4);
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("padded-short-mdat.m4a", "audio/mp4", paddedInsufficientMdatStszMp4, 1500));
 
+        // R4-2: Unfinished scan hitting box limit after small mdat cannot bypass fixed-size payload check
+        var unfinishedShortMdatStszMp4 = BuildPaddedFixedStszMp4Bytes("M4A ", sampleSize: 64, sampleCount: 8, freePadBytes: 1024, mdatPayloadBytes: 4, trailingFreeBoxCount: 130);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("unfinished-short-mdat.m4a", "audio/mp4", unfinishedShortMdatStszMp4, 1500));
+
+        // R4-2/R4-3 hybrid defense: mvex+moof cannot excuse an stsz declaring more bytes than mdat
+        var hybridMvexOversizedStsz = BuildHybridMvexOversizedStszMp4Bytes("isom");
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("hybrid-oversized-stsz.m4a", "audio/mp4", hybridMvexOversizedStsz, 1500));
+
         var truncatedStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildTruncatedStszBox(sampleCount: 4));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trunc-stsz.m4a", "audio/mp4", truncatedStszMp4, 1500));
 
-        var validStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 8, sampleCount: 3, packedBytes: 3));
+        // R4-3: variable stsz exceeding mdat or declaring all-zero entries is rejected
+        var oversizedVarStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStszBox(sampleCount: 4, entrySize: 256), mdatPayloadBytes: 4);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("oversized-var-stsz.m4a", "audio/mp4", oversizedVarStszMp4, 1500));
+
+        var zeroVarStszMp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStszBox(sampleCount: 3, entrySize: 0), mdatPayloadBytes: 64);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("zero-var-stsz.m4a", "audio/mp4", zeroVarStszMp4, 1500));
+
+        var validStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 8, sampleCount: 3, packedBytes: 3), mdatPayloadBytes: 96);
         Assert.Equal("audio/mp4", (await VerifyVoiceAsync("valid-stz2.m4a", "audio/mp4", validStz2Mp4, 1500)).VerifiedContentType);
+
+        // R4-3: 4-bit odd-sampleCount stz2 ignores trailing padding nibble ([0x44, 0x40] -> 4+4+4 = 12 bytes)
+        var validOdd4BitStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 4, sampleCount: 3, packedBytes: 2, rawEntries: [0x44, 0x4F]), mdatPayloadBytes: 12);
+        Assert.Equal("audio/mp4", (await VerifyVoiceAsync("valid-4bit-stz2.m4a", "audio/mp4", validOdd4BitStz2Mp4, 1500)).VerifiedContentType);
+
+        var oversizedStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 8, sampleCount: 3, packedBytes: 3), mdatPayloadBytes: 4);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("oversized-stz2.m4a", "audio/mp4", oversizedStz2Mp4, 1500));
 
         var truncatedStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 8, sampleCount: 3, packedBytes: 2));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("trunc-stz2.m4a", "audio/mp4", truncatedStz2Mp4, 1500));
@@ -283,8 +304,8 @@ public sealed class Phase10VoiceUnitTests
         var invalidFieldStz2Mp4 = BuildIsoBmffWithCustomSampleTable("M4A ", BuildStz2Box(fieldSize: 7, sampleCount: 1, packedBytes: 1));
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("badfield-stz2.m4a", "audio/mp4", invalidFieldStz2Mp4, 1500));
 
-        // R2-6 / R3-4: WebM multi-cluster & unknown-sized Cluster followed by SeekHead trailing Tracks (with or without intermediate Cues) pass,
-        // while spoofed Tracks inside SimpleBlock #2 after a valid SimpleBlock #1 in an unknown-sized Cluster fails
+        // R2-6 / R3-4 / R4-4 / R4-5 / R4-9: WebM multi-cluster, unknown-sized sibling Clusters, Void inside Cluster + after Cues,
+        // and rejection of spoofed Tracks inside SimpleBlock #2 or smuggled video Tracks before indexed Tracks
         var multiClusterWebm = BuildWebmMultiClusterBytes();
         Assert.Equal("audio/webm", (await VerifyVoiceAsync("multicluster.webm", "audio/webm", multiClusterWebm, 2000)).VerifiedContentType);
 
@@ -293,6 +314,22 @@ public sealed class Phase10VoiceUnitTests
 
         var unknownClusterCuesSeekWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(includeCuesBetweenClusterAndTracks: true);
         Assert.Equal("audio/webm", (await VerifyVoiceAsync("unknown-cluster-cues-seek.webm", "audio/webm", unknownClusterCuesSeekWebm, 2000)).VerifiedContentType);
+
+        var siblingUnknownClustersWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(
+            includeCuesBetweenClusterAndTracks: false,
+            prependTimestampOnlyUnknownCluster: true);
+        Assert.Equal("audio/webm", (await VerifyVoiceAsync("sibling-unknown-clusters.webm", "audio/webm", siblingUnknownClustersWebm, 2000)).VerifiedContentType);
+
+        var cuesPlusVoidWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(
+            includeCuesBetweenClusterAndTracks: true,
+            includeVoidInsideCluster: true,
+            includeVoidAfterCues: true);
+        Assert.Equal("audio/webm", (await VerifyVoiceAsync("cues-void-tracks.webm", "audio/webm", cuesPlusVoidWebm, 2000)).VerifiedContentType);
+
+        var smuggledVideoBeforeIndexedTracksWebm = BuildWebmSeekHeadUnknownClusterTrailingTracks(
+            includeCuesBetweenClusterAndTracks: true,
+            injectSmuggledVideoTracksBeforeAudioTracks: true);
+        await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("smuggled-video-before-tracks.webm", "audio/webm", smuggledVideoBeforeIndexedTracksWebm, 2000));
 
         var spoofedUnknownClusterWebm = BuildMalformedSeekHeadInsideUnknownClusterSimpleBlock2Webm();
         await Assert.ThrowsAsync<DomainException>(() => VerifyVoiceAsync("spoof-unknown-cluster.webm", "audio/webm", spoofedUnknownClusterWebm, 2000));
@@ -656,13 +693,13 @@ public sealed class Phase10VoiceUnitTests
         return WrapIsoBox("hdlr", inner);
     }
 
-    private static byte[] BuildStszBox(uint sampleCount)
+    private static byte[] BuildStszBox(uint sampleCount, uint entrySize = 4)
     {
         var inner = new byte[12 + checked((int)sampleCount) * 4];
         BinaryPrimitives.WriteUInt32BigEndian(inner.AsSpan(8, 4), sampleCount);
         for (var i = 0; i < (int)sampleCount; i++)
         {
-            BinaryPrimitives.WriteUInt32BigEndian(inner.AsSpan(12 + i * 4, 4), 256);
+            BinaryPrimitives.WriteUInt32BigEndian(inner.AsSpan(12 + i * 4, 4), entrySize);
         }
         return WrapIsoBox("stsz", inner);
     }
@@ -682,14 +719,21 @@ public sealed class Phase10VoiceUnitTests
         return WrapIsoBox("stsz", inner);
     }
 
-    private static byte[] BuildStz2Box(byte fieldSize, uint sampleCount, int packedBytes)
+    private static byte[] BuildStz2Box(byte fieldSize, uint sampleCount, int packedBytes, byte[]? rawEntries = null)
     {
         var inner = new byte[12 + packedBytes];
         inner[7] = fieldSize;
         BinaryPrimitives.WriteUInt32BigEndian(inner.AsSpan(8, 4), sampleCount);
-        for (var i = 0; i < packedBytes; i++)
+        if (rawEntries is not null)
         {
-            inner[12 + i] = 0x20;
+            rawEntries.AsSpan(0, Math.Min(packedBytes, rawEntries.Length)).CopyTo(inner.AsSpan(12));
+        }
+        else
+        {
+            for (var i = 0; i < packedBytes; i++)
+            {
+                inner[12 + i] = 0x20;
+            }
         }
         return WrapIsoBox("stz2", inner);
     }
@@ -716,29 +760,93 @@ public sealed class Phase10VoiceUnitTests
         return ConcatBytes(valid, trailingVideoMoov);
     }
 
-    private static byte[] BuildPaddedFixedStszMp4Bytes(string majorBrand, uint sampleSize, uint sampleCount, int freePadBytes, int mdatPayloadBytes)
+    private static byte[] BuildPaddedFixedStszMp4Bytes(string majorBrand, uint sampleSize, uint sampleCount, int freePadBytes, int mdatPayloadBytes, int trailingFreeBoxCount = 0)
     {
         var hdlr = BuildHdlrBox("soun");
         var stbl = WrapIsoBox("stbl", BuildFixedStszBox(sampleSize, sampleCount));
         var moov = WrapIsoBox("moov", WrapIsoBox("trak", WrapIsoBox("mdia", ConcatBytes(hdlr, WrapIsoBox("minf", stbl)))));
-        var pad = WrapIsoBox("free", new byte[freePadBytes]);
-        var mdat = WrapIsoBox("mdat", new byte[mdatPayloadBytes]);
-        return ConcatBytes(BuildIsoBmffFtypOnly(majorBrand), moov, pad, mdat);
+        var parts = new List<byte[]>
+        {
+            BuildIsoBmffFtypOnly(majorBrand),
+            moov,
+            WrapIsoBox("free", new byte[freePadBytes]),
+            WrapIsoBox("mdat", new byte[mdatPayloadBytes])
+        };
+        var tinyFree = WrapIsoBox("free", []);
+        for (var i = 0; i < trailingFreeBoxCount; i++)
+        {
+            parts.Add(tinyFree);
+        }
+        return ConcatBytes([.. parts]);
     }
 
-    private static byte[] BuildWebmSeekHeadUnknownClusterTrailingTracks(bool includeCuesBetweenClusterAndTracks)
+    private static byte[] BuildHybridMvexOversizedStszMp4Bytes(string majorBrand)
     {
-        var cluster = BuildWebmClusterWithSimpleBlock(trackNumber: 1, unknownSize: true);
-        byte[] cues = includeCuesBetweenClusterAndTracks ? [0x1C, 0x53, 0xBB, 0x6B, 0x82, 0x00, 0x00] : [];
-        var tracks = BuildWebmTracksElement(trackNumber: 1, trackType: 2);
+        var trak = WrapIsoBox("trak", ConcatBytes(
+            BuildTkhdBox(1),
+            WrapIsoBox("mdia", ConcatBytes(
+                BuildHdlrBox("soun"),
+                WrapIsoBox("minf", WrapIsoBox("stbl", BuildFixedStszBox(sampleSize: 64, sampleCount: 16)))))));
+        var mvex = WrapIsoBox("mvex", WrapIsoBox("trex", new byte[24]));
+        var moov = WrapIsoBox("moov", ConcatBytes(trak, mvex));
+        var tfhdInner = new byte[8];
+        BinaryPrimitives.WriteUInt32BigEndian(tfhdInner.AsSpan(4, 4), 1u);
+        var trunInner = new byte[8];
+        BinaryPrimitives.WriteUInt32BigEndian(trunInner.AsSpan(4, 4), 1u);
+        var moof = WrapIsoBox("moof", WrapIsoBox("traf", ConcatBytes(WrapIsoBox("tfhd", tfhdInner), WrapIsoBox("trun", trunInner))));
+        // Large free box ensures 1024 <= TotalLength, while mdat is only 4 bytes (< 1024 declared in stsz)
+        return ConcatBytes(BuildIsoBmffFtypOnly(majorBrand), moov, WrapIsoBox("free", new byte[2048]), moof, WrapIsoBox("mdat", [0x01, 0x02, 0x03, 0x04]));
+    }
 
+    private static byte[] BuildWebmCuesForCluster(uint trackNumber, uint clusterOffsetInSegment)
+    {
+        var posBytes = new byte[4];
+        BinaryPrimitives.WriteUInt32BigEndian(posBytes, clusterOffsetInSegment);
+        byte[] cueTrack = [0xF7, 0x81, (byte)trackNumber];
+        byte[] cueClusterPos = [0xF1, 0x84, .. posBytes];
+        byte[] trackPositionsBody = [.. cueTrack, .. cueClusterPos];
+        byte[] trackPositions = [0xB7, (byte)(0x80 | trackPositionsBody.Length), .. trackPositionsBody];
+        byte[] cueTime = [0xB3, 0x81, 0x00];
+        byte[] cuePointBody = [.. cueTime, .. trackPositions];
+        byte[] cuePoint = [0xBB, (byte)(0x80 | cuePointBody.Length), .. cuePointBody];
+        return [0x1C, 0x53, 0xBB, 0x6B, (byte)(0x80 | cuePoint.Length), .. cuePoint];
+    }
+
+    private static byte[] BuildWebmSeekHeadUnknownClusterTrailingTracks(
+        bool includeCuesBetweenClusterAndTracks,
+        bool includeVoidInsideCluster = false,
+        bool includeVoidAfterCues = false,
+        bool prependTimestampOnlyUnknownCluster = false,
+        bool injectSmuggledVideoTracksBeforeAudioTracks = false)
+    {
         byte[] seekIdEl = [0x53, 0xAB, 0x84, 0x16, 0x54, 0xAE, 0x6B];
         byte[] seekPosElHeader = [0x53, 0xAC, 0x84];
         var seekBodyLen = seekIdEl.Length + seekPosElHeader.Length + 4;
         var seekElLen = 2 + 1 + seekBodyLen;
         var seekHeadTotalLen = 4 + 1 + seekElLen;
 
-        var tracksOffsetInSegment = (uint)(seekHeadTotalLen + cluster.Length + cues.Length);
+        byte[] leadingUnknownCluster = prependTimestampOnlyUnknownCluster
+            ? [0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xE7, 0x81, 0x00]
+            : [];
+        byte[] cluster = BuildWebmClusterWithSimpleBlock(trackNumber: 1, unknownSize: true);
+        if (includeVoidInsideCluster)
+        {
+            // Global Void inside Cluster (0xEC, 2 bytes) followed by another valid SimpleBlock
+            byte[] innerVoid = [0xEC, 0x82, 0x00, 0x00];
+            cluster = ConcatBytes(cluster, innerVoid);
+        }
+
+        var audioClusterOffsetInSegment = (uint)(seekHeadTotalLen + leadingUnknownCluster.Length);
+        byte[] cues = includeCuesBetweenClusterAndTracks
+            ? BuildWebmCuesForCluster(trackNumber: 1, audioClusterOffsetInSegment)
+            : [];
+        byte[] voidAfterCues = includeVoidAfterCues ? [0xEC, 0x84, 0x00, 0x00, 0x00, 0x00] : [];
+        byte[] smuggledVideoTracks = injectSmuggledVideoTracksBeforeAudioTracks
+            ? BuildWebmTracksElement(trackNumber: 2, trackType: 1)
+            : [];
+        var tracks = BuildWebmTracksElement(trackNumber: 1, trackType: 2);
+
+        var tracksOffsetInSegment = (uint)(seekHeadTotalLen + leadingUnknownCluster.Length + cluster.Length + cues.Length + voidAfterCues.Length + smuggledVideoTracks.Length);
         var posBytes = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(posBytes, tracksOffsetInSegment);
 
@@ -750,8 +858,11 @@ public sealed class Phase10VoiceUnitTests
         ms.Write(BuildWebmEbmlHeaderOnly("webm"));
         ms.Write([0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
         ms.Write(seekHead);
+        ms.Write(leadingUnknownCluster);
         ms.Write(cluster);
         ms.Write(cues);
+        ms.Write(voidAfterCues);
+        ms.Write(smuggledVideoTracks);
         ms.Write(tracks);
         return ms.ToArray();
     }
@@ -964,14 +1075,16 @@ public sealed class Phase10VoiceUnitTests
 
     private static byte[] BuildWebmClusterWithSimpleBlock(int trackNumber, bool unknownSize = false)
     {
-        // SimpleBlock (0xA3): track VINT + 2B timecode + 1B flags + 2B payload
+        // RFC 9559 Cluster: mandatory Timestamp (0xE7 = 0) + SimpleBlock (0xA3: track VINT + 2B timecode + 1B flags + 2B payload)
+        byte[] timestampEl = [0xE7, 0x81, 0x00];
         byte[] blockPayload = [(byte)(0x80 | trackNumber), 0x00, 0x00, 0x80, 0xAA, 0xBB];
         byte[] simpleBlock = [0xA3, (byte)(0x80 | blockPayload.Length), .. blockPayload];
+        byte[] clusterBody = [.. timestampEl, .. simpleBlock];
         if (unknownSize)
         {
-            return [0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, .. simpleBlock];
+            return [0x1F, 0x43, 0xB6, 0x75, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, .. clusterBody];
         }
-        return [0x1F, 0x43, 0xB6, 0x75, (byte)(0x80 | simpleBlock.Length), .. simpleBlock];
+        return [0x1F, 0x43, 0xB6, 0x75, (byte)(0x80 | clusterBody.Length), .. clusterBody];
     }
 
     private static byte[] BuildPaddedUnknownSegmentWebm(string docType, int voidPaddingBytes, int trackType, bool appendUnknownCluster)

@@ -436,6 +436,7 @@ export function createVoicePlayer({
                 try { prevState.audio.pause(); } catch {}
             }
             if (prevState) {
+                prevState.loadingUrlAttemptId = 0;
                 setPlayingUi(activeCard, prevState, false);
             }
             activeCard = null;
@@ -526,7 +527,15 @@ export function createVoicePlayer({
                     state.pendingSeekSec = resumeSec;
                 }
             }
-            const ok = await loadAudioSource(card, state, hasMediaError, () => isCurrentAttempt(card, state, attemptId));
+            state.loadingUrlAttemptId = attemptId;
+            let ok = false;
+            try {
+                ok = await loadAudioSource(card, state, hasMediaError, () => isCurrentAttempt(card, state, attemptId));
+            } finally {
+                if (state.loadingUrlAttemptId === attemptId) {
+                    state.loadingUrlAttemptId = 0;
+                }
+            }
             if (!isCurrentAttempt(card, state, attemptId)) {
                 if (card.isConnected === false && activeCard === card && attemptId === playSequence) {
                     activeCard = null;
@@ -627,6 +636,7 @@ export function createVoicePlayer({
             retried: false,
             activeAttemptId: 0,
             refreshingAttemptId: 0,
+            loadingUrlAttemptId: 0,
             pendingSeekSec: null,
             playedSent: Boolean(card.getAttribute('data-played-at'))
         };
@@ -655,6 +665,7 @@ export function createVoicePlayer({
                         playSequence++;
                         activeCard = null;
                     }
+                    state.loadingUrlAttemptId = 0;
                     audio.pause();
                     setPlayingUi(card, state, false);
                 } else {
@@ -674,7 +685,10 @@ export function createVoicePlayer({
                     return;
                 }
                 if (audio) {
-                    const hasMetadata = typeof audio.readyState !== 'number' || audio.readyState >= 1;
+                    const isLoadingReplacement =
+                        state.loadingUrlAttemptId !== 0 &&
+                        state.loadingUrlAttemptId === state.activeAttemptId;
+                    const hasMetadata = !isLoadingReplacement && (typeof audio.readyState !== 'number' || audio.readyState >= 1);
                     if (!hasMetadata) {
                         state.pendingSeekSec = targetSec;
                     } else {
@@ -848,9 +862,19 @@ export function createVoicePlayer({
                 const capturedSeq = playSequence;
                 state.retried = true;
                 state.refreshingAttemptId = capturedSeq;
+                state.loadingUrlAttemptId = capturedSeq;
                 const savedTime = Number(audio.currentTime) || 0;
+                const durSec = getEffectiveDurationSec(audio, state);
+                const isAtEnd = Boolean(audio.ended) || (durSec > 0 && savedTime >= durSec - 0.05);
                 try {
-                    const ok = await loadAudioSource(card, state, true, () => isCurrentAttempt(card, state, capturedSeq));
+                    let ok = false;
+                    try {
+                        ok = await loadAudioSource(card, state, true, () => isCurrentAttempt(card, state, capturedSeq));
+                    } finally {
+                        if (state.loadingUrlAttemptId === capturedSeq) {
+                            state.loadingUrlAttemptId = 0;
+                        }
+                    }
                     if (!isCurrentAttempt(card, state, capturedSeq)) {
                         if (card.isConnected === false && activeCard === card && capturedSeq === playSequence) {
                             activeCard = null;
@@ -865,10 +889,10 @@ export function createVoicePlayer({
                         return;
                     }
 
-                    if (savedTime > 0) {
+                    if (state.pendingSeekSec === null && savedTime > 0 && !isAtEnd) {
                         state.pendingSeekSec = savedTime;
-                        applyPendingSeekIfReady(state);
                     }
+                    applyPendingSeekIfReady(state);
                     try {
                         await audio.play();
                         if (!isCurrentAttempt(card, state, capturedSeq)) {

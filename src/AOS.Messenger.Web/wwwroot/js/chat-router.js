@@ -134,6 +134,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
         }
 
+        const lifecycleEpoch = routerLifecycleEpoch;
         const epoch = state.beginSwitch(nextId);
         const controller = new AbortController();
         state.activeAbortController = controller;
@@ -154,7 +155,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
         try {
             const bundle = await api.getConversationBundle(nextId, { signal: controller.signal });
-            if (epoch !== state.switchEpoch || controller.signal.aborted) {
+            if (epoch !== state.switchEpoch || controller.signal.aborted || lifecycleEpoch !== routerLifecycleEpoch) {
                 return;
             }
 
@@ -202,7 +203,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
                 hooks.onAfterSwitch(String(nextId), conversation, bufferedEvents);
             }
         } catch (err) {
-            if (err?.name === 'AbortError' || epoch !== state.switchEpoch) {
+            if (err?.name === 'AbortError' || epoch !== state.switchEpoch || lifecycleEpoch !== routerLifecycleEpoch) {
                 return;
             }
 
@@ -555,6 +556,13 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     }
 
     function destroy() {
+        if (state && state.activeAbortController) {
+            try { state.activeAbortController.abort(); } catch {}
+            state.activeAbortController = null;
+        }
+        if (state && typeof state.clearPendingSwitch === 'function') {
+            state.clearPendingSwitch();
+        }
         routerLifecycleEpoch++;
         pendingPopConfirm = null;
         expectedRollbackIdx = null;

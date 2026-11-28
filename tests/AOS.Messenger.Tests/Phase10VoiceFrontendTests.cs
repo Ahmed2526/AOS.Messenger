@@ -1126,6 +1126,69 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(errRetryCard.errEl.textContent, 'Audio unavailable');
             retryErrPlayer.destroy();
 
+            // R4-6: Seeking while URL refresh is in-flight (with old readyState >= 1) queues seek for replacement source
+            // in BOTH replay refresh and automatic error-handler refresh (never clobbered by savedTime)
+            let resolveInFlightRefresh = null;
+            let inFlightRefreshCount = 0;
+            const seekRefreshPlayer = createVoicePlayer({
+                resolveUrlFn: async (convId, msgId, mediaId, opts) => {
+                    inFlightRefreshCount++;
+                    if (!opts?.bypassCache) return 'https://r2.invalid/old-src.m4a';
+                    return await new Promise(r => { resolveInFlightRefresh = r; });
+                }
+            });
+            const seekRefreshCard = makeCard(312, 'm-seek-refresh', 30000);
+            let srSrc = '';
+            let srErr = null;
+            Object.defineProperty(seekRefreshCard.audio, 'error', { get: () => srErr, configurable: true });
+            Object.defineProperty(seekRefreshCard.audio, 'src', {
+                get: () => srSrc,
+                set: (v) => {
+                    srSrc = String(v ?? '');
+                    srErr = null;
+                    seekRefreshCard.audio.currentTime = 0;
+                    seekRefreshCard.audio.readyState = 0;
+                },
+                configurable: true
+            });
+            seekRefreshPlayer.hydrateRoot(container);
+            seekRefreshCard.playBtn.click();
+            await new Promise(r => setTimeout(r, 15));
+            seekRefreshCard.audio.readyState = 1;
+            seekRefreshCard.audio.duration = 30;
+            seekRefreshCard.audio.currentTime = 12;
+            seekRefreshCard.audio.pause();
+
+            // (a) Replay refresh in flight while old readyState === 1; user seeks to 22.5s before new URL arrives
+            srErr = { code: 2 };
+            seekRefreshCard.playBtn.click();
+            await Promise.resolve();
+            assert.equal(seekRefreshCard.audio.readyState, 1); // old source still mounted
+            seekRefreshCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 150 }); // 75% -> 22.5s
+            seekRefreshCard.wf.dispatchEvent({ type: 'pointerup', clientX: 150 });
+            resolveInFlightRefresh('https://r2.invalid/new-src-1.m4a');
+            await new Promise(r => setTimeout(r, 15));
+            seekRefreshCard.audio.readyState = 1;
+            seekRefreshCard.audio.duration = 30;
+            seekRefreshCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(seekRefreshCard.audio.currentTime, 22.5);
+
+            // (b) Automatic error-handler refresh in flight while playing at 12s; user seeks to 22.5s before refresh finishes
+            seekRefreshCard.audio.currentTime = 12;
+            srErr = { code: 4 };
+            seekRefreshCard.audio.dispatchEvent({ type: 'error' });
+            await Promise.resolve();
+            assert.equal(seekRefreshCard.audio.readyState, 1);
+            seekRefreshCard.wf.dispatchEvent({ type: 'pointerdown', clientX: 150 }); // 22.5s
+            seekRefreshCard.wf.dispatchEvent({ type: 'pointerup', clientX: 150 });
+            resolveInFlightRefresh('https://r2.invalid/new-src-2.m4a');
+            await new Promise(r => setTimeout(r, 15));
+            seekRefreshCard.audio.readyState = 1;
+            seekRefreshCard.audio.duration = 30;
+            seekRefreshCard.audio.dispatchEvent({ type: 'loadedmetadata' });
+            assert.equal(seekRefreshCard.audio.currentTime, 22.5);
+            seekRefreshPlayer.destroy();
+
             // 9. R2-13: Repeated ArrowRight on waveform before readyState>=1 steps from pendingSeekSec instead of resetting to 0
             const keySeekCard = makeCard(310, 'm-key-seek', 20000);
             player.hydrateRoot(container);
@@ -1393,28 +1456,31 @@ public sealed class Phase10VoiceFrontendTests
             assert.ok(!revokedUrls.includes('blob:rec4-1'));
             rec4FailStart = false;
 
-            // R3-1: async onerror BEFORE MediaRecorder fires start preserves original preview & stops only replacement resources
+            // R3-1 / R4-8: async onerror BEFORE MediaRecorder fires start preserves original preview & closes THIS attempt's AudioContext
             rec4DeferOnStart = true;
             const rec4AsyncErrPromise = rec4.startRecording();
             resolveRec4SecondMic({ getTracks: () => [{ stop: () => { rec4RepTracksStopped++; } }], getAudioTracks: () => [] });
             await new Promise(r => setTimeout(r, 10));
             assert.equal(rec4.getMode(), 'preview');
             assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            const ctxClosedBeforeAsyncErr = rec4RepCtxClosed;
             rec4Instances[rec4Instances.length - 1].onerror({ error: new Error('async capture failure') });
             assert.equal(await rec4AsyncErrPromise, false);
             assert.equal(rec4.getMode(), 'preview');
             assert.ok(!revokedUrls.includes('blob:rec4-1'));
             assert.ok(rec4RepTracksStopped >= 1);
-            assert.ok(rec4RepCtxClosed >= 1);
+            assert.equal(rec4RepCtxClosed, ctxClosedBeforeAsyncErr + 1);
 
-            // R3-1: async onstop WITHOUT onstart settles cleanly without hanging or clobbering preview
+            // R3-1 / R4-8: async onstop WITHOUT onstart settles cleanly without hanging or clobbering preview and closes its AudioContext
             const rec4NoStartStopPromise = rec4.startRecording();
             resolveRec4SecondMic({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] });
             await new Promise(r => setTimeout(r, 10));
+            const ctxClosedBeforeNoStart = rec4RepCtxClosed;
             rec4Instances[rec4Instances.length - 1].onstop();
             assert.equal(await rec4NoStartStopPromise, false);
             assert.equal(rec4.getMode(), 'preview');
             assert.ok(!revokedUrls.includes('blob:rec4-1'));
+            assert.equal(rec4RepCtxClosed, ctxClosedBeforeNoStart + 1);
 
             // R3-1 + R3-11: preview stays intact while awaiting onstart, then commits replacement on onstart with distinct duration & bytes
             const rec4PendingPromise = rec4.startRecording();
@@ -1437,6 +1503,40 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(previewPlayIcon.textContent, 'play_arrow');
             rec4.destroy();
             rec4DeferOnStart = false;
+
+            // R4-7: Delayed onstart delivery (400ms after start()) still uses capture-based timing (700ms >= 500ms min) while gating UI on onstart
+            const rec6Sent = [];
+            let rec6Instance = null;
+            class DelayedStartRecorder {
+                constructor() { this.state = 'inactive'; this.mimeType = 'audio/webm'; rec6Instance = this; }
+                start() { this.state = 'recording'; }
+                stop() {
+                    this.state = 'inactive';
+                    if (this.ondataavailable) this.ondataavailable({ data: new Blob([new Uint8Array([7, 8, 9])], { type: 'audio/webm' }) });
+                    if (this.onstop) this.onstop();
+                }
+            }
+            const rec6 = createVoiceRecorder({
+                getActiveConversationId: () => 'conv-1',
+                getMediaRecorderClass: () => DelayedStartRecorder,
+                getUserMediaFn: async () => ({ getTracks: () => [{ stop: () => {} }], getAudioTracks: () => [] }),
+                nowFn: () => nowMs,
+                onStartSendVoice: (p) => rec6Sent.push(p)
+            });
+            rec6.init();
+            nowMs = 30000;
+            const rec6StartP = rec6.startRecording();
+            await new Promise(r => setTimeout(r, 10));
+            assert.equal(rec6.getMode(), 'idle'); // UI remains gated until onstart fires
+            nowMs = 30400; // 400ms delayed onstart delivery
+            rec6Instance.onstart();
+            assert.equal(await rec6StartP, true);
+            assert.equal(rec6.getMode(), 'recording');
+            nowMs = 30700; // 700ms total capture (300ms post-onstart)
+            rec6.sendNow();
+            assert.equal(rec6Sent.length, 1);
+            assert.equal(rec6Sent[0].durationMs, 700);
+            rec6.destroy();
 
             // R3-1: Clicking Send from preview while replacement MediaRecorder.start() is still awaiting onstart cleanly cancels startup and sends original clip
             let rec5Phase = 0;
@@ -1873,6 +1973,68 @@ public sealed class Phase10VoiceFrontendTests
             assert.equal(await directEmptyP, false);
             assert.equal(directEmptyResetCalls, 0);
             assert.equal(directDestroyState.activeConversationId, 'conv-1');
+
+            // R4-1: destroy() aborts in-flight getConversationBundle(), clears pendingConversationId, and prevents post-destroy commits/errors
+            let abortedSignal = null;
+            let resolveInFlightBundle = null;
+            let rejectInFlightBundle = null;
+            let postDestroyAfterSwitchCalls = 0;
+            let postDestroyRenderCalls = 0;
+            let postDestroyErrorCalls = 0;
+            let inFlightPushCalls = 0;
+            const origPush = globalThis.history.pushState;
+            globalThis.history.pushState = (...args) => { inFlightPushCalls++; return origPush.apply(globalThis.history, args); };
+            const inflightState = createChatState();
+            inflightState.activeConversationId = 'conv-1';
+            let bundleAttempt = 0;
+            const inflightRouter = createChatRouter({
+                state: inflightState,
+                api: {
+                    getConversationBundle: (id, { signal }) => {
+                        bundleAttempt++;
+                        abortedSignal = signal;
+                        if (bundleAttempt === 1) return new Promise(r => { resolveInFlightBundle = r; });
+                        if (bundleAttempt === 2) return new Promise((_, rej) => { rejectInFlightBundle = rej; });
+                        return Promise.resolve({ conversation: { id }, messages: [] });
+                    }
+                },
+                renderer: {
+                    renderMessages: () => { postDestroyRenderCalls++; },
+                    showSafeError: () => { postDestroyErrorCalls++; }
+                },
+                hooks: {
+                    onAfterSwitch: () => { postDestroyAfterSwitchCalls++; }
+                }
+            });
+            inflightRouter.init();
+            const inFlightP1 = inflightRouter.switchConversation('conv-2');
+            await Promise.resolve();
+            assert.equal(abortedSignal.aborted, false);
+            inflightRouter.destroy();
+            assert.equal(abortedSignal.aborted, true);
+            assert.equal(inflightState.pendingConversationId, null);
+            resolveInFlightBundle({ conversation: { id: 'conv-2' }, messages: [] });
+            await inFlightP1;
+            assert.equal(inflightState.activeConversationId, null); // beginSwitch cleared conv-1; conv-2 must NOT commit after destroy()
+            assert.equal(postDestroyRenderCalls, 0);
+            assert.equal(postDestroyAfterSwitchCalls, 0);
+            assert.equal(inFlightPushCalls, 0);
+
+            // Also verify non-AbortError rejection after destroy does not invoke showSafeError, and re-init can switch to conv-2 cleanly
+            inflightRouter.init();
+            const inFlightP2 = inflightRouter.switchConversation('conv-2');
+            await Promise.resolve();
+            inflightRouter.destroy();
+            rejectInFlightBundle(new Error('late network error'));
+            await inFlightP2;
+            assert.equal(postDestroyErrorCalls, 0);
+            assert.equal(inflightState.pendingConversationId, null);
+
+            inflightRouter.init();
+            await inflightRouter.switchConversation('conv-2');
+            assert.equal(inflightState.activeConversationId, 'conv-2');
+            inflightRouter.destroy();
+            globalThis.history.pushState = origPush;
             """;
 
         var (exitCode, stdout, stderr) = await NodeTestProcess.RunAsync(script);

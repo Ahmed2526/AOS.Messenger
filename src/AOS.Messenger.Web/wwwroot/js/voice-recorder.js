@@ -925,6 +925,8 @@ export function createVoiceRecorder({
                 }
             }
 
+            let captureStartMs = nowFn();
+
             nextRecorder.onstart = () => {
                 if (settled) return;
                 if (myToken !== opToken || !canRecordNow() || String(getActiveConversationId() || '') !== String(convId)) {
@@ -995,7 +997,7 @@ export function createVoiceRecorder({
                 renderLiveWaveformScaffold();
                 updatePausedBadgeUi(false);
                 showDockState('recording');
-                activeSegmentStartMs = nowFn();
+                activeSegmentStartMs = captureStartMs;
 
                 sendIndicatorTrueIfNeeded(convId, true);
                 updateRecordingHud();
@@ -1018,6 +1020,7 @@ export function createVoiceRecorder({
             };
 
             try {
+                captureStartMs = nowFn();
                 nextRecorder.start(1000);
             } catch (err) {
                 settleFailure(formatMicrophoneError(err));

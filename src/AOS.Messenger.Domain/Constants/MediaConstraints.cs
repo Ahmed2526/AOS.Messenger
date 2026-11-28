@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using AOS.Messenger.Domain.Enums;
@@ -17,6 +18,13 @@ public static class MediaConstraints
     public const long MaxDocumentBytes = 50L * 1024 * 1024;
     public const long MaxVoiceBytes = 25L * 1024 * 1024;
 
+    public const int MinVoiceDurationMs = 500;
+    public const int MaxVoiceDurationMs = 20 * 60 * 1000;
+    public const int MinVoiceWaveformPeaks = 1;
+    public const int MaxVoiceWaveformPeaks = 64;
+    public const int MaxWaveformPeakValue = 100;
+    public const int MaxWaveformPeaksSerializedLength = 256;
+
     public const int MaxImageWidth = 8192;
     public const int MaxImageHeight = 8192;
     public const long MaxImagePixels = 33_000_000L;
@@ -28,7 +36,7 @@ public static class MediaConstraints
 
     public const int MaxSanitizedFileNameLength = 150;
     public const int MaxRawFileNameLength = 1024;
-    public const int MaxDeclaredContentTypeLength = 256;
+    public const int MaxDeclaredContentTypeLength = 128;
     public const int MaxFailureReasonLength = 256;
 
     public const string PendingKeyPrefix = "pending/";
@@ -92,6 +100,28 @@ public static class MediaConstraints
             ["application/zip"] = ".zip"
         };
 
+    // Kept strictly separate from Phase9Allowlist and FallbackExtensionByMime so
+    // audio containers (.webm/.mp4/.ogg) can only enter through explicit voice initiation.
+    private static readonly IReadOnlyDictionary<string, AllowedFormatSpec> VoiceAllowlist =
+        new Dictionary<string, AllowedFormatSpec>(StringComparer.OrdinalIgnoreCase)
+        {
+            [".m4a"] = new(MediaKind.Voice, "audio/mp4", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/mp4", "audio/x-m4a", "audio/aac" }),
+            [".webm"] = new(MediaKind.Voice, "audio/webm", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/webm" }),
+            [".weba"] = new(MediaKind.Voice, "audio/webm", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/webm" }),
+            [".ogg"] = new(MediaKind.Voice, "audio/ogg", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/ogg" }),
+            [".oga"] = new(MediaKind.Voice, "audio/ogg", new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "audio/ogg" })
+        };
+
+    private static readonly IReadOnlyDictionary<string, string> VoiceFallbackExtensionByMime =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["audio/mp4"] = ".m4a",
+            ["audio/x-m4a"] = ".m4a",
+            ["audio/aac"] = ".m4a",
+            ["audio/webm"] = ".webm",
+            ["audio/ogg"] = ".ogg"
+        };
+
     public static long GetMaxSizeBytes(MediaKind kind) => kind switch
     {
         MediaKind.Image => MaxImageBytes,
@@ -122,7 +152,17 @@ public static class MediaConstraints
         return true;
     }
 
-    public static string SanitizeFileName(string? rawFileName, string? fallbackContentType = null)
+    public static string SanitizeFileName(string? rawFileName, string? fallbackContentType = null) =>
+        SanitizeFileNameCore(rawFileName, fallbackContentType, "attachment", FallbackExtensionByMime);
+
+    public static string SanitizeVoiceFileName(string? rawFileName, string? fallbackContentType = null) =>
+        SanitizeFileNameCore(rawFileName, fallbackContentType, "voice-note", VoiceFallbackExtensionByMime);
+
+    private static string SanitizeFileNameCore(
+        string? rawFileName,
+        string? fallbackContentType,
+        string defaultStem,
+        IReadOnlyDictionary<string, string> fallbackExtensions)
     {
         if (string.IsNullOrWhiteSpace(rawFileName))
         {
@@ -163,7 +203,7 @@ public static class MediaConstraints
         string rawStem;
         if (string.IsNullOrEmpty(ext) || ext == ".")
         {
-            if (!TryGetFallbackExtension(fallbackContentType, out var fallbackExt))
+            if (!TryGetFallbackExtension(fallbackContentType, fallbackExtensions, out var fallbackExt))
             {
                 throw new DomainException("File must have a valid extension.");
             }
@@ -179,7 +219,7 @@ public static class MediaConstraints
         var stem = rawStem.Trim().Trim('.');
         if (string.IsNullOrWhiteSpace(stem))
         {
-            stem = "attachment";
+            stem = defaultStem;
         }
 
         var maxStemLen = MaxSanitizedFileNameLength - ext.Length;
@@ -208,7 +248,121 @@ public static class MediaConstraints
 
     public static (MediaKind Kind, string CanonicalContentType, long MaxSizeBytes) ResolveAllowedMedia(
         string sanitizedFileName,
-        string? declaredContentType)
+        string? declaredContentType) =>
+        ResolveAllowedMediaCore(sanitizedFileName, declaredContentType, Phase9Allowlist);
+
+    public static (MediaKind Kind, string CanonicalContentType, long MaxSizeBytes) ResolveAllowedVoiceMedia(
+        string sanitizedFileName,
+        string? declaredContentType) =>
+        ResolveAllowedMediaCore(sanitizedFileName, declaredContentType, VoiceAllowlist);
+
+    public static string ValidateAndSerializeWaveformPeaks(IReadOnlyList<int>? peaks)
+    {
+        if (peaks is null || peaks.Count < MinVoiceWaveformPeaks || peaks.Count > MaxVoiceWaveformPeaks)
+        {
+            throw new DomainException(
+                $"Voice waveform must contain between {MinVoiceWaveformPeaks} and {MaxVoiceWaveformPeaks} peaks.");
+        }
+
+        var sb = new StringBuilder(peaks.Count * 4);
+        for (var i = 0; i < peaks.Count; i++)
+        {
+            var peak = peaks[i];
+            if (peak < 0 || peak > MaxWaveformPeakValue)
+            {
+                throw new DomainException($"Voice waveform peaks must be between 0 and {MaxWaveformPeakValue}.");
+            }
+
+            if (i > 0)
+            {
+                sb.Append(',');
+            }
+
+            sb.Append(peak.ToString(CultureInfo.InvariantCulture));
+        }
+
+        var serialized = sb.ToString();
+        if (serialized.Length > MaxWaveformPeaksSerializedLength)
+        {
+            throw new DomainException($"Voice waveform exceeds {MaxWaveformPeaksSerializedLength} characters.");
+        }
+
+        return serialized;
+    }
+
+    public static string ValidateSerializedWaveformPeaks(string? serialized)
+    {
+        if (string.IsNullOrWhiteSpace(serialized))
+        {
+            throw new DomainException("Voice waveform peaks are required.");
+        }
+
+        if (serialized.Length > MaxWaveformPeaksSerializedLength)
+        {
+            throw new DomainException($"Voice waveform exceeds {MaxWaveformPeaksSerializedLength} characters.");
+        }
+
+        var parsed = ParseWaveformPeaksCore(serialized, throwOnInvalid: true)!;
+        return ValidateAndSerializeWaveformPeaks(parsed);
+    }
+
+    public static IReadOnlyList<int>? ParseWaveformPeaks(string? serialized) =>
+        ParseWaveformPeaksCore(serialized, throwOnInvalid: false);
+
+    private static IReadOnlyList<int>? ParseWaveformPeaksCore(string? serialized, bool throwOnInvalid)
+    {
+        if (string.IsNullOrWhiteSpace(serialized))
+        {
+            return null;
+        }
+
+        if (serialized.Length > MaxWaveformPeaksSerializedLength)
+        {
+            if (throwOnInvalid)
+            {
+                throw new DomainException($"Voice waveform exceeds {MaxWaveformPeaksSerializedLength} characters.");
+            }
+
+            return null;
+        }
+
+        var parts = serialized.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < MinVoiceWaveformPeaks || parts.Length > MaxVoiceWaveformPeaks)
+        {
+            if (throwOnInvalid)
+            {
+                throw new DomainException(
+                    $"Voice waveform must contain between {MinVoiceWaveformPeaks} and {MaxVoiceWaveformPeaks} peaks.");
+            }
+
+            return null;
+        }
+
+        var result = new int[parts.Length];
+        for (var i = 0; i < parts.Length; i++)
+        {
+            if (!int.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out var peak)
+                || peak < 0
+                || peak > MaxWaveformPeakValue)
+            {
+                if (throwOnInvalid)
+                {
+                    throw new DomainException($"Voice waveform peaks must be between 0 and {MaxWaveformPeakValue}.");
+                }
+
+                return null;
+            }
+
+            result[i] = peak;
+        }
+
+        return result;
+    }
+
+    private static (MediaKind Kind, string CanonicalContentType, long MaxSizeBytes) ResolveAllowedMediaCore(
+        string sanitizedFileName,
+        string? declaredContentType,
+        IReadOnlyDictionary<string, AllowedFormatSpec> allowlist)
     {
         if (string.IsNullOrWhiteSpace(sanitizedFileName))
         {
@@ -226,7 +380,7 @@ public static class MediaConstraints
         }
 
         var ext = Path.GetExtension(sanitizedFileName);
-        if (string.IsNullOrEmpty(ext) || !Phase9Allowlist.TryGetValue(ext, out var spec))
+        if (string.IsNullOrEmpty(ext) || !allowlist.TryGetValue(ext, out var spec))
         {
             throw new DomainException($"Unsupported file type '{ext}'.");
         }
@@ -289,7 +443,10 @@ public static class MediaConstraints
         return $"{disposition}; filename=\"{asciiFallback}\"; filename*=UTF-8''{encoded}";
     }
 
-    private static bool TryGetFallbackExtension(string? contentType, out string extension)
+    private static bool TryGetFallbackExtension(
+        string? contentType,
+        IReadOnlyDictionary<string, string> fallbackMap,
+        out string extension)
     {
         extension = string.Empty;
         if (string.IsNullOrWhiteSpace(contentType))
@@ -307,7 +464,7 @@ public static class MediaConstraints
             return false;
         }
 
-        return FallbackExtensionByMime.TryGetValue(normalizedMime, out extension!);
+        return fallbackMap.TryGetValue(normalizedMime, out extension!);
     }
 
     private static bool IsForbiddenFileNameCodePoint(int cp) => cp is

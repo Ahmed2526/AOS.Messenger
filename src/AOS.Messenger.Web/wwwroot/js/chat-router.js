@@ -93,13 +93,17 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     let initialized = false;
     let onDocumentClick = null;
     let onPopState = null;
+    let currentHistoryIdx = 0;
+    let routerLifecycleEpoch = 0;
+    let pendingPopConfirm = null;
+    let expectedRollbackIdx = null;
 
     /**
      * Switches the active chat pane to nextId with full epoch/AbortController race protection.
      * @param {string} nextId
      * @param {{ pushUrl?: boolean, force?: boolean }} [options]
      */
-    async function switchConversation(nextId, { pushUrl = true, force = false } = {}) {
+    async function switchConversation(nextId, { pushUrl = true, force = false, skipConfirm = false } = {}) {
         if (!nextId) return;
 
         const normNext = String(nextId).trim().toLowerCase();
@@ -112,6 +116,14 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             return;
         }
 
+        if (!force && !skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const myEpoch = routerLifecycleEpoch;
+            const allowed = await hooks.confirmBeforeSwitch(nextId);
+            if (!allowed || myEpoch !== routerLifecycleEpoch) {
+                return false;
+            }
+        }
+
         const previousId = state.activeConversationId;
         if (previousId && typeof hooks.getDraftText === 'function') {
             const draftText = hooks.getDraftText();
@@ -122,6 +134,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
         }
 
+        const lifecycleEpoch = routerLifecycleEpoch;
         const epoch = state.beginSwitch(nextId);
         const controller = new AbortController();
         state.activeAbortController = controller;
@@ -142,7 +155,7 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
 
         try {
             const bundle = await api.getConversationBundle(nextId, { signal: controller.signal });
-            if (epoch !== state.switchEpoch || controller.signal.aborted) {
+            if (epoch !== state.switchEpoch || controller.signal.aborted || lifecycleEpoch !== routerLifecycleEpoch) {
                 return;
             }
 
@@ -181,14 +194,16 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
 
             if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
-                history.pushState({ conversationId: String(nextId) }, '', `/chat/${encodeURIComponent(String(nextId))}`);
+                currentHistoryIdx++;
+                expectedRollbackIdx = null;
+                history.pushState({ conversationId: String(nextId), historyIdx: currentHistoryIdx }, '', `/chat/${encodeURIComponent(String(nextId))}`);
             }
 
             if (typeof hooks.onAfterSwitch === 'function') {
                 hooks.onAfterSwitch(String(nextId), conversation, bufferedEvents);
             }
         } catch (err) {
-            if (err?.name === 'AbortError' || epoch !== state.switchEpoch) {
+            if (err?.name === 'AbortError' || epoch !== state.switchEpoch || lifecycleEpoch !== routerLifecycleEpoch) {
                 return;
             }
 
@@ -221,7 +236,14 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
      * Transitions the shell back to the empty / sidebar state (e.g. /chat or mobile back button).
      * @param {{ pushUrl?: boolean }} [options]
      */
-    function switchToEmptyState({ pushUrl = true } = {}) {
+    async function switchToEmptyState({ pushUrl = true, skipConfirm = false } = {}) {
+        if (!skipConfirm && typeof hooks.confirmBeforeSwitch === 'function') {
+            const myEpoch = routerLifecycleEpoch;
+            const allowed = await hooks.confirmBeforeSwitch(null);
+            if (!allowed || myEpoch !== routerLifecycleEpoch) {
+                return false;
+            }
+        }
         const previousId = state.activeConversationId;
         if (previousId && typeof hooks.getDraftText === 'function') {
             const draftText = hooks.getDraftText();
@@ -249,7 +271,9 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
         toggleMobilePane('sidebar');
 
         if (pushUrl && typeof history !== 'undefined' && typeof history.pushState === 'function') {
-            history.pushState({ conversationId: null }, '', '/chat');
+            currentHistoryIdx++;
+            expectedRollbackIdx = null;
+            history.pushState({ conversationId: null, historyIdx: currentHistoryIdx }, '', '/chat');
         }
 
         if (typeof hooks.onSwitchToEmpty === 'function') {
@@ -403,9 +427,17 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             state.initFromBootstrap(bootstrap);
         }
 
+        const existingIdx = (typeof history !== 'undefined' && Number.isInteger(history.state?.historyIdx))
+            ? history.state.historyIdx
+            : 0;
+        currentHistoryIdx = existingIdx;
+        routerLifecycleEpoch++;
+        pendingPopConfirm = null;
+        expectedRollbackIdx = null;
+
         if (typeof history !== 'undefined' && typeof history.replaceState === 'function' && typeof window !== 'undefined') {
             history.replaceState(
-                { conversationId: state.activeConversationId ?? null },
+                { conversationId: state.activeConversationId ?? null, historyIdx: currentHistoryIdx },
                 '',
                 `${window.location.pathname}${window.location.search || ''}`
             );
@@ -434,15 +466,83 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
             }
         };
 
-        onPopState = (e) => {
-            const fromState = e.state && e.state.conversationId ? String(e.state.conversationId) : null;
+        onPopState = async (e) => {
+            const poppedIdx = Number.isInteger(e?.state?.historyIdx) ? e.state.historyIdx : null;
+            const fromState = e?.state && e.state.conversationId ? String(e.state.conversationId) : null;
             const fromPath = typeof window !== 'undefined' ? parseConversationIdFromPath(window.location.pathname) : null;
             const targetId = fromState || fromPath;
 
+            if (expectedRollbackIdx !== null) {
+                const expected = expectedRollbackIdx;
+                expectedRollbackIdx = null;
+                if (poppedIdx === expected) {
+                    return;
+                }
+            }
+
+            if (pendingPopConfirm) {
+                pendingPopConfirm.latestBrowserIdx = poppedIdx;
+                pendingPopConfirm.latestTargetId = targetId;
+                return;
+            }
+
+            if (typeof hooks.confirmBeforeSwitch === 'function') {
+                const myEpoch = routerLifecycleEpoch;
+                const pending = { latestBrowserIdx: poppedIdx, latestTargetId: targetId };
+                pendingPopConfirm = pending;
+                let allowed = false;
+                try {
+                    allowed = Boolean(await hooks.confirmBeforeSwitch(targetId));
+                } finally {
+                    if (pendingPopConfirm === pending) {
+                        pendingPopConfirm = null;
+                    }
+                }
+
+                if (myEpoch !== routerLifecycleEpoch || !initialized) {
+                    return;
+                }
+
+                const finalIdx = pending.latestBrowserIdx;
+                const finalTargetId = pending.latestTargetId;
+
+                if (!allowed) {
+                    if (finalIdx !== null && finalIdx === currentHistoryIdx) {
+                        return;
+                    }
+                    if (finalIdx !== null && typeof history !== 'undefined' && typeof history.go === 'function') {
+                        expectedRollbackIdx = currentHistoryIdx;
+                        history.go(currentHistoryIdx - finalIdx);
+                    } else if (typeof history !== 'undefined' && typeof history.pushState === 'function') {
+                        const rollbackId = state.activeConversationId ?? null;
+                        const rollbackUrl = rollbackId ? `/chat/${encodeURIComponent(String(rollbackId))}` : '/chat';
+                        currentHistoryIdx++;
+                        expectedRollbackIdx = null;
+                        history.pushState({ conversationId: rollbackId, historyIdx: currentHistoryIdx }, '', rollbackUrl);
+                    }
+                    return;
+                }
+
+                if (finalIdx !== null) {
+                    currentHistoryIdx = finalIdx;
+                }
+
+                if (finalTargetId) {
+                    switchConversation(finalTargetId, { pushUrl: false, skipConfirm: true });
+                } else {
+                    switchToEmptyState({ pushUrl: false, skipConfirm: true });
+                }
+                return;
+            }
+
+            if (poppedIdx !== null) {
+                currentHistoryIdx = poppedIdx;
+            }
+
             if (targetId) {
-                switchConversation(targetId, { pushUrl: false });
+                switchConversation(targetId, { pushUrl: false, skipConfirm: true });
             } else {
-                switchToEmptyState({ pushUrl: false });
+                switchToEmptyState({ pushUrl: false, skipConfirm: true });
             }
         };
 
@@ -456,6 +556,16 @@ export function createChatRouter({ state, api, renderer, hooks = {} }) {
     }
 
     function destroy() {
+        if (state && state.activeAbortController) {
+            try { state.activeAbortController.abort(); } catch {}
+            state.activeAbortController = null;
+        }
+        if (state && typeof state.clearPendingSwitch === 'function') {
+            state.clearPendingSwitch();
+        }
+        routerLifecycleEpoch++;
+        pendingPopConfirm = null;
+        expectedRollbackIdx = null;
         if (!initialized) return;
         if (typeof document !== 'undefined' && onDocumentClick) {
             document.removeEventListener('click', onDocumentClick);

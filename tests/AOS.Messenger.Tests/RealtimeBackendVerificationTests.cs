@@ -969,6 +969,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
 
         public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
@@ -993,6 +995,12 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             throw _exception;
 
         public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) =>
+            throw _exception;
+
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) =>
+            throw _exception;
+
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) =>
             throw _exception;
 
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) =>
@@ -1031,6 +1039,8 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
 
         public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
@@ -1095,6 +1105,13 @@ public sealed class RealtimeBackendVerificationTests : IClassFixture<SqlTestData
             Task.FromResult<UserId?>(_conversation.Id == conversationId && _conversation.HasParticipant(senderId)
                 ? _conversation.GetOtherParticipant(senderId)
                 : null);
+
+        public Task<bool> AreAuthorizedDirectPeersAsync(ConversationId conversationId, UserId userA, UserId userB, CancellationToken ct = default) =>
+            Task.FromResult(
+                _conversation.Id == conversationId
+                && userA != userB
+                && _conversation.HasParticipant(userA)
+                && _conversation.HasParticipant(userB));
     }
 
     private sealed class StubBlockPersistence : IBlockPersistence

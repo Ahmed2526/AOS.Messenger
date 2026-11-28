@@ -37,7 +37,12 @@ public static class MediaPreviewFormatter
             kinds[i] = ParseKind(attachments[i].Kind);
         }
 
-        return FormatWithKinds(normalizedCaption, kinds, attachments[0].FileName, maxLength);
+        return FormatWithKinds(
+            normalizedCaption,
+            kinds,
+            attachments[0].FileName,
+            attachments[0].DurationMs,
+            maxLength);
     }
 
     public static string FormatPreview(
@@ -64,13 +69,19 @@ public static class MediaPreviewFormatter
             kinds[i] = attachments[i].Kind;
         }
 
-        return FormatWithKinds(normalizedCaption, kinds, attachments[0].SanitizedFileName, maxLength);
+        return FormatWithKinds(
+            normalizedCaption,
+            kinds,
+            attachments[0].SanitizedFileName,
+            attachments[0].DurationMs,
+            maxLength);
     }
 
     private static string FormatWithKinds(
         string? normalizedCaption,
         MediaKind[] kinds,
         string? firstFileName,
+        int? firstDurationMs,
         int maxLength)
     {
         var count = kinds.Length;
@@ -98,7 +109,7 @@ public static class MediaPreviewFormatter
             {
                 MediaKind.Image => "📷 Photo",
                 MediaKind.Video => "🎬 Video",
-                MediaKind.Voice => "🎤 Voice message",
+                MediaKind.Voice => FormatVoicePreview(firstDurationMs),
                 _ => $"📎 {(string.IsNullOrWhiteSpace(firstFileName) ? "Attachment" : firstFileName.Trim())}"
             };
 
@@ -139,6 +150,19 @@ public static class MediaPreviewFormatter
         }
 
         return MediaKind.Document;
+    }
+
+    private static string FormatVoicePreview(int? durationMs)
+    {
+        if (!durationMs.HasValue || durationMs.Value <= 0)
+        {
+            return "🎤 Voice message";
+        }
+
+        var totalSeconds = Math.Max(0, (int)Math.Round(durationMs.Value / 1000.0, MidpointRounding.AwayFromZero));
+        var minutes = totalSeconds / 60;
+        var seconds = totalSeconds % 60;
+        return string.Create(CultureInfo.InvariantCulture, $"🎤 Voice message ({minutes}:{seconds:D2})");
     }
 
     private static string GetIcon(MediaKind kind) => kind switch

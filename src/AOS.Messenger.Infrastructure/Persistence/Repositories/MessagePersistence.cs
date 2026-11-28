@@ -305,6 +305,7 @@ public sealed class MessagePersistence : IMessagePersistence
 
             if (mediaIds.Count > 0)
             {
+                var disallowVoice = mediaIds.Count > 1 || Message.HasVisibleContent(attemptMessage.Content);
                 var orderedTargets = mediaIds
                     .Select((mediaId, index) => (MediaId: mediaId, DisplayOrder: index))
                     .OrderBy(item => item.MediaId.Value)
@@ -320,7 +321,8 @@ public sealed class MessagePersistence : IMessagePersistence
                                         && m.UploaderId == attemptMessage.SenderId
                                         && m.ConversationId == attemptMessage.ConversationId
                                         && m.State == MediaState.Uploaded
-                                        && m.MessageId == null)
+                                        && m.MessageId == null
+                                        && (!disallowVoice || m.Kind != MediaKind.Voice))
                             .ExecuteUpdateAsync(setters => setters
                                 .SetProperty(m => m.State, MediaState.Attached)
                                 .SetProperty(m => m.MessageId, (MessageId?)attemptMessage.Id)
@@ -337,18 +339,27 @@ public sealed class MessagePersistence : IMessagePersistence
 
                     if (rowsAffected != 1)
                     {
-                        var isOwnedInConversation = await _db.Media
+                        var existingOwned = await _db.Media
                             .AsNoTracking()
-                            .AnyAsync(m => m.Id == target.MediaId
-                                           && m.UploaderId == attemptMessage.SenderId
-                                           && m.ConversationId == attemptMessage.ConversationId, ct);
+                            .Where(m => m.Id == target.MediaId
+                                        && m.UploaderId == attemptMessage.SenderId
+                                        && m.ConversationId == attemptMessage.ConversationId)
+                            .Select(m => new { m.Kind, m.State })
+                            .FirstOrDefaultAsync(ct);
 
                         await tx.RollbackAsync(ct);
                         _db.ChangeTracker.Clear();
 
-                        if (!isOwnedInConversation)
+                        if (existingOwned is null)
                         {
                             throw new ForbiddenException("One or more media attachments are not accessible.");
+                        }
+
+                        if (disallowVoice
+                            && existingOwned.Kind == MediaKind.Voice
+                            && existingOwned.State == MediaState.Uploaded)
+                        {
+                            throw new DomainException("Voice messages cannot include text content or other attachments.");
                         }
 
                         throw new ConflictException(

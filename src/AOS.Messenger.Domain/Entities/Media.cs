@@ -30,6 +30,8 @@ public sealed class Media : Entity<MediaId>
     public int? Width { get; private set; }
     public int? Height { get; private set; }
     public int? DurationMs { get; private set; }
+    public string? WaveformPeaks { get; private set; }
+    public DateTimeOffset? PlayedAtUtc { get; private set; }
     public DateTimeOffset CreatedAtUtc { get; private set; }
     public DateTimeOffset? UploadedAtUtc { get; private set; }
     public DateTimeOffset? AttachedAtUtc { get; private set; }
@@ -51,7 +53,9 @@ public sealed class Media : Entity<MediaId>
         long declaredSizeBytes,
         DateTimeOffset nowUtc,
         string? storageObjectId = null,
-        MediaId? id = null)
+        MediaId? id = null,
+        int? durationMs = null,
+        string? waveformPeaks = null)
     {
         ArgumentNullException.ThrowIfNull(uploaderId);
         ArgumentNullException.ThrowIfNull(conversationId);
@@ -84,6 +88,32 @@ public sealed class Media : Entity<MediaId>
             throw new DomainException($"File size must be between 1 byte and {maxBytes} bytes for {kind}.");
         }
 
+        string? validatedWaveform = null;
+        if (kind == MediaKind.Voice)
+        {
+            if (!durationMs.HasValue
+                || durationMs.Value < MediaConstraints.MinVoiceDurationMs
+                || durationMs.Value > MediaConstraints.MaxVoiceDurationMs)
+            {
+                throw new DomainException(
+                    $"Voice message duration must be between {MediaConstraints.MinVoiceDurationMs} and {MediaConstraints.MaxVoiceDurationMs} milliseconds.");
+            }
+
+            validatedWaveform = MediaConstraints.ValidateSerializedWaveformPeaks(waveformPeaks);
+        }
+        else
+        {
+            if (durationMs.HasValue)
+            {
+                throw new DomainException("Pending duration can only be specified for voice media.");
+            }
+
+            if (waveformPeaks is not null)
+            {
+                throw new DomainException("Waveform peaks can only be specified for voice media.");
+            }
+        }
+
         var objId = storageObjectId ?? MediaConstraints.GenerateStorageObjectId();
         if (!MediaConstraints.IsValidStorageObjectId(objId))
         {
@@ -104,6 +134,8 @@ public sealed class Media : Entity<MediaId>
             SanitizedFileName = trimmedName,
             DeclaredContentType = trimmedMime,
             DeclaredSizeBytes = declaredSizeBytes,
+            DurationMs = durationMs,
+            WaveformPeaks = validatedWaveform,
             CreatedAtUtc = nowUtc,
             RowVersion = []
         };
@@ -170,7 +202,21 @@ public sealed class Media : Entity<MediaId>
             throw new DomainException($"Image resolution exceeds the maximum allowed {MediaConstraints.MaxImagePixels:N0} pixels.");
         }
 
-        if (durationMs.HasValue && durationMs.Value <= 0)
+        var effectiveDurationMs = Kind == MediaKind.Voice
+            ? (durationMs ?? DurationMs)
+            : durationMs;
+
+        if (Kind == MediaKind.Voice)
+        {
+            if (!effectiveDurationMs.HasValue
+                || effectiveDurationMs.Value < MediaConstraints.MinVoiceDurationMs
+                || effectiveDurationMs.Value > MediaConstraints.MaxVoiceDurationMs)
+            {
+                throw new DomainException(
+                    $"Voice message duration must be between {MediaConstraints.MinVoiceDurationMs} and {MediaConstraints.MaxVoiceDurationMs} milliseconds.");
+            }
+        }
+        else if (effectiveDurationMs.HasValue && effectiveDurationMs.Value <= 0)
         {
             throw new DomainException("Media duration must be positive when specified.");
         }
@@ -215,7 +261,7 @@ public sealed class Media : Entity<MediaId>
         VerifiedSizeBytes = verifiedSizeBytes;
         Width = width;
         Height = height;
-        DurationMs = durationMs;
+        DurationMs = effectiveDurationMs;
         UploadedAtUtc = nowUtc;
     }
 
@@ -289,5 +335,25 @@ public sealed class Media : Entity<MediaId>
         }
 
         PurgedAtUtc = nowUtc;
+    }
+
+    public void MarkPlayed(DateTimeOffset playedAtUtc)
+    {
+        if (Kind != MediaKind.Voice)
+        {
+            throw new DomainException("Only voice messages can be marked as played.");
+        }
+
+        if (State != MediaState.Attached)
+        {
+            throw new DomainException($"Cannot mark voice media as played from state '{State}'.");
+        }
+
+        if (PlayedAtUtc.HasValue)
+        {
+            return;
+        }
+
+        PlayedAtUtc = playedAtUtc;
     }
 }

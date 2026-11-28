@@ -112,6 +112,9 @@ namespace AOS.Messenger.Infrastructure.Migrations
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<DateTimeOffset?>("PlayedAtUtc")
+                        .HasColumnType("datetimeoffset");
+
                     b.Property<DateTimeOffset?>("PurgedAtUtc")
                         .HasColumnType("datetimeoffset");
 
@@ -158,6 +161,10 @@ namespace AOS.Messenger.Infrastructure.Migrations
                     b.Property<long?>("VerifiedSizeBytes")
                         .HasColumnType("bigint");
 
+                    b.Property<string>("WaveformPeaks")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
                     b.Property<int?>("Width")
                         .HasColumnType("int");
 
@@ -190,11 +197,17 @@ namespace AOS.Messenger.Infrastructure.Migrations
                         {
                             t.HasCheckConstraint("CK_Media_ObjectKey_Prefix", "([State] = 0 AND [ObjectKey] LIKE N'pending/%') OR ([State] IN (1, 2) AND [ObjectKey] LIKE N'media/%') OR ([State] IN (3, 4))");
 
+                            t.HasCheckConstraint("CK_Media_PlayedAtUtc_Voice", "([PlayedAtUtc] IS NULL) OR ([Kind] = 3)");
+
                             t.HasCheckConstraint("CK_Media_Sizes_Positive", "[DeclaredSizeBytes] > 0 AND ([VerifiedSizeBytes] IS NULL OR [VerifiedSizeBytes] > 0)");
 
                             t.HasCheckConstraint("CK_Media_State_MessageId", "([State] = 2 AND [MessageId] IS NOT NULL) OR ([State] IN (0, 1, 3) AND [MessageId] IS NULL) OR ([State] = 4)");
 
                             t.HasCheckConstraint("CK_Media_ThumbnailObjectKey", "([ThumbnailObjectKey] IS NULL OR [ThumbnailObjectKey] LIKE N'thumbs/%')");
+
+                            t.HasCheckConstraint("CK_Media_Voice_Duration", "([Kind] <> 3) OR ([DurationMs] IS NOT NULL AND [DurationMs] >= 500 AND [DurationMs] <= 1200000)");
+
+                            t.HasCheckConstraint("CK_Media_Voice_Waveform", "([Kind] <> 3 AND [WaveformPeaks] IS NULL) OR ([Kind] = 3 AND [WaveformPeaks] IS NOT NULL AND LEN([WaveformPeaks]) > 0)");
                         });
                 });
 

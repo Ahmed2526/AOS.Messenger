@@ -800,6 +800,8 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
             public Task ReceiveMessage(MessageDto message) => Task.CompletedTask;
             public Task ReceiveReceiptUpdated(ReceiptUpdateDto receipt) => Task.CompletedTask;
             public Task ReceiveTypingIndicator(TypingIndicatorDto typing) => Task.CompletedTask;
+            public Task ReceiveRecordingIndicator(RecordingIndicatorDto recording) => Task.CompletedTask;
+            public Task ReceiveVoicePlayed(VoicePlayedDto played) => Task.CompletedTask;
             public Task ReceivePresenceChanged(UserPresenceDto presence) => Task.CompletedTask;
             public Task MessageEdited(MessageDto message) => Task.CompletedTask;
             public Task MessageDeleted(long messageId, Guid conversationId, bool isDeletedForEveryone) => Task.CompletedTask;
@@ -828,6 +830,8 @@ public sealed class RedTeamRemediationTests : IClassFixture<SqlTestDatabaseFixtu
         public Task NotifyNewMessageAsync(ConversationId conversationId, MessageDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto editedMessage, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto deletedMessage, CancellationToken ct = default) => Task.CompletedTask;

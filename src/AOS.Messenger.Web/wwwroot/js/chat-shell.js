@@ -51,6 +51,8 @@ import {
 import { createStickerCreator } from './sticker-creator.js';
 import { setupMediaDragGuard } from './media-drag-guard.js';
 import { createBottomScrollPinner } from './scroll-anchor.js';
+import { createVoicePlayer } from './voice-player.js';
+import { createVoiceRecorder } from './voice-recorder.js';
 
 const DEFAULT_SHELL_TITLE = 'A♡S Messenger - Desktop App';
 
@@ -85,6 +87,8 @@ export function initChatShell(overrides = {}) {
     let composer = null;
     let mediaLightbox = null;
     let mediaUploader = null;
+    let voicePlayer = null;
+    let voiceRecorder = null;
     let scrollReadDebounce = null;
     let lastVisibilitySyncAt = 0;
     let topPaginationObserver = null;
@@ -134,6 +138,8 @@ export function initChatShell(overrides = {}) {
         if (stickerPicker) stickerPicker.invalidateCache();
         if (stickerCreator) stickerCreator.abortAndWipe();
         if (emojiAutocomplete) emojiAutocomplete.close();
+        if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
+        if (voicePlayer) voicePlayer.destroy();
         if (mediaUploader) mediaUploader.abortAllAndWipe();
         if (mediaLightbox) mediaLightbox.wipe();
         clearAvatarUrlCache();
@@ -157,6 +163,8 @@ export function initChatShell(overrides = {}) {
         if (stickerPicker) stickerPicker.invalidateCache();
         if (stickerCreator) stickerCreator.abortAndWipe();
         if (emojiAutocomplete) emojiAutocomplete.close();
+        if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
+        if (voicePlayer) voicePlayer.destroy();
         if (mediaUploader) mediaUploader.abortAllAndWipe();
         if (mediaLightbox) mediaLightbox.wipe();
         clearAvatarUrlCache();
@@ -244,15 +252,28 @@ export function initChatShell(overrides = {}) {
     });
     emojiAutocomplete = createEmojiAutocomplete({ getUserId: getCurrentUserId });
     mediaLightbox = createMediaLightbox();
+    voicePlayer = createVoicePlayer({
+        onBeforeStartPlayback: () => {
+            if (!voiceRecorder) return;
+            if (voiceRecorder.getMode() === 'preview' && typeof voiceRecorder.pausePreview === 'function') {
+                voiceRecorder.pausePreview();
+            }
+        }
+    });
+    if (typeof messageRenderer.setVoicePlayerCoordinator === 'function') {
+        messageRenderer.setVoicePlayerCoordinator(voicePlayer);
+    }
     mediaUploader = createMediaUploader({
         state,
         onError: (msg) => composer?.showActionError(msg),
         onUnauthorized: handleSessionExpired,
-        onMessageSent: (convId, sentMessage) => {
+        onTrayChanged: () => composer?.syncDisabledState(),
+        isVoiceDockActive: () => Boolean(voiceRecorder && voiceRecorder.isDirty()),
+        onMessageSent: (convId, sentMessage, meta = null) => {
             const msgId = messageRenderer.getMessageId(sentMessage);
             const previewText = messageRenderer.formatMessagePreview(sentMessage);
             updateSidebarLastMessage(convId, previewText, msgId, false, false, true);
-            if (typeof state.deleteDraft === 'function') {
+            if (!meta?.isVoice && typeof state.deleteDraft === 'function') {
                 state.deleteDraft(convId);
             }
             const isSameActive = state.activeConversationId
@@ -304,8 +325,15 @@ export function initChatShell(overrides = {}) {
             if (composer) {
                 composer.applyConversationPolicy(conversation);
             }
+            const recBlocked = !!(conversation.isBlocked ?? conversation.IsBlocked);
+            const recRawCanSend = conversation.canSend !== undefined ? conversation.canSend : conversation.CanSend;
+            const recCanSend = recRawCanSend !== undefined ? !!recRawCanSend : !recBlocked;
+            if (voiceRecorder && (recBlocked || !recCanSend)) {
+                voiceRecorder.forceAbortAndWipe();
+            }
         },
         onTypingIndicator: typingReceiver.handleTypingIndicator,
+        onRecordingIndicator: typingReceiver.handleRecordingIndicator,
         onPresenceChanged: presence.handlePresenceChanged,
         onRefreshPresence: () => presence.fetchPresence(),
         onIncomingMessage: (convId, msg) => mediaUploader.reconcileIncomingMessage(convId, msg),
@@ -361,6 +389,44 @@ export function initChatShell(overrides = {}) {
     });
     composer.init();
     composer.registerTransientResetHook(() => mediaUploader.resetTrayForSwitch());
+    voiceRecorder = createVoiceRecorder({
+        connection: signalrClient.connection,
+        getActiveConversationId,
+        canRecordNow: () => {
+            if (!state.activeConversationId || !state.activeMeta) return false;
+            const blocked = !!(state.activeMeta.isBlocked ?? state.activeMeta.IsBlocked);
+            const rawCanSend = state.activeMeta.canSend !== undefined ? state.activeMeta.canSend : state.activeMeta.CanSend;
+            const canSend = rawCanSend !== undefined ? !!rawCanSend : !blocked;
+            return canSend && !mediaUploader.hasPendingFiles();
+        },
+        onBeforeStart: () => {
+            closeAllPopoversBeforeModal();
+            if (voicePlayer) voicePlayer.stopAllPlayback();
+        },
+        onStartSendVoice: (voicePayload) => {
+            if (!voicePayload || !voicePayload.conversationId) return null;
+            const replySnapshot = composer.getActiveReply ? composer.getActiveReply() : null;
+            composer.clearReply();
+            composer.hideActionError();
+            return mediaUploader.startVoiceUploadJob({
+                conversationId: voicePayload.conversationId,
+                blob: voicePayload.blob,
+                fileName: voicePayload.fileName,
+                contentType: voicePayload.contentType,
+                durationMs: voicePayload.durationMs,
+                waveformPeaks: voicePayload.waveformPeaks,
+                replyTo: replySnapshot
+            });
+        },
+        onDockStateChange: () => {
+            if (mediaUploader && typeof mediaUploader.closeMenu === 'function') {
+                mediaUploader.closeMenu();
+            }
+        },
+        onError: (msg) => composer?.showActionError(msg)
+    });
+    voiceRecorder.init();
+    composer.registerTransientResetHook(() => voiceRecorder.forceAbortAndWipe());
 
     function markVisibleIncoming() {
         if (!state.activeConversationId || state.pendingConversationId !== null) return;
@@ -436,6 +502,7 @@ export function initChatShell(overrides = {}) {
     }
 
     let pendingConfirmForm = null;
+    let pendingConfirmResolve = null;
     let lastConfirmFocusedEl = null;
     let createdFallbackConfirmModal = null;
 
@@ -446,8 +513,10 @@ export function initChatShell(overrides = {}) {
         return !!(modal && modal.classList && !modal.classList.contains('hidden'));
     }
 
-    function closeChatConfirmModal({ restoreFocus = true } = {}) {
+    function closeChatConfirmModal({ restoreFocus = true, accepted = false } = {}) {
         pendingConfirmForm = null;
+        const resolver = pendingConfirmResolve;
+        pendingConfirmResolve = null;
         const restoreEl = restoreFocus ? lastConfirmFocusedEl : null;
         lastConfirmFocusedEl = null;
         const modal = typeof document !== 'undefined' && typeof document.getElementById === 'function'
@@ -457,6 +526,39 @@ export function initChatShell(overrides = {}) {
         if (restoreEl && typeof restoreEl.focus === 'function' && restoreEl.isConnected !== false) {
             restoreEl.focus();
         }
+        if (typeof resolver === 'function') {
+            resolver(Boolean(accepted));
+        }
+    }
+
+    function confirmAsync({ title = 'Confirm action', message = '', acceptLabel = 'Confirm' } = {}) {
+        if (pendingConfirmResolve) {
+            return Promise.resolve(false);
+        }
+        const modal = ensureChatConfirmModal();
+        if (!modal) {
+            return Promise.resolve(true);
+        }
+        pendingConfirmForm = null;
+        lastConfirmFocusedEl = typeof document !== 'undefined' ? document.activeElement : null;
+
+        const titleEl = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-title') : null;
+        const msgEl = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-message') : null;
+        const cancelBtn = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-cancel-btn') : null;
+        const acceptBtn = typeof document.getElementById === 'function' ? document.getElementById('chat-confirm-accept-btn') : null;
+        if (titleEl) titleEl.textContent = title;
+        if (msgEl) msgEl.textContent = message;
+        if (acceptBtn) acceptBtn.textContent = acceptLabel;
+        if (modal.classList) modal.classList.remove('hidden');
+        if (cancelBtn && typeof cancelBtn.focus === 'function') {
+            cancelBtn.focus();
+        } else if (acceptBtn && typeof acceptBtn.focus === 'function') {
+            acceptBtn.focus();
+        }
+
+        return new Promise((resolve) => {
+            pendingConfirmResolve = resolve;
+        });
     }
 
     router = createChatRouter({
@@ -465,8 +567,24 @@ export function initChatShell(overrides = {}) {
         renderer: messageRenderer,
         hooks: {
             getDraftText: () => composer.getText(),
+            confirmBeforeSwitch: async () => {
+                if (!voiceRecorder || !voiceRecorder.isDirty()) {
+                    return true;
+                }
+                const discardConfirmed = await confirmAsync({
+                    title: 'Discard unsent voice recording?',
+                    message: 'You have an unsent voice recording in this chat. Switching chats will discard it.',
+                    acceptLabel: 'Discard'
+                });
+                if (discardConfirmed && voiceRecorder) {
+                    voiceRecorder.forceAbortAndWipe();
+                }
+                return discardConfirmed;
+            },
             onBeforeSwitch: (_prevId, nextId) => {
                 closeChatConfirmModal({ restoreFocus: false });
+                if (voicePlayer) voicePlayer.stopAllPlayback();
+                if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
                 bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 typingEmitter.resetForSwitch();
@@ -516,6 +634,8 @@ export function initChatShell(overrides = {}) {
             onSwitchToEmpty: (prevId) => {
                 bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
+                if (voicePlayer) voicePlayer.stopAllPlayback();
+                if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
                 setActiveRow(null);
                 mediaLightbox.resetForSwitch();
                 if (stickerPicker) {
@@ -530,6 +650,8 @@ export function initChatShell(overrides = {}) {
             },
             onSwitchError: () => {
                 closeChatConfirmModal({ restoreFocus: false });
+                if (voicePlayer) voicePlayer.stopAllPlayback();
+                if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
                 bottomScrollPinner.disarm();
                 disarmTopPaginationObserver();
                 setActiveRow(null);
@@ -568,6 +690,7 @@ export function initChatShell(overrides = {}) {
         setDocumentBaseTitle(initialName ? `${initialName} - A♡S Messenger` : DEFAULT_SHELL_TITLE);
         composer.applyConversationPolicy(state.activeMeta);
         messageRenderer.hydrateMediaElements(document.getElementById('messages-container'));
+        if (voicePlayer) voicePlayer.hydrateRoot(document.getElementById('messages-container'));
         hydrateStickerImages(document.getElementById('messages-container'));
         mediaUploader.renderPendingJobsForConversation(state.activeConversationId);
         messageRenderer.scrollToBottom(false);
@@ -719,17 +842,23 @@ export function initChatShell(overrides = {}) {
         const acceptBtn = typeof e.target.closest === 'function'
             ? e.target.closest('#chat-confirm-accept-btn')
             : (e.target.id === 'chat-confirm-accept-btn' ? e.target : null);
-        if (acceptBtn && pendingConfirmForm) {
+        if (acceptBtn) {
             if (typeof e.preventDefault === 'function') e.preventDefault();
-            const confirmedForm = pendingConfirmForm;
-            closeChatConfirmModal({ restoreFocus: false });
-            if (typeof confirmedForm.setAttribute === 'function') {
-                confirmedForm.setAttribute('data-confirm-bypass', 'true');
+            if (pendingConfirmResolve) {
+                closeChatConfirmModal({ restoreFocus: false, accepted: true });
+                return;
             }
-            if (typeof confirmedForm.requestSubmit === 'function') {
-                confirmedForm.requestSubmit();
-            } else if (typeof confirmedForm.submit === 'function') {
-                confirmedForm.submit();
+            if (pendingConfirmForm) {
+                const confirmedForm = pendingConfirmForm;
+                closeChatConfirmModal({ restoreFocus: false, accepted: true });
+                if (typeof confirmedForm.setAttribute === 'function') {
+                    confirmedForm.setAttribute('data-confirm-bypass', 'true');
+                }
+                if (typeof confirmedForm.requestSubmit === 'function') {
+                    confirmedForm.requestSubmit();
+                } else if (typeof confirmedForm.submit === 'function') {
+                    confirmedForm.submit();
+                }
             }
         }
     };
@@ -794,8 +923,22 @@ export function initChatShell(overrides = {}) {
     if (loadOlderRetryBtnEl && typeof loadOlderRetryBtnEl.addEventListener === 'function') {
         loadOlderRetryBtnEl.addEventListener('click', onManualLoadOlderClick);
     }
+    const onBeforeUnloadForVoice = (e) => {
+        if (voiceRecorder && voiceRecorder.isDirty()) {
+            e.preventDefault();
+            e.returnValue = '';
+        }
+    };
+
+    const onPageHideForVoice = () => {
+        if (voiceRecorder) voiceRecorder.forceAbortAndWipe();
+        if (voicePlayer) voicePlayer.stopAllPlayback();
+    };
+
     if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
         window.addEventListener('focus', onWindowFocus);
+        window.addEventListener('beforeunload', onBeforeUnloadForVoice);
+        window.addEventListener('pagehide', onPageHideForVoice);
     }
     if (typeof document.addEventListener === 'function') {
         document.addEventListener('visibilitychange', onVisibilityChange);
@@ -825,6 +968,8 @@ export function initChatShell(overrides = {}) {
         }
         if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
             window.removeEventListener('focus', onWindowFocus);
+            window.removeEventListener('beforeunload', onBeforeUnloadForVoice);
+            window.removeEventListener('pagehide', onPageHideForVoice);
         }
         if (typeof document.removeEventListener === 'function') {
             document.removeEventListener('visibilitychange', onVisibilityChange);
@@ -838,6 +983,11 @@ export function initChatShell(overrides = {}) {
         }
         createdFallbackConfirmModal = null;
         composer.destroy();
+        if (voiceRecorder) voiceRecorder.destroy();
+        if (voicePlayer) voicePlayer.destroy();
+        if (typeof messageRenderer.setVoicePlayerCoordinator === 'function') {
+            messageRenderer.setVoicePlayerCoordinator(null);
+        }
         router.destroy();
         typingEmitter.destroy();
         typingReceiver.destroy();
@@ -868,6 +1018,8 @@ export function initChatShell(overrides = {}) {
         composer,
         mediaUploader,
         mediaLightbox,
+        voicePlayer,
+        voiceRecorder,
         signalrClient,
         handleSessionExpired,
         destroy

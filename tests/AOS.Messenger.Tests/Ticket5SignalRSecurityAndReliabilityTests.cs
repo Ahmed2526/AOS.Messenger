@@ -55,8 +55,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
         var userB = UserId.New();
         var conv = Conversation.Create(userA, userB, DateTimeOffset.UtcNow, ConversationId.New());
 
-        var convPersistence = new TestConversationPersistence(conv);
         var blockPersistence = new TestBlockPersistence();
+        var convPersistence = new TestConversationPersistence(conv, blockPersistence);
 
         var notifier = new SignalRRealtimeNotifier(hubContext, convPersistence, blockPersistence, logger);
 
@@ -113,7 +113,7 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
         // Broadcast 3 (different unblocked conversation): direct receipt & typing succeed
         var userC = UserId.New();
         var unblockedConv = Conversation.Create(userA, userC, DateTimeOffset.UtcNow, ConversationId.New());
-        var unblockedNotifier = new SignalRRealtimeNotifier(hubContext, new TestConversationPersistence(unblockedConv), blockPersistence, logger);
+        var unblockedNotifier = new SignalRRealtimeNotifier(hubContext, new TestConversationPersistence(unblockedConv, blockPersistence), blockPersistence, logger);
 
         await unblockedNotifier.NotifyReceiptUpdatedAsync(userA, new ReceiptUpdateDto(unblockedConv.Id.Value, userC.Value, 5, DateTimeOffset.UtcNow, "delivered"));
         await unblockedNotifier.NotifyTypingAsync(userA, new TypingIndicatorDto(unblockedConv.Id.Value, userC.Value, true));
@@ -772,10 +772,12 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
     private sealed class TestConversationPersistence : IConversationPersistence
     {
         private readonly Conversation _conversation;
+        private readonly IBlockPersistence? _blockPersistence;
 
-        public TestConversationPersistence(Conversation conversation)
+        public TestConversationPersistence(Conversation conversation, IBlockPersistence? blockPersistence = null)
         {
             _conversation = conversation;
+            _blockPersistence = blockPersistence;
         }
 
         public Task<Conversation?> GetByIdAsync(ConversationId id, CancellationToken ct = default) =>
@@ -825,6 +827,19 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             Task.FromResult<UserId?>(_conversation.Id == conversationId && _conversation.HasParticipant(senderId)
                 ? _conversation.GetOtherParticipant(senderId)
                 : null);
+
+        public async Task<bool> AreAuthorizedDirectPeersAsync(ConversationId conversationId, UserId userA, UserId userB, CancellationToken ct = default)
+        {
+            if (_conversation.Id != conversationId ||
+                userA == userB ||
+                !_conversation.HasParticipant(userA) ||
+                !_conversation.HasParticipant(userB))
+            {
+                return false;
+            }
+
+            return _blockPersistence is null || !await _blockPersistence.IsBlockedBidirectionalAsync(userA, userB, ct);
+        }
     }
 
     private sealed class TestBlockPersistence : IBlockPersistence
@@ -911,6 +926,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
 
         public Task NotifyReceiptUpdatedAsync(UserId recipientUserId, ReceiptUpdateDto receipt, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyTypingAsync(UserId recipientUserId, TypingIndicatorDto typing, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageEditedAsync(ConversationId conversationId, MessageEditedDto message, CancellationToken ct = default) => Task.CompletedTask;
         public Task NotifyMessageDeletedForEveryoneAsync(ConversationId conversationId, MessageDeletedForEveryoneDto message, CancellationToken ct = default) => Task.CompletedTask;
@@ -942,6 +959,8 @@ public sealed class Ticket5SignalRSecurityAndReliabilityTests : IClassFixture<Sq
             ReceivedTypingIndicators.Add(typing);
             return Task.CompletedTask;
         }
+        public Task ReceiveRecordingIndicator(RecordingIndicatorDto recording) => Task.CompletedTask;
+        public Task ReceiveVoicePlayed(VoicePlayedDto played) => Task.CompletedTask;
         public Task ReceivePresenceChanged(UserPresenceDto presence) => Task.CompletedTask;
         public Task ReceiveMessageEdited(MessageEditedDto message) => Task.CompletedTask;
         public Task ReceiveMessageDeletedForEveryone(MessageDeletedForEveryoneDto message) => Task.CompletedTask;

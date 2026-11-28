@@ -32,6 +32,11 @@ import {
     applyInitialStickerSrc,
     hydrateStickerImages
 } from './sticker-picker.js';
+import {
+    createVoiceBubbleElement,
+    formatVoiceDuration,
+    teardownRowAudio
+} from './voice-player.js';
 
 const MEDIA_URL_CACHE_TTL_MS = 8 * 60 * 1000;
 const MEDIA_URL_SAFETY_MARGIN_MS = 60 * 1000;
@@ -43,6 +48,15 @@ let mediaUrlCacheEpoch = 0;
 const activeMediaObservers = new Set();
 const videoLoadHandlers = new WeakMap();
 let sharedVideoObserver = null;
+let voicePlayerCoordinator = null;
+
+export function setVoicePlayerCoordinator(coordinator) {
+    voicePlayerCoordinator = coordinator || null;
+}
+
+export function getVoicePlayerCoordinator() {
+    return voicePlayerCoordinator;
+}
 
 export function disconnectActiveMediaObservers() {
     for (const obs of activeMediaObservers) {
@@ -98,6 +112,7 @@ export function teardownRowVideos(rootEl) {
             if (typeof video.load === 'function') video.load();
         } catch {}
     }
+    teardownRowAudio(rootEl);
 }
 
 function hasVisibleMessageText(value) {
@@ -158,7 +173,12 @@ export function formatMessagePreview(message, maxGraphemes = 100) {
     if (rawAttachments.length === 1) {
         if (firstKind === 'image') return '📷 Photo';
         if (firstKind === 'video') return '🎬 Video';
-        if (firstKind === 'voice') return '🎤 Voice message';
+        if (firstKind === 'voice') {
+            const durMs = rawAttachments[0]?.durationMs ?? rawAttachments[0]?.DurationMs ?? null;
+            return durMs && Number(durMs) > 0
+                ? `🎤 Voice message (${formatVoiceDuration(durMs)})`
+                : '🎤 Voice message';
+        }
         const fileName = String(rawAttachments[0]?.fileName ?? rawAttachments[0]?.FileName ?? '').trim() || 'Attachment';
         return truncateGraphemes(`📎 ${fileName}`, maxGraphemes);
     }
@@ -386,6 +406,10 @@ export function hydrateMediaElements(rootEl, { getMediaUrlFn = getMediaDownloadU
                 }
             });
         }
+    }
+
+    if (voicePlayerCoordinator && typeof voicePlayerCoordinator.hydrateRoot === 'function') {
+        voicePlayerCoordinator.hydrateRoot(rootEl);
     }
 }
 
@@ -629,6 +653,7 @@ export function applyMessageDeletedForEveryone(row, msgId) {
         row.setAttribute('data-deleted', 'true');
         row.setAttribute('data-has-attachments', 'false');
         row.setAttribute('data-is-sticker', 'false');
+        row.setAttribute('data-is-voice', 'false');
         row.setAttribute('data-message-preview', 'This message was deleted');
 
         if (typeof row.querySelectorAll === 'function') {
@@ -813,7 +838,7 @@ export function resolveReceiptStatus(messageId, peerWatermarks = null) {
  * @param {object|null} peerWatermarks - Optional peer watermarks
  * @returns {HTMLElement} Message bubble row element
  */
-export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null, { eagerMedia = false } = {}) {
+export function createMessageBubbleElement(message, currentUserId, peerWatermarks = null, { eagerMedia = false, deferHydration = false } = {}) {
     if (typeof document === 'undefined') {
         return null;
     }
@@ -835,6 +860,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     const rawSticker = !message.isDeletedForEveryone ? (message.sticker ?? message.Sticker ?? null) : null;
     const stickerId = rawSticker ? normalizeIdValue(rawSticker.id ?? rawSticker.Id) : '';
     const isSticker = Boolean(rawSticker && stickerId);
+    const isVoice = hasAttachments && attachments.some(a => String(a?.kind ?? a?.Kind ?? '').toLowerCase() === 'voice');
     const formattedPreview = formatMessagePreview(message);
 
     // Root row container
@@ -846,6 +872,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
     row.setAttribute('data-deleted', message.isDeletedForEveryone ? 'true' : 'false');
     row.setAttribute('data-has-attachments', hasAttachments ? 'true' : 'false');
     row.setAttribute('data-is-sticker', isSticker ? 'true' : 'false');
+    row.setAttribute('data-is-voice', isVoice ? 'true' : 'false');
     row.setAttribute('data-message-preview', formattedPreview);
     if (message.createdAtUtc) {
         row.setAttribute('data-created-at', message.createdAtUtc);
@@ -1091,6 +1118,17 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
                     wrap.appendChild(fallback);
 
                     mediaContainer.appendChild(wrap);
+                } else if (kind === 'voice') {
+                    const voiceCard = createVoiceBubbleElement({
+                        conversationId: convId,
+                        messageId: id,
+                        mediaId,
+                        durationMs: att.durationMs ?? att.DurationMs ?? 0,
+                        waveformPeaks: att.waveformPeaks ?? att.WaveformPeaks ?? null,
+                        playedAtUtc: att.playedAtUtc ?? att.PlayedAtUtc ?? null,
+                        isOutgoing
+                    });
+                    mediaContainer.appendChild(voiceCard);
                 } else {
                     const docBtn = document.createElement('button');
                     docBtn.type = 'button';
@@ -1272,8 +1310,8 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
             actionsBar.appendChild(favBtn);
         }
 
-        // Edit button (sender only, never on stickers)
-        if (isOutgoing && !isSticker) {
+        // Edit button (sender only, never on stickers or voice messages)
+        if (isOutgoing && !isSticker && !isVoice) {
             const editBtn = document.createElement('button');
             editBtn.type = 'button';
             editBtn.setAttribute('data-action', 'edit');
@@ -1309,7 +1347,7 @@ export function createMessageBubbleElement(message, currentUserId, peerWatermark
         }
     }
 
-    if (hasAttachments) {
+    if (hasAttachments && !deferHydration) {
         hydrateMediaElements(row);
     }
     if (isSticker) {
@@ -1510,7 +1548,7 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
         return null;
     }
 
-    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks, { eagerMedia: true });
+    const el = createMessageBubbleElement(message, currentUserId, peerWatermarks, { eagerMedia: true, deferHydration: true });
     if (!el) return null;
 
     const rows = typeof containerEl.querySelectorAll === 'function'
@@ -1535,6 +1573,11 @@ export function insertMessageOrdered(containerEl, message, currentUserId, peerWa
         containerEl.insertBefore(el, insertBeforeNode);
     } else if (typeof containerEl.appendChild === 'function') {
         containerEl.appendChild(el);
+    }
+
+    const rawAttachments = message.attachments ?? message.Attachments;
+    if (!message.isDeletedForEveryone && Array.isArray(rawAttachments) && rawAttachments.length > 0) {
+        hydrateMediaElements(el);
     }
 
     const emptyPlaceholder = document.getElementById('no-messages-placeholder');
@@ -1592,6 +1635,9 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
                 emptyPlaceholder.classList.add('flex');
             }
         }
+        if (voicePlayerCoordinator && typeof voicePlayerCoordinator.hydrateRoot === 'function') {
+            voicePlayerCoordinator.hydrateRoot(containerEl);
+        }
         return;
     }
 
@@ -1607,7 +1653,7 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     for (let i = 0; i < deduped.length; i++) {
         const msg = deduped[i];
         const eagerMedia = (deduped.length - i) <= 6;
-        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { eagerMedia });
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { eagerMedia, deferHydration: true });
         if (el) {
             frag.appendChild(el);
         }
@@ -1616,6 +1662,8 @@ export function renderMessages(containerEl, messages, currentUserId, peerWaterma
     if (frag !== containerEl && typeof containerEl.appendChild === 'function') {
         containerEl.appendChild(frag);
     }
+
+    hydrateMediaElements(containerEl);
 
     if (scrollToEnd) {
         scrollToBottom(false);
@@ -1714,7 +1762,7 @@ export function prependOlderMessages(containerEl, streamEl, messages, currentUse
     for (const msg of sorted) {
         const msgId = getMessageId(msg);
         if (!msgId || isMessageRendered(msgId)) continue;
-        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks);
+        const el = createMessageBubbleElement(msg, currentUserId, peerWatermarks, { deferHydration: true });
         if (el && frag) {
             frag.appendChild(el);
             addedNodes.push(el);
@@ -1990,6 +2038,9 @@ export function clearPane() {
     const containerEl = document.getElementById('messages-container');
     teardownRowVideos(containerEl);
     clearElementChildren(containerEl);
+    if (containerEl && voicePlayerCoordinator && typeof voicePlayerCoordinator.hydrateRoot === 'function') {
+        voicePlayerCoordinator.hydrateRoot(containerEl);
+    }
     if (containerEl) {
         containerEl.setAttribute('data-conversation-id', '');
         containerEl.setAttribute('data-peer-user-id', '');
@@ -2065,6 +2116,9 @@ export function showSafeError(message) {
 export function wipeSensitiveDom() {
     if (typeof document === 'undefined') return;
 
+    if (voicePlayerCoordinator && typeof voicePlayerCoordinator.stopAllPlayback === 'function') {
+        voicePlayerCoordinator.stopAllPlayback();
+    }
     clearMediaUrlCache();
     clearAvatarUrlCache();
     clearStickerUrlCache();
@@ -2109,6 +2163,17 @@ export function wipeSensitiveDom() {
     if (sendBtn) sendBtn.disabled = true;
     const attachBtn = document.getElementById('composer-attach-btn');
     if (attachBtn) attachBtn.disabled = true;
+    const voiceBtn = document.getElementById('composer-voice-btn');
+    if (voiceBtn) voiceBtn.disabled = true;
+    const voiceDock = document.getElementById('composer-voice-dock');
+    if (voiceDock && voiceDock.classList) voiceDock.classList.add('hidden');
+    const previewAudio = document.getElementById('voice-preview-audio');
+    if (previewAudio) {
+        try {
+            if (typeof previewAudio.pause === 'function') previewAudio.pause();
+            if (typeof previewAudio.removeAttribute === 'function') previewAudio.removeAttribute('src');
+        } catch {}
+    }
 
     const replyBanner = document.getElementById('composer-reply-banner');
     if (replyBanner) replyBanner.classList.add('hidden');

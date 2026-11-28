@@ -11,6 +11,22 @@ public sealed record AuthorizedMediaDownloadContext(
     bool IsParticipant,
     Media? Media);
 
+public enum MarkVoicePlayedStatus
+{
+    NotFound = 0,
+    ForbiddenNotParticipant = 1,
+    ForbiddenOwnVoiceMessage = 2,
+    InvalidNotVoiceMedia = 3,
+    AlreadyPlayed = 4,
+    Marked = 5,
+    ForbiddenBlocked = 6
+}
+
+public sealed record MarkVoicePlayedResult(
+    MarkVoicePlayedStatus Status,
+    UserId? UploaderId = null,
+    DateTimeOffset? PlayedAtUtc = null);
+
 /// <summary>
 /// Persistence contract for media quota enforcement, metadata lookups, and lifecycle updates.
 /// </summary>
@@ -44,4 +60,12 @@ public interface IMediaPersistence
         CancellationToken ct = default);
 
     Task UpdateAsync(Media media, CancellationToken ct = default);
+
+    Task<MarkVoicePlayedResult> TryMarkVoicePlayedAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        DateTimeOffset nowUtc,
+        CancellationToken ct = default);
 }

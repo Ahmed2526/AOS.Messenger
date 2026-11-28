@@ -158,6 +158,30 @@ public sealed class MediaController : ControllerBase
         return Ok(result);
     }
 
+    [HttpPost("messages/{messageId:long}/media/{mediaId:guid}/played")]
+    [EnableRateLimiting("receipts")]
+    public async Task<IActionResult> MarkVoicePlayed(
+        Guid conversationId,
+        long messageId,
+        Guid mediaId,
+        CancellationToken ct = default)
+    {
+        SetResourcePolicy();
+        if (_currentUser.Id is null)
+        {
+            return Unauthorized();
+        }
+
+        var result = await _mediaService.MarkVoicePlayedAsync(
+            _currentUser.Id,
+            new ConversationId(conversationId),
+            new MessageId(messageId),
+            new MediaId(mediaId),
+            ct);
+
+        return Ok(result);
+    }
+
     private static bool ParseThumbnailVariant(string? variant)
     {
         if (string.IsNullOrWhiteSpace(variant) || string.Equals(variant.Trim(), "original", StringComparison.OrdinalIgnoreCase))

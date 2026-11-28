@@ -23,6 +23,7 @@ public sealed class MediaService : IMediaService
     private readonly IConversationPersistence _conversationPersistence;
     private readonly IMessagePersistence _messagePersistence;
     private readonly IBlockPersistence _blockPersistence;
+    private readonly IRealtimeNotifier _realtimeNotifier;
     private readonly ILogger<MediaService> _logger;
     private readonly TimeProvider _timeProvider;
     private readonly MediaOptions _options;
@@ -36,7 +37,8 @@ public sealed class MediaService : IMediaService
         IBlockPersistence blockPersistence,
         ILogger<MediaService> logger,
         IOptions<MediaOptions>? options = null,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IRealtimeNotifier? realtimeNotifier = null)
     {
         ArgumentNullException.ThrowIfNull(mediaPersistence);
         ArgumentNullException.ThrowIfNull(mediaStorage);
@@ -52,6 +54,7 @@ public sealed class MediaService : IMediaService
         _conversationPersistence = conversationPersistence;
         _messagePersistence = messagePersistence;
         _blockPersistence = blockPersistence;
+        _realtimeNotifier = realtimeNotifier ?? NullRealtimeNotifier.Instance;
         _logger = logger;
         _options = options?.Value ?? new MediaOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
@@ -84,12 +87,51 @@ public sealed class MediaService : IMediaService
             throw new ForbiddenException("Cannot upload media in a blocked conversation.");
         }
 
-        var sanitizedFileName = MediaConstraints.SanitizeFileName(dto.FileName, dto.ContentType);
-        var (kind, canonicalMime, maxSizeBytes) = MediaConstraints.ResolveAllowedMedia(sanitizedFileName, dto.ContentType);
+        string sanitizedFileName;
+        MediaKind kind;
+        string canonicalMime;
+        long maxSizeBytes;
+        int? voiceDurationMs = null;
+        string? serializedWaveformPeaks = null;
 
-        if (kind == MediaKind.Voice)
+        if (string.IsNullOrWhiteSpace(dto.Kind))
         {
-            throw new DomainException("Voice messages are not supported yet.");
+            if (dto.DurationMs.HasValue)
+            {
+                throw new DomainException("Duration can only be specified for voice uploads.");
+            }
+
+            if (dto.WaveformPeaks is not null)
+            {
+                throw new DomainException("Waveform peaks can only be specified for voice uploads.");
+            }
+
+            sanitizedFileName = MediaConstraints.SanitizeFileName(dto.FileName, dto.ContentType);
+            (kind, canonicalMime, maxSizeBytes) = MediaConstraints.ResolveAllowedMedia(sanitizedFileName, dto.ContentType);
+
+            if (kind == MediaKind.Voice)
+            {
+                throw new DomainException("Voice uploads must specify kind 'voice'.");
+            }
+        }
+        else if (string.Equals(dto.Kind.Trim(), "voice", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!dto.DurationMs.HasValue
+                || dto.DurationMs.Value < MediaConstraints.MinVoiceDurationMs
+                || dto.DurationMs.Value > MediaConstraints.MaxVoiceDurationMs)
+            {
+                throw new DomainException(
+                    $"Voice message duration must be between {MediaConstraints.MinVoiceDurationMs} and {MediaConstraints.MaxVoiceDurationMs} milliseconds.");
+            }
+
+            serializedWaveformPeaks = MediaConstraints.ValidateAndSerializeWaveformPeaks(dto.WaveformPeaks);
+            sanitizedFileName = MediaConstraints.SanitizeVoiceFileName(dto.FileName, dto.ContentType);
+            (kind, canonicalMime, maxSizeBytes) = MediaConstraints.ResolveAllowedVoiceMedia(sanitizedFileName, dto.ContentType);
+            voiceDurationMs = dto.DurationMs.Value;
+        }
+        else
+        {
+            throw new DomainException($"Unsupported media upload kind '{dto.Kind.Trim()}'.");
         }
 
         if (dto.SizeBytes <= 0 || dto.SizeBytes > maxSizeBytes)
@@ -105,7 +147,9 @@ public sealed class MediaService : IMediaService
             sanitizedFileName,
             canonicalMime,
             dto.SizeBytes,
-            nowUtc);
+            nowUtc,
+            durationMs: voiceDurationMs,
+            waveformPeaks: serializedWaveformPeaks);
 
         var created = await _mediaPersistence.TryCreatePendingWithQuotaCheckAsync(
             pendingMedia,
@@ -387,7 +431,7 @@ public sealed class MediaService : IMediaService
             verified.VerifiedSizeBytes,
             verified.Width,
             verified.Height,
-            verified.DurationMs,
+            verified.DurationMs ?? media.DurationMs,
             uploadedAtUtc,
             thumbnailKey,
             thumbnailContentType,
@@ -620,6 +664,77 @@ public sealed class MediaService : IMediaService
             sizeBytes);
     }
 
+    public async Task<VoicePlayedDto> MarkVoicePlayedAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(callerId);
+        ArgumentNullException.ThrowIfNull(conversationId);
+        ArgumentNullException.ThrowIfNull(messageId);
+        ArgumentNullException.ThrowIfNull(mediaId);
+
+        var nowUtc = _timeProvider.GetUtcNow();
+        var result = await _mediaPersistence.TryMarkVoicePlayedAsync(
+            callerId,
+            conversationId,
+            messageId,
+            mediaId,
+            nowUtc,
+            ct);
+
+        switch (result.Status)
+        {
+            case MarkVoicePlayedStatus.NotFound:
+                throw new NotFoundException("Media", mediaId.Value);
+            case MarkVoicePlayedStatus.ForbiddenNotParticipant:
+                throw new ForbiddenException("User is not a participant in this conversation.");
+            case MarkVoicePlayedStatus.ForbiddenBlocked:
+                throw new ForbiddenException("Cannot update voice playback status in a blocked conversation.");
+            case MarkVoicePlayedStatus.ForbiddenOwnVoiceMessage:
+                throw new ForbiddenException("Cannot mark your own voice message as played.");
+            case MarkVoicePlayedStatus.InvalidNotVoiceMedia:
+                throw new DomainException("Only voice messages can be marked as played.");
+            case MarkVoicePlayedStatus.AlreadyPlayed:
+            case MarkVoicePlayedStatus.Marked:
+                break;
+            default:
+                throw new InvalidOperationException($"Unexpected mark-voice-played status '{result.Status}'.");
+        }
+
+        var dto = new VoicePlayedDto(
+            conversationId.Value,
+            messageId.Value,
+            mediaId.Value,
+            callerId.Value,
+            result.PlayedAtUtc ?? nowUtc);
+
+        if (result.Status == MarkVoicePlayedStatus.Marked && result.UploaderId is not null)
+        {
+            try
+            {
+                await _realtimeNotifier.NotifyVoicePlayedAsync(
+                    conversationId,
+                    callerId,
+                    result.UploaderId,
+                    dto,
+                    CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Failed to broadcast voice played notification for media {MediaId} in conversation {ConversationId}.",
+                    mediaId.Value,
+                    conversationId.Value);
+            }
+        }
+
+        return dto;
+    }
+
     private async Task<MediaAttachmentDto?> FailAndCleanStagingAsync(
         Media media,
         MediaId mediaId,
@@ -718,6 +833,10 @@ public sealed class MediaService : IMediaService
             media.Height,
             media.DurationMs,
             media.DisplayOrder,
-            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey));
+            HasThumbnail: !string.IsNullOrWhiteSpace(media.ThumbnailObjectKey),
+            WaveformPeaks: media.Kind == MediaKind.Voice
+                ? MediaConstraints.ParseWaveformPeaks(media.WaveformPeaks)
+                : null,
+            PlayedAtUtc: media.Kind == MediaKind.Voice ? media.PlayedAtUtc : null);
     }
 }

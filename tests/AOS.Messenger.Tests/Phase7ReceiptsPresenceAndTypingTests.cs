@@ -1335,6 +1335,9 @@ public sealed class Phase7ReceiptsPresenceAndTypingTests : IClassFixture<SqlTest
             return Task.CompletedTask;
         }
 
+        public Task NotifyRecordingAsync(UserId recipientUserId, RecordingIndicatorDto recording, CancellationToken ct = default) => Task.CompletedTask;
+        public Task NotifyVoicePlayedAsync(ConversationId conversationId, UserId callerUserId, UserId uploaderUserId, VoicePlayedDto played, CancellationToken ct = default) => Task.CompletedTask;
+
         public Task NotifyPresenceChangedAsync(IReadOnlyList<UserId> recipientUserIds, UserPresenceDto presence, CancellationToken ct = default)
         {
             PresenceChanges.Add((recipientUserIds, presence));

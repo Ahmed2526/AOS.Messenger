@@ -34,4 +34,11 @@ public interface IMediaService
         bool forceDownload = false,
         bool thumbnail = false,
         CancellationToken ct = default);
+
+    Task<VoicePlayedDto> MarkVoicePlayedAsync(
+        UserId callerId,
+        ConversationId conversationId,
+        MessageId messageId,
+        MediaId mediaId,
+        CancellationToken ct = default);
 }
